@@ -2,3 +2,4 @@ python-binance>=1.0.19
 pandas>=2.0.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
+websockets>=12.0

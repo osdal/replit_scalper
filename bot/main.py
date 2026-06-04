@@ -109,7 +109,7 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         )
 
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
-    await start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle)
+    await start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle, logger=log)
 
 
 if __name__ == "__main__":

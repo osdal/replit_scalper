@@ -1,10 +1,14 @@
 import asyncio
-from datetime import datetime
-from typing import Callable, Optional
+import json
+import logging
+from typing import Callable, Coroutine, Optional
 
 import pandas as pd
-from binance import AsyncClient, BinanceSocketManager
+import websockets
+from binance import AsyncClient
 from binance.enums import HistoricalKlinesType
+
+FUTURES_WS_URL = "wss://fstream.binance.com/ws"
 
 
 async def get_historical_klines(
@@ -53,23 +57,42 @@ async def start_kline_socket(
     client: AsyncClient,
     symbol: str,
     interval: str,
-    on_candle_close: Callable[[pd.Series], None],
+    on_candle_close: Callable,
+    logger: Optional[logging.Logger] = None,
+    reconnect_delay: int = 5,
 ) -> None:
-    bm = BinanceSocketManager(client)
-    async with bm.futures_kline_socket(symbol=symbol, interval=interval) as stream:
-        while True:
-            msg = await stream.recv()
-            if msg is None:
-                continue
-            kline = msg.get("k", {})
-            if not kline.get("x"):
-                continue
-            candle = pd.Series({
-                "open_time": pd.to_datetime(kline["t"], unit="ms"),
-                "open": float(kline["o"]),
-                "high": float(kline["h"]),
-                "low": float(kline["l"]),
-                "close": float(kline["c"]),
-                "volume": float(kline["v"]),
-            })
-            on_candle_close(candle)
+    stream = f"{symbol.lower()}@kline_{interval}"
+    url = f"{FUTURES_WS_URL}/{stream}"
+
+    while True:
+        try:
+            if logger:
+                logger.info(f"WebSocket connecting | {url}")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                if logger:
+                    logger.info("WebSocket connected")
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    kline = msg.get("k", {})
+                    if not kline.get("x"):
+                        continue
+                    candle = pd.Series({
+                        "open_time": pd.to_datetime(kline["t"], unit="ms"),
+                        "open":      float(kline["o"]),
+                        "high":      float(kline["h"]),
+                        "low":       float(kline["l"]),
+                        "close":     float(kline["c"]),
+                        "volume":    float(kline["v"]),
+                    })
+                    result = on_candle_close(candle)
+                    if asyncio.iscoroutine(result):
+                        await result
+
+        except (websockets.ConnectionClosed, websockets.WebSocketException) as e:
+            if logger:
+                logger.warning(f"WebSocket disconnected: {e} — reconnecting in {reconnect_delay}s")
+        except Exception as e:
+            if logger:
+                logger.error(f"WebSocket error: {e} — reconnecting in {reconnect_delay}s")
+
+        await asyncio.sleep(reconnect_delay)
