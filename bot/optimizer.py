@@ -58,7 +58,8 @@ def make_trial_config(base_cfg: Config, trial: optuna.Trial) -> Config:
     ema_slow = trial.suggest_int("ema_slow", ema_fast + 3, 55)
     sl_pct = trial.suggest_float("sl_pct", 0.2, 1.5, step=0.05)
     tp1_pct = trial.suggest_float("tp1_pct", 0.2, 1.0, step=0.05)
-    tp2_pct = trial.suggest_float("tp2_pct", tp1_pct + 0.1, 2.5, step=0.1)
+    tp2_min = round(tp1_pct + 0.1, 2)
+    tp2_pct = trial.suggest_float("tp2_pct", tp2_min, 2.5, step=0.1)
     volume_multiplier = trial.suggest_float("volume_multiplier", 1.0, 2.5, step=0.1)
     tp1_close_pct = trial.suggest_int("tp1_close_pct", 30, 70, step=10)
 
