@@ -6,7 +6,6 @@ from typing import Callable, Coroutine, Optional
 import pandas as pd
 import websockets
 from binance import AsyncClient
-from binance.enums import HistoricalKlinesType
 
 FUTURES_WS_URL = "wss://fstream.binance.com/ws"
 
@@ -23,7 +22,6 @@ async def get_historical_klines(
         interval=interval,
         start_str=start,
         end_str=end,
-        klines_type=HistoricalKlinesType.FUTURES,
     )
     return _klines_to_df(klines)
 
