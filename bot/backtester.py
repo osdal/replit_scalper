@@ -162,6 +162,65 @@ async def run_backtest(cfg: Config, client, logger: logging.Logger) -> BacktestS
     return stats
 
 
+async def run_backtest_on_df(
+    df: pd.DataFrame,
+    cfg: Config,
+    logger: logging.Logger,
+) -> BacktestStats:
+    """
+    Same as run_backtest but accepts a pre-downloaded DataFrame.
+    Used by the optimizer to avoid re-fetching data for every trial.
+    """
+    df = calculate_indicators(df, cfg)
+    df.dropna(inplace=True)
+
+    stats = BacktestStats(initial_balance=cfg.paper_balance)
+    balance = cfg.paper_balance
+    tracker = PositionTracker(cfg, logger)
+
+    for i in range(1, len(df)):
+        window = df.iloc[: i + 1]
+        current_candle = df.iloc[i]
+        current_price = float(current_candle["close"])
+        current_time = df.index[i]
+
+        if tracker.has_open_position():
+            hit = tracker.check(current_price)
+            if hit:
+                pos = tracker.position
+                pnl = tracker.apply_hit(hit, current_price)
+                balance += pnl
+                stats.trades.append(
+                    TradeResult(
+                        direction=pos.direction,
+                        entry_price=pos.entry_price,
+                        exit_price=current_price,
+                        qty=pos.total_qty,
+                        pnl=pnl,
+                        exit_reason=hit,
+                        entry_time=pos.entry_timestamp,
+                        exit_time=current_time,
+                    )
+                )
+            continue
+
+        signal = get_signal(window, cfg)
+        if signal is None:
+            continue
+
+        qty = calc_quantity(
+            balance=balance,
+            risk_pct=cfg.risk_pct,
+            sl_pct=cfg.sl_pct,
+            entry_price=signal.entry_price,
+            leverage=cfg.leverage,
+        )
+        tracker.open(signal, round(qty, 6))
+
+    stats.final_balance = balance
+    return stats
+
+
 def _print_stats(stats: BacktestStats, logger: logging.Logger) -> None:
     logger.info("=" * 60)
     logger.info("[BACKTEST] RESULTS")

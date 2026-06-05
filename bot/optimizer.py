@@ -1,11 +1,13 @@
 """
 Optuna-based parameter optimizer for the scalper bot.
 
+Historical data is downloaded ONCE, then reused across all trials.
+
 Usage (from bot/ directory):
     python optimizer.py
-    python optimizer.py --trials 200 --jobs 1
-
-Results are saved to logs/optimization_<timestamp>.csv
+    python optimizer.py --symbol ETHUSDT --timeframe 15m --start 2024-01-01 --end 2024-06-01
+    python optimizer.py --trials 200
+    python optimizer.py --help
 """
 
 import argparse
@@ -18,28 +20,26 @@ from copy import deepcopy
 from datetime import datetime
 
 import optuna
+import pandas as pd
 from binance import AsyncClient
 from dotenv import load_dotenv
 
-from config import load_config, Config
-from backtester import run_backtest, BacktestStats
+from backtester import BacktestStats, run_backtest_on_df
+from config import Config, load_config
 from logger import get_logger
 
 load_dotenv()
-
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+MIN_TRADES = 10
 
 
 def score(stats: BacktestStats) -> float:
     """
-    Composite score that balances profitability and trade count.
-
-    - profit_factor = gross_profit / gross_loss  (>1 = profitable)
-    - Penalizes strategies with too few trades (< MIN_TRADES → score = 0)
-    - score = profit_factor * sqrt(n_trades)
+    profit_factor × sqrt(n_trades)
+    Balances quality and quantity — prevents single lucky trades from winning.
+    Returns 0 if fewer than MIN_TRADES trades.
     """
-    MIN_TRADES = 10
-
     if stats.total_trades < MIN_TRADES:
         return 0.0
 
@@ -54,7 +54,6 @@ def score(stats: BacktestStats) -> float:
 
 
 def make_trial_config(base_cfg: Config, trial: optuna.Trial) -> Config:
-    """Create a Config variant from Optuna trial suggestions."""
     ema_fast = trial.suggest_int("ema_fast", 5, 20)
     ema_slow = trial.suggest_int("ema_slow", ema_fast + 3, 55)
     sl_pct = trial.suggest_float("sl_pct", 0.2, 1.5, step=0.05)
@@ -75,50 +74,17 @@ def make_trial_config(base_cfg: Config, trial: optuna.Trial) -> Config:
     return cfg
 
 
-async def run_trial(base_cfg: Config, trial: optuna.Trial) -> float:
-    api_key = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
-
-    client = await AsyncClient.create(
-        api_key=api_key or None,
-        api_secret=api_secret or None,
-    )
+def build_objective(base_cfg: Config, df_raw: pd.DataFrame):
+    """Returns an Optuna objective that reuses the pre-downloaded DataFrame."""
     silent_log = logging.getLogger("optuna_trial")
     silent_log.setLevel(logging.CRITICAL)
 
-    try:
+    def objective(trial: optuna.Trial) -> float:
         cfg = make_trial_config(base_cfg, trial)
-        stats = await run_backtest(cfg, client, silent_log)
+        stats = asyncio.run(run_backtest_on_df(df_raw.copy(), cfg, silent_log))
         return score(stats)
-    finally:
-        await client.close_connection()
 
-
-def objective(base_cfg: Config) -> optuna.ObjectiveFuncType:
-    def _objective(trial: optuna.Trial) -> float:
-        return asyncio.run(run_trial(base_cfg, trial))
-    return _objective
-
-
-def save_results(study: optuna.Study, out_path: str, base_cfg: Config) -> None:
-    trials = [t for t in study.trials if t.value is not None and t.value > 0]
-    trials.sort(key=lambda t: t.value, reverse=True)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        if not trials:
-            f.write("No profitable trials found.\n")
-            return
-
-        fieldnames = ["rank", "score"] + list(trials[0].params.keys())
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for rank, t in enumerate(trials[:50], start=1):
-            row = {"rank": rank, "score": f"{t.value:.4f}"}
-            row.update({k: v for k, v in t.params.items()})
-            writer.writerow(row)
-
-    print(f"\nTop results saved → {out_path}")
+    return objective
 
 
 def print_top(study: optuna.Study, n: int = 10) -> None:
@@ -126,79 +92,162 @@ def print_top(study: optuna.Study, n: int = 10) -> None:
     trials.sort(key=lambda t: t.value, reverse=True)
 
     if not trials:
-        print("\nNo profitable parameter combinations found.")
-        print("Try: wider backtest period, different symbol, or more trials.")
+        print("\n  No profitable combinations found.")
+        print("  Try: longer date range, different symbol/timeframe, or more trials.")
         return
 
-    print(f"\n{'=' * 70}")
-    print(f"  TOP {min(n, len(trials))} RESULTS")
-    print(f"{'=' * 70}")
     best = trials[0]
-    print(f"  Best score: {best.value:.4f}")
+    print(f"\n{'=' * 72}")
+    print(f"  TOP {min(n, len(trials))} RESULTS  (out of {len(trials)} profitable trials)")
+    print(f"{'=' * 72}")
     print(f"  Best params:")
     for k, v in best.params.items():
         print(f"    {k:25s} = {v}")
-    print(f"{'=' * 70}")
-    print(f"  Rank | Score  | ema_fast | ema_slow | sl_pct | tp1_pct | tp2_pct | vol_mult | tp1_close%")
-    print(f"  {'-' * 95}")
+    print(f"  Best score: {best.value:.4f}")
+    print(f"{'=' * 72}")
+    header = f"  {'Rank':>4}  {'Score':>6}  {'EMA_F':>5}  {'EMA_S':>5}  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'Vol×':>5}  {'TP1cl%':>6}"
+    print(header)
+    print(f"  {'-' * 66}")
     for rank, t in enumerate(trials[:n], start=1):
         p = t.params
         print(
-            f"  {rank:4d} | {t.value:6.3f} | "
-            f"{p.get('ema_fast', '-'):8} | {p.get('ema_slow', '-'):8} | "
-            f"{p.get('sl_pct', '-'):6} | {p.get('tp1_pct', '-'):7} | "
-            f"{p.get('tp2_pct', '-'):7} | {p.get('volume_multiplier', '-'):8} | "
-            f"{p.get('tp1_close_pct', '-')}"
+            f"  {rank:>4}  {t.value:>6.3f}  "
+            f"{p.get('ema_fast', '-'):>5}  {p.get('ema_slow', '-'):>5}  "
+            f"{p.get('sl_pct', '-'):>5}  {p.get('tp1_pct', '-'):>5}  "
+            f"{p.get('tp2_pct', '-'):>5}  {p.get('volume_multiplier', '-'):>5}  "
+            f"{p.get('tp1_close_pct', '-'):>6}"
         )
-    print(f"{'=' * 70}")
+    print(f"{'=' * 72}")
+
+
+def save_csv(study: optuna.Study, out_path: str) -> None:
+    trials = [t for t in study.trials if t.value is not None and t.value > 0]
+    trials.sort(key=lambda t: t.value, reverse=True)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        if not trials:
+            f.write("No profitable trials found.\n")
+            return
+        fieldnames = ["rank", "score"] + list(trials[0].params.keys())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for rank, t in enumerate(trials[:100], start=1):
+            row = {"rank": rank, "score": f"{t.value:.4f}"}
+            row.update(t.params)
+            writer.writerow(row)
+
+    print(f"  Full results (top 100) saved → {out_path}")
+
+
+async def download_data(cfg: Config) -> pd.DataFrame:
+    from market_data import get_historical_klines
+    api_key = os.getenv("BINANCE_API_KEY", "")
+    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    client = await AsyncClient.create(api_key=api_key or None, api_secret=api_secret or None)
+    try:
+        df = await get_historical_klines(
+            client=client,
+            symbol=cfg.symbol,
+            interval=cfg.timeframe,
+            start=cfg.backtest_start,
+            end=cfg.backtest_end,
+        )
+        return df
+    finally:
+        await client.close_connection()
+
+
+def estimate_time(n_trials: int, n_candles: int) -> str:
+    ms_per_candle = 0.01
+    sec_per_trial = max(0.05, n_candles * ms_per_candle / 1000)
+    total_sec = sec_per_trial * n_trials
+    if total_sec < 60:
+        return f"~{int(total_sec)} seconds"
+    return f"~{total_sec / 60:.1f} minutes"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Optimize bot parameters with Optuna")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--trials", type=int, default=100, help="Number of Optuna trials (default: 100)")
-    parser.add_argument("--jobs", type=int, default=1, help="Parallel jobs (default: 1)")
+    parser = argparse.ArgumentParser(
+        description="Optimize scalper parameters using Optuna",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python optimizer.py
+  python optimizer.py --symbol ETHUSDT --timeframe 15m --start 2024-01-01 --end 2024-06-01
+  python optimizer.py --trials 300 --symbol BTCUSDT --timeframe 1m --start 2024-03-01 --end 2024-04-01
+        """,
+    )
+    parser.add_argument("--config",     default="config.yaml",  help="Path to config.yaml")
+    parser.add_argument("--symbol",     default=None,            help="Trading pair, e.g. BTCUSDT (overrides config)")
+    parser.add_argument("--timeframe",  default=None,            help="Candle timeframe, e.g. 1m 5m 15m (overrides config)")
+    parser.add_argument("--start",      default=None,            help="Backtest start date YYYY-MM-DD (overrides config)")
+    parser.add_argument("--end",        default=None,            help="Backtest end date YYYY-MM-DD (overrides config)")
+    parser.add_argument("--trials",     type=int, default=100,   help="Number of Optuna trials (default: 100)")
     args = parser.parse_args()
 
-    base_cfg = load_config(args.config)
-    log = get_logger(base_cfg.log_file, "optimize")
+    cfg = load_config(args.config)
+    if args.symbol:
+        cfg.symbol = args.symbol.upper()
+    if args.timeframe:
+        cfg.timeframe = args.timeframe
+    if args.start:
+        cfg.backtest_start = args.start
+    if args.end:
+        cfg.backtest_end = args.end
+    cfg.mode = "backtest"
 
-    log.info(
-        f"Optimizer starting | {base_cfg.symbol} {base_cfg.timeframe} "
-        f"{base_cfg.backtest_start} → {base_cfg.backtest_end} | trials={args.trials}"
-    )
+    log = get_logger(cfg.log_file, "optimize")
+
+    print(f"\n  Symbol:    {cfg.symbol}")
+    print(f"  Timeframe: {cfg.timeframe}")
+    print(f"  Period:    {cfg.backtest_start}  →  {cfg.backtest_end}")
+    print(f"  Trials:    {args.trials}")
+    print(f"\n  Downloading historical data from Binance...")
+
+    df_raw = asyncio.run(download_data(cfg))
+    n_candles = len(df_raw)
+    print(f"  Downloaded {n_candles} candles. Data will be reused across all trials.")
+    print(f"  Estimated time: {estimate_time(args.trials, n_candles)}")
+    print(f"\n  Running optimization...\n")
 
     study = optuna.create_study(
         direction="maximize",
-        study_name="scalper_optimization",
+        study_name="scalper_opt",
         sampler=optuna.samplers.TPESampler(seed=42),
     )
 
-    print(f"\nRunning {args.trials} trials on {base_cfg.symbol} {base_cfg.timeframe} "
-          f"({base_cfg.backtest_start} → {base_cfg.backtest_end})")
-    print("Each trial = full backtest with different parameters. Please wait...\n")
+    completed = [0]
 
     def progress_callback(study: optuna.Study, trial: optuna.FrozenTrial) -> None:
-        n = len(study.trials)
+        completed[0] += 1
+        n = completed[0]
         best = study.best_value if study.best_value is not None else 0.0
-        if n % 10 == 0 or n == 1:
-            print(f"  Trial {n:4d}/{args.trials} | best score so far: {best:.4f}")
+        bar_len = 30
+        filled = int(bar_len * n / args.trials)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"\r  [{bar}] {n}/{args.trials}  best={best:.4f}", end="", flush=True)
 
     study.optimize(
-        objective(base_cfg),
+        build_objective(cfg, df_raw),
         n_trials=args.trials,
-        n_jobs=args.jobs,
+        n_jobs=1,
         callbacks=[progress_callback],
         show_progress_bar=False,
     )
+    print()
 
-    print_top(study)
+    print_top(study, n=10)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = os.path.join(os.path.dirname(base_cfg.log_file), f"optimization_{timestamp}.csv")
-    save_results(study, csv_path, base_cfg)
+    csv_path = os.path.join(os.path.dirname(cfg.log_file), f"optimization_{timestamp}.csv")
+    save_csv(study, csv_path)
 
-    log.info(f"Optimization complete | {len(study.trials)} trials | best score={study.best_value:.4f}")
+    log.info(
+        f"Optimization done | {cfg.symbol} {cfg.timeframe} "
+        f"{cfg.backtest_start}→{cfg.backtest_end} | "
+        f"trials={args.trials} | best={study.best_value:.4f}"
+    )
 
 
 if __name__ == "__main__":
