@@ -219,7 +219,7 @@ Examples:
 
     completed = [0]
 
-    def progress_callback(study: optuna.Study, trial: optuna.FrozenTrial) -> None:
+    def progress_callback(study, trial) -> None:
         completed[0] += 1
         n = completed[0]
         best = study.best_value if study.best_value is not None else 0.0
