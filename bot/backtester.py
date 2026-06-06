@@ -6,7 +6,7 @@ import pandas as pd
 
 from config import Config
 from market_data import get_historical_klines
-from strategy import calculate_indicators, get_signal, Signal
+from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend, Signal
 from position_tracker import PositionTracker
 from order_manager import calc_quantity
 
@@ -91,73 +91,21 @@ async def run_backtest(cfg: Config, client, logger: logging.Logger) -> BacktestS
         start=cfg.backtest_start,
         end=cfg.backtest_end,
     )
-
     logger.info(f"[BACKTEST] Loaded {len(df)} candles")
 
-    df = calculate_indicators(df, cfg)
-    df.dropna(inplace=True)
-
-    stats = BacktestStats(initial_balance=cfg.paper_balance)
-    balance = cfg.paper_balance
-    tracker = PositionTracker(cfg, logger)
-
-    for i in range(1, len(df)):
-        window = df.iloc[: i + 1]
-        current_candle = df.iloc[i]
-        current_price = float(current_candle["close"])
-        current_time = df.index[i]
-
-        if tracker.has_open_position():
-            hit = tracker.check(current_price)
-            if hit:
-                pos = tracker.position
-                pnl = tracker.apply_hit(hit, current_price)
-                balance += pnl
-                stats.trades.append(
-                    TradeResult(
-                        direction=pos.direction,
-                        entry_price=pos.entry_price,
-                        exit_price=current_price,
-                        qty=pos.total_qty,
-                        pnl=pnl,
-                        exit_reason=hit,
-                        entry_time=pos.entry_timestamp,
-                        exit_time=current_time,
-                    )
-                )
-                logger.info(
-                    f"[BACKTEST] Trade closed | {hit} price={current_price:.4f} "
-                    f"pnl={pnl:.4f} balance={balance:.2f}"
-                )
-            continue
-
-        signal = get_signal(window, cfg)
-        if signal is None:
-            continue
-
-        qty = calc_quantity(
-            balance=balance,
-            risk_pct=cfg.risk_pct,
-            sl_pct=cfg.sl_pct,
-            entry_price=signal.entry_price,
-            leverage=cfg.leverage,
+    df_htf: Optional[pd.DataFrame] = None
+    if cfg.htf_enabled:
+        df_htf = await get_historical_klines(
+            client=client,
+            symbol=cfg.symbol,
+            interval=cfg.htf_timeframe,
+            start=cfg.backtest_start,
+            end=cfg.backtest_end,
         )
+        df_htf = calculate_htf_indicators(df_htf, cfg)
+        logger.info(f"[BACKTEST] Loaded {len(df_htf)} HTF candles ({cfg.htf_timeframe})")
 
-        logger.info(
-            f"[BACKTEST] Signal {signal.direction} | entry={signal.entry_price} "
-            f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price}"
-        )
-        tracker.open(signal, round(qty, 6))
-
-    if tracker.has_open_position():
-        pos = tracker.position
-        last_price = float(df.iloc[-1]["close"])
-        pnl = tracker.position.unrealized_pnl(last_price)
-        logger.info(
-            f"[BACKTEST] Open position at end | unrealized_pnl={pnl:.4f}"
-        )
-
-    stats.final_balance = balance
+    stats = await run_backtest_on_df(df, cfg, logger, df_htf=df_htf)
     _print_stats(stats, logger)
     return stats
 
@@ -166,10 +114,11 @@ async def run_backtest_on_df(
     df: pd.DataFrame,
     cfg: Config,
     logger: logging.Logger,
+    df_htf: Optional[pd.DataFrame] = None,
 ) -> BacktestStats:
     """
-    Same as run_backtest but accepts a pre-downloaded DataFrame.
-    Used by the optimizer to avoid re-fetching data for every trial.
+    Runs backtest on a pre-downloaded DataFrame.
+    Optionally accepts a pre-computed HTF DataFrame for trend filtering.
     """
     df = calculate_indicators(df, cfg)
     df.dropna(inplace=True)
@@ -204,7 +153,11 @@ async def run_backtest_on_df(
                 )
             continue
 
-        signal = get_signal(window, cfg)
+        htf_trend: Optional[str] = None
+        if cfg.htf_enabled and df_htf is not None:
+            htf_trend = get_htf_trend(df_htf, current_time)
+
+        signal = get_signal(window, cfg, htf_trend=htf_trend)
         if signal is None:
             continue
 

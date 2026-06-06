@@ -1,5 +1,6 @@
+import dataclasses
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -22,6 +23,10 @@ class Config:
     backtest_end: str
     paper_balance: float
     log_file: str
+    htf_enabled: bool = False
+    htf_timeframe: str = "1h"
+    htf_ema_fast: int = 9
+    htf_ema_slow: int = 21
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")
@@ -39,9 +44,13 @@ class Config:
             raise ValueError("tp1_close_pct must be between 0 and 100")
         if self.ema_fast >= self.ema_slow:
             raise ValueError("ema_fast must be less than ema_slow")
+        if self.htf_enabled and self.htf_ema_fast >= self.htf_ema_slow:
+            raise ValueError("htf_ema_fast must be less than htf_ema_slow")
 
 
 def load_config(path: str = "config.yaml") -> Config:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return Config(**data)
+    valid_fields = {f.name for f in dataclasses.fields(Config)}
+    filtered = {k: v for k, v in data.items() if k in valid_fields}
+    return Config(**filtered)

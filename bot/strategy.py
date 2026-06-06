@@ -24,7 +24,45 @@ def calculate_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return df
 
 
-def get_signal(df: pd.DataFrame, cfg: Config) -> Optional[Signal]:
+def calculate_htf_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Pre-compute EMA on higher timeframe DataFrame."""
+    df = df.copy()
+    df["htf_ema_fast"] = df["close"].ewm(span=cfg.htf_ema_fast, adjust=False).mean()
+    df["htf_ema_slow"] = df["close"].ewm(span=cfg.htf_ema_slow, adjust=False).mean()
+    return df
+
+
+def get_htf_trend(df_htf: pd.DataFrame, timestamp: pd.Timestamp) -> Optional[str]:
+    """
+    Returns 'LONG', 'SHORT', or None based on HTF EMA at the given timestamp.
+    Finds the last HTF candle that closed at or before the working TF candle.
+    """
+    mask = df_htf.index <= timestamp
+    if not mask.any():
+        return None
+    row = df_htf[mask].iloc[-1]
+    if pd.isna(row.get("htf_ema_fast")) or pd.isna(row.get("htf_ema_slow")):
+        return None
+    return "LONG" if row["htf_ema_fast"] > row["htf_ema_slow"] else "SHORT"
+
+
+def get_htf_trend_latest(df_htf: pd.DataFrame) -> Optional[str]:
+    """Returns current HTF trend from the latest available candle."""
+    if df_htf is None or len(df_htf) == 0:
+        return None
+    row = df_htf.iloc[-1]
+    if "htf_ema_fast" not in df_htf.columns:
+        return None
+    if pd.isna(row["htf_ema_fast"]) or pd.isna(row["htf_ema_slow"]):
+        return None
+    return "LONG" if row["htf_ema_fast"] > row["htf_ema_slow"] else "SHORT"
+
+
+def get_signal(
+    df: pd.DataFrame,
+    cfg: Config,
+    htf_trend: Optional[str] = None,
+) -> Optional[Signal]:
     if len(df) < cfg.ema_slow + 2:
         return None
 
@@ -52,6 +90,10 @@ def get_signal(df: pd.DataFrame, cfg: Config) -> Optional[Signal]:
         return None
 
     direction = "LONG" if long_signal else "SHORT"
+
+    if cfg.htf_enabled and htf_trend is not None and htf_trend != direction:
+        return None
+
     entry = curr["close"]
     sl_dist = entry * cfg.sl_pct / 100
     tp1_dist = entry * cfg.tp1_pct / 100

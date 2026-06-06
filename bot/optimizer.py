@@ -75,14 +75,18 @@ def make_trial_config(base_cfg: Config, trial: optuna.Trial) -> Config:
     return cfg
 
 
-def build_objective(base_cfg: Config, df_raw: pd.DataFrame):
+def build_objective(base_cfg: Config, df_raw: pd.DataFrame, df_htf: pd.DataFrame | None = None):
     """Returns an Optuna objective that reuses the pre-downloaded DataFrame."""
+    from strategy import calculate_htf_indicators
     silent_log = logging.getLogger("optuna_trial")
     silent_log.setLevel(logging.CRITICAL)
 
     def objective(trial: optuna.Trial) -> float:
         cfg = make_trial_config(base_cfg, trial)
-        stats = asyncio.run(run_backtest_on_df(df_raw.copy(), cfg, silent_log))
+        precomputed_htf = None
+        if cfg.htf_enabled and df_htf is not None:
+            precomputed_htf = calculate_htf_indicators(df_htf.copy(), cfg)
+        stats = asyncio.run(run_backtest_on_df(df_raw.copy(), cfg, silent_log, df_htf=precomputed_htf))
         return score(stats)
 
     return objective
@@ -141,7 +145,7 @@ def save_csv(study: optuna.Study, out_path: str) -> None:
     print(f"  Full results (top 100) saved → {out_path}")
 
 
-async def download_data(cfg: Config) -> pd.DataFrame:
+async def download_data(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     from market_data import get_historical_klines
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
@@ -154,7 +158,16 @@ async def download_data(cfg: Config) -> pd.DataFrame:
             start=cfg.backtest_start,
             end=cfg.backtest_end,
         )
-        return df
+        df_htf = None
+        if cfg.htf_enabled:
+            df_htf = await get_historical_klines(
+                client=client,
+                symbol=cfg.symbol,
+                interval=cfg.htf_timeframe,
+                start=cfg.backtest_start,
+                end=cfg.backtest_end,
+            )
+        return df, df_htf
     finally:
         await client.close_connection()
 
@@ -206,9 +219,10 @@ Examples:
     print(f"  Trials:    {args.trials}")
     print(f"\n  Downloading historical data from Binance...")
 
-    df_raw = asyncio.run(download_data(cfg))
+    df_raw, df_htf = asyncio.run(download_data(cfg))
     n_candles = len(df_raw)
-    print(f"  Downloaded {n_candles} candles. Data will be reused across all trials.")
+    htf_info = f" + {len(df_htf)} HTF candles ({cfg.htf_timeframe})" if df_htf is not None else ""
+    print(f"  Downloaded {n_candles} candles{htf_info}. Data will be reused across all trials.")
     print(f"  Estimated time: {estimate_time(args.trials, n_candles)}")
     print(f"\n  Running optimization...\n")
 
@@ -230,7 +244,7 @@ Examples:
         print(f"\r  [{bar}] {n}/{args.trials}  best={best:.4f}", end="", flush=True)
 
     study.optimize(
-        build_objective(cfg, df_raw),
+        build_objective(cfg, df_raw, df_htf=df_htf),
         n_trials=args.trials,
         n_jobs=1,
         callbacks=[progress_callback],

@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from config import load_config
 from logger import get_logger
 from market_data import get_recent_klines, start_kline_socket
-from strategy import calculate_indicators, get_signal
+from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest
 from signal_handler import SignalHandler
-from order_manager import OrderManager
+from order_manager import OrderManager, calc_quantity
 from position_tracker import PositionTracker
 from backtester import run_backtest
 
@@ -28,6 +28,8 @@ async def main():
         f"Config | leverage={cfg.leverage}x risk={cfg.risk_pct}% "
         f"SL={cfg.sl_pct}% TP1={cfg.tp1_pct}% TP2={cfg.tp2_pct}% auto={cfg.auto_mode}"
     )
+    if cfg.htf_enabled:
+        log.info(f"HTF filter | {cfg.htf_timeframe} EMA{cfg.htf_ema_fast}/{cfg.htf_ema_slow}")
 
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
@@ -65,7 +67,19 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         limit=max(cfg.ema_slow * 3, 200),
     )
     df_buffer = calculate_indicators(df_buffer, cfg)
-    log.info(f"Loaded {len(df_buffer)} historical candles for warm-up")
+    log.info(f"Loaded {len(df_buffer)} candles for warm-up ({cfg.timeframe})")
+
+    htf_buffer: pd.DataFrame = pd.DataFrame()
+    if cfg.htf_enabled:
+        htf_buffer = await get_recent_klines(
+            client=client,
+            symbol=cfg.symbol,
+            interval=cfg.htf_timeframe,
+            limit=max(cfg.htf_ema_slow * 3, 100),
+        )
+        htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
+        trend = get_htf_trend_latest(htf_buffer)
+        log.info(f"Loaded {len(htf_buffer)} candles for HTF warm-up ({cfg.htf_timeframe}) | trend={trend}")
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
@@ -90,9 +104,13 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                     tracker.apply_hit(hit, current_price)
             return
 
-        signal = get_signal(df_buffer, cfg)
+        htf_trend = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else None
+        signal = get_signal(df_buffer, cfg, htf_trend=htf_trend)
         if signal is None:
             return
+
+        if cfg.htf_enabled:
+            log.debug(f"Signal {signal.direction} | HTF trend={htf_trend} | allowed")
 
         confirmed = await handler.confirm(signal)
         if not confirmed:
@@ -101,17 +119,26 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         entry_price = await order_mgr.open_position(signal)
         if entry_price is not None:
             signal.entry_price = entry_price
-            tracker.open(signal, qty=_calc_qty_from_last_order(cfg, entry_price))
+            qty = round(calc_quantity(
+                cfg.paper_balance, cfg.risk_pct, cfg.sl_pct, entry_price, cfg.leverage
+            ), 3)
+            tracker.open(signal, qty=qty)
 
-    def _calc_qty_from_last_order(cfg, entry_price):
-        from order_manager import calc_quantity
-        balance = cfg.paper_balance
-        return round(
-            calc_quantity(balance, cfg.risk_pct, cfg.sl_pct, entry_price, cfg.leverage), 3
-        )
+    async def on_htf_candle(candle: pd.Series):
+        nonlocal htf_buffer
+        new_row = pd.DataFrame([candle]).set_index("open_time")
+        htf_buffer = pd.concat([htf_buffer, new_row]).tail(300)
+        htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
+        trend = get_htf_trend_latest(htf_buffer)
+        log.info(f"HTF candle closed | {cfg.htf_timeframe} trend={trend}")
 
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
-    await start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle, logger=log)
+
+    tasks = [start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle, logger=log)]
+    if cfg.htf_enabled:
+        tasks.append(start_kline_socket(client, cfg.symbol, cfg.htf_timeframe, on_htf_candle, logger=log))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
