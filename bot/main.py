@@ -17,6 +17,8 @@ from backtester import run_backtest
 
 load_dotenv()
 
+HEARTBEAT_CANDLES = 12  # log alive message every N candles (~1h at 5m TF)
+
 
 async def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
@@ -79,7 +81,12 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         )
         htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
         trend = get_htf_trend_latest(htf_buffer)
-        log.info(f"Loaded {len(htf_buffer)} candles for HTF warm-up ({cfg.htf_timeframe}) | trend={trend}")
+        log.info(
+            f"Loaded {len(htf_buffer)} candles for HTF warm-up "
+            f"({cfg.htf_timeframe}) | trend={trend}"
+        )
+
+    candle_count = [0]
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
@@ -89,6 +96,14 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         df_buffer = calculate_indicators(df_buffer, cfg)
 
         current_price = float(candle["close"])
+        candle_count[0] += 1
+
+        if candle_count[0] % HEARTBEAT_CANDLES == 0:
+            htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
+            log.info(
+                f"Heartbeat | candles={candle_count[0]} "
+                f"price={current_price:.2f} htf_trend={htf_trend_now}"
+            )
 
         if tracker.has_open_position():
             hit = tracker.check(current_price)
@@ -104,14 +119,22 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                     tracker.apply_hit(hit, current_price)
             return
 
-        htf_trend = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else None
-        signal = get_signal(df_buffer, cfg, htf_trend=htf_trend)
-        if signal is None:
+        # Get signal without HTF filter first
+        raw_signal = get_signal(df_buffer, cfg)
+        if raw_signal is None:
             return
 
+        # Apply HTF filter with explicit logging
         if cfg.htf_enabled:
-            log.debug(f"Signal {signal.direction} | HTF trend={htf_trend} | allowed")
-
+            htf_trend = get_htf_trend_latest(htf_buffer)
+            if htf_trend is not None and raw_signal.direction != htf_trend:
+                log.info(
+                    f"Signal {raw_signal.direction} BLOCKED by HTF "
+                    f"| htf_trend={htf_trend} entry={raw_signal.entry_price:.2f}"
+                )
+                return
+        
+        signal = raw_signal
         confirmed = await handler.confirm(signal)
         if not confirmed:
             return
@@ -126,17 +149,22 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
 
     async def on_htf_candle(candle: pd.Series):
         nonlocal htf_buffer
-        new_row = pd.DataFrame([candle]).set_index("open_time")
-        htf_buffer = pd.concat([htf_buffer, new_row]).tail(300)
-        htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
-        trend = get_htf_trend_latest(htf_buffer)
-        log.info(f"HTF candle closed | {cfg.htf_timeframe} trend={trend}")
+        try:
+            new_row = pd.DataFrame([candle]).set_index("open_time")
+            htf_buffer = pd.concat([htf_buffer, new_row]).tail(300)
+            htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
+            trend = get_htf_trend_latest(htf_buffer)
+            log.info(f"HTF candle closed | {cfg.htf_timeframe} trend={trend}")
+        except Exception as e:
+            log.error(f"on_htf_candle error: {e}", exc_info=True)
 
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
     tasks = [start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle, logger=log)]
     if cfg.htf_enabled:
-        tasks.append(start_kline_socket(client, cfg.symbol, cfg.htf_timeframe, on_htf_candle, logger=log))
+        tasks.append(
+            start_kline_socket(client, cfg.symbol, cfg.htf_timeframe, on_htf_candle, logger=log)
+        )
 
     await asyncio.gather(*tasks)
 
