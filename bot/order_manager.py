@@ -25,7 +25,7 @@ def calc_quantity(
 ) -> float:
     risk_amount = balance * risk_pct / 100
     sl_distance_pct = sl_pct / 100
-    quantity = (risk_amount * leverage) / (entry_price * sl_distance_pct)
+    quantity = risk_amount / (entry_price * sl_distance_pct)
     return quantity
 
 
