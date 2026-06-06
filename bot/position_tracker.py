@@ -102,9 +102,12 @@ class PositionTracker:
             p.realized_pnl += pnl
             p.remaining_qty -= tp1_qty
             p.tp1_hit = True
+            old_sl = p.sl_price
+            p.sl_price = p.entry_price
             self.log.info(
                 f"TP1 hit | price={close_price} closed_qty={tp1_qty:.6f} "
-                f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f}"
+                f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
+                f"SL moved to breakeven: {old_sl} → {p.entry_price}"
             )
             return pnl
 

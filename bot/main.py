@@ -83,9 +83,11 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                 if hit == "TP1":
                     tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
                     await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
+                    tracker.apply_hit(hit, current_price)
+                    await order_mgr.move_sl_to_breakeven(pos.direction, pos.entry_price)
                 else:
                     await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
-                tracker.apply_hit(hit, current_price)
+                    tracker.apply_hit(hit, current_price)
             return
 
         signal = get_signal(df_buffer, cfg)

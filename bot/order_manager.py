@@ -107,6 +107,21 @@ class OrderManager:
         else:
             self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
 
+    async def move_sl_to_breakeven(self, direction: str, entry_price: float) -> None:
+        if self.cfg.mode == "live":
+            open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
+            stop_side = _opposite_side(direction)
+            for order in open_orders:
+                if order.get("type") == FUTURE_ORDER_TYPE_STOP_MARKET and order.get("side") == stop_side:
+                    await self.client.futures_cancel_order(
+                        symbol=self.cfg.symbol,
+                        orderId=order["orderId"],
+                    )
+            await self._place_sl(direction, entry_price, qty=None)
+            self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={entry_price}")
+        else:
+            self.log.info(f"[PAPER] Would move SL to breakeven | price={entry_price}")
+
     async def _set_leverage(self) -> None:
         await self.client.futures_change_leverage(
             symbol=self.cfg.symbol,
