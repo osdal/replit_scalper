@@ -17,7 +17,7 @@ from backtester import run_backtest
 
 load_dotenv()
 
-HEARTBEAT_CANDLES = 12  # log alive message every N candles (~1h at 5m TF)
+HEARTBEAT_CANDLES = 3  # log alive message every N candles (~15min at 5m TF)
 
 
 async def main():
