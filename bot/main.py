@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from config import load_config
 from logger import get_logger
-from market_data import get_recent_klines, start_kline_socket, start_multi_kline_socket
+from market_data import get_recent_klines, start_kline_polling
 from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest
 from signal_handler import SignalHandler
 from order_manager import OrderManager, calc_quantity
@@ -160,18 +160,17 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
 
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
+    handlers = {cfg.timeframe: on_candle}
     if cfg.htf_enabled:
-        await start_multi_kline_socket(
-            client=client,
-            symbol=cfg.symbol,
-            handlers={
-                cfg.timeframe: on_candle,
-                cfg.htf_timeframe: on_htf_candle,
-            },
-            logger=log,
-        )
-    else:
-        await start_kline_socket(client, cfg.symbol, cfg.timeframe, on_candle, logger=log)
+        handlers[cfg.htf_timeframe] = on_htf_candle
+
+    await start_kline_polling(
+        client=client,
+        symbol=cfg.symbol,
+        handlers=handlers,
+        logger=log,
+        poll_seconds=10,
+    )
 
 
 if __name__ == "__main__":
