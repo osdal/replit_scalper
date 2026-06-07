@@ -69,11 +69,23 @@ async def start_kline_socket(
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                 if logger:
                     logger.info("WebSocket connected")
+                msg_count = 0
+                closed_count = 0
                 async for raw in ws:
                     msg = json.loads(raw)
                     kline = msg.get("k", {})
+                    msg_count += 1
+                    if msg_count == 1 and logger:
+                        logger.info(f"WS first message received | {interval} x={kline.get('x')}")
+                    if msg_count % 200 == 0 and logger:
+                        logger.info(
+                            f"WS alive | {interval} msgs={msg_count} closed={closed_count}"
+                        )
                     if not kline.get("x"):
                         continue
+                    closed_count += 1
+                    if logger:
+                        logger.info(f"WS candle closed | {interval} #{closed_count}")
                     candle = pd.Series({
                         "open_time": pd.to_datetime(kline["t"], unit="ms"),
                         "open":      float(kline["o"]),
