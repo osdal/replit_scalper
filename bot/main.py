@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from typing import Optional
 
 import pandas as pd
 from binance import AsyncClient
@@ -9,15 +10,78 @@ from dotenv import load_dotenv
 from config import load_config
 from logger import get_logger
 from market_data import get_recent_klines, start_kline_polling
-from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest
+from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest, Signal
 from signal_handler import SignalHandler
 from order_manager import OrderManager
-from position_tracker import PositionTracker
+from position_tracker import PositionTracker, Position
 from backtester import run_backtest
 
 load_dotenv()
 
-HEARTBEAT_CANDLES = 3  # log alive message every N candles (~15min at 5m TF)
+HEARTBEAT_CANDLES = 3
+
+
+async def _sync_position_on_start(
+    cfg, client: AsyncClient, tracker: PositionTracker, log
+) -> None:
+    """
+    При старте в live-режиме проверяет открытые позиции на бирже.
+    Если позиция есть — восстанавливает её в трекере.
+    """
+    if cfg.mode != "live":
+        return
+
+    try:
+        positions = await client.futures_position_information(symbol=cfg.symbol)
+    except Exception as e:
+        log.error(f"[SYNC] Failed to fetch positions: {e}")
+        return
+
+    for p in positions:
+        amt = float(p.get("positionAmt", 0))
+        if amt == 0:
+            continue
+
+        direction = "LONG" if amt > 0 else "SHORT"
+        qty = abs(amt)
+        entry_price = float(p.get("entryPrice", 0))
+
+        if entry_price == 0:
+            log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
+            continue
+
+        # Восстанавливаем уровни SL/TP из конфига относительно цены входа
+        sl_dist  = entry_price * cfg.sl_pct  / 100
+        tp1_dist = entry_price * cfg.tp1_pct / 100
+        tp2_dist = entry_price * cfg.tp2_pct / 100
+
+        if direction == "LONG":
+            sl_price  = entry_price - sl_dist
+            tp1_price = entry_price + tp1_dist
+            tp2_price = entry_price + tp2_dist
+        else:
+            sl_price  = entry_price + sl_dist
+            tp1_price = entry_price - tp1_dist
+            tp2_price = entry_price - tp2_dist
+
+        tracker.position = Position(
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=round(sl_price, 4),
+            tp1_price=round(tp1_price, 4),
+            tp2_price=round(tp2_price, 4),
+            total_qty=qty,
+            remaining_qty=qty,
+        )
+
+        log.info(
+            f"[SYNC] Restored position | {direction} {cfg.symbol} "
+            f"qty={qty} entry={entry_price} "
+            f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f}"
+        )
+        return
+
+    log.info(f"[SYNC] No open position found for {cfg.symbol}")
 
 
 async def main():
@@ -33,7 +97,7 @@ async def main():
     if cfg.htf_enabled:
         log.info(f"HTF filter | {cfg.htf_timeframe} EMA{cfg.htf_ema_fast}/{cfg.htf_ema_slow}")
 
-    api_key = os.getenv("BINANCE_API_KEY", "")
+    api_key    = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
 
     if cfg.mode == "live" and (not api_key or not api_secret):
@@ -58,9 +122,12 @@ async def main():
 
 
 async def _run_live_or_paper(cfg, client: AsyncClient, log):
-    tracker = PositionTracker(cfg, log)
+    tracker  = PositionTracker(cfg, log)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
-    handler = SignalHandler(cfg, log)
+    handler  = SignalHandler(cfg, log)
+
+    # Восстанавливаем позицию с биржи если бот перезапустился
+    await _sync_position_on_start(cfg, client, tracker, log)
 
     df_buffer: pd.DataFrame = await get_recent_klines(
         client=client,
@@ -119,12 +186,10 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                     tracker.apply_hit(hit, current_price)
             return
 
-        # Get signal without HTF filter first
         raw_signal = get_signal(df_buffer, cfg)
         if raw_signal is None:
             return
 
-        # Apply HTF filter with explicit logging
         if cfg.htf_enabled:
             htf_trend = get_htf_trend_latest(htf_buffer)
             if htf_trend is not None and raw_signal.direction != htf_trend:
@@ -133,7 +198,7 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                     f"| htf_trend={htf_trend} entry={raw_signal.entry_price:.2f}"
                 )
                 return
-        
+
         signal = raw_signal
         confirmed = await handler.confirm(signal)
         if not confirmed:
