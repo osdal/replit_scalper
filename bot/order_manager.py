@@ -1,5 +1,6 @@
 import logging
-from typing import Optional
+import math
+from typing import Optional, Tuple
 
 from binance import AsyncClient
 from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, FUTURE_ORDER_TYPE_STOP_MARKET
@@ -29,11 +30,79 @@ def calc_quantity(
     return quantity
 
 
+def _round_step(value: float, step: float) -> float:
+    """Округляет value вниз до шага step."""
+    precision = max(0, round(-math.log10(step)))
+    return round(math.floor(value / step) * step, precision)
+
+
 class OrderManager:
     def __init__(self, cfg: Config, logger: logging.Logger, client: Optional[AsyncClient] = None):
         self.cfg = cfg
         self.log = logger
         self.client = client
+        self._step_size: Optional[float] = None   # кэш stepSize для символа
+        self._price_precision: Optional[int] = None  # кэш точности цены
+
+    async def _get_symbol_filters(self) -> None:
+        """Загружает stepSize и pricePrecision один раз и кэширует."""
+        if self._step_size is not None:
+            return
+        info = await self.client.futures_exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] == self.cfg.symbol:
+                self._price_precision = s.get("pricePrecision", 2)
+                for f in s["filters"]:
+                    if f["filterType"] == "LOT_SIZE":
+                        self._step_size = float(f["stepSize"])
+                        return
+        raise RuntimeError(f"Symbol {self.cfg.symbol} not found in futures_exchange_info")
+
+    async def _adjust_qty(self, qty: float) -> float:
+        """Округляет qty по stepSize символа."""
+        if self.cfg.mode != "live":
+            return round(qty, 3)
+        await self._get_symbol_filters()
+        return _round_step(qty, self._step_size)
+
+    async def _adjust_price(self, price: float) -> float:
+        """Округляет цену по pricePrecision символа."""
+        if self.cfg.mode != "live":
+            return round(price, 4)
+        await self._get_symbol_filters()
+        return round(price, self._price_precision)
+
+    async def _get_fill_price(self, order: dict, fallback: float) -> float:
+        """
+        Извлекает реальную цену исполнения.
+        Binance возвращает avgPrice='0' для маркет-ордеров сразу после создания —
+        в этом случае делаем повторный запрос get_order.
+        """
+        avg = float(order.get("avgPrice", 0))
+        if avg > 0:
+            return avg
+
+        # Пробуем взять из fills (если есть)
+        fills = order.get("fills", [])
+        if fills:
+            total_qty = sum(float(f["qty"]) for f in fills)
+            if total_qty > 0:
+                return sum(float(f["price"]) * float(f["qty"]) for f in fills) / total_qty
+
+        # Запрашиваем исполненный ордер отдельно
+        try:
+            filled = await self.client.futures_get_order(
+                symbol=self.cfg.symbol,
+                orderId=order["orderId"],
+            )
+            avg = float(filled.get("avgPrice", 0))
+            if avg > 0:
+                return avg
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not fetch fill price: {e}")
+
+        self.log.warning(f"[LIVE] Using signal price as fallback: {fallback}")
+        return fallback
 
     async def get_balance(self) -> float:
         if self.cfg.mode == "live":
@@ -45,16 +114,16 @@ class OrderManager:
         else:
             return self.cfg.paper_balance
 
-    async def open_position(self, signal: Signal) -> Optional[float]:
+    async def open_position(self, signal: Signal) -> Optional[Tuple[float, float]]:
         balance = await self.get_balance()
-        qty = calc_quantity(
+        raw_qty = calc_quantity(
             balance=balance,
             risk_pct=self.cfg.risk_pct,
             sl_pct=self.cfg.sl_pct,
             entry_price=signal.entry_price,
             leverage=self.cfg.leverage,
         )
-        qty = round(qty, 3)
+        qty = await self._adjust_qty(raw_qty)
 
         if self.cfg.mode == "live":
             await self._set_leverage()
@@ -64,12 +133,13 @@ class OrderManager:
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
             )
-            entry_price = float(order.get("avgPrice", signal.entry_price))
+            entry_price = await self._get_fill_price(order, signal.entry_price)
             self.log.info(
                 f"[LIVE] Market order placed | {signal.direction} {self.cfg.symbol} "
                 f"qty={qty} entry≈{entry_price}"
             )
-            await self._place_sl(signal.direction, signal.sl_price, qty)
+            sl_price = await self._adjust_price(signal.sl_price)
+            await self._place_sl(signal.direction, sl_price, qty)
             return entry_price, qty
 
         else:
@@ -83,7 +153,8 @@ class OrderManager:
 
     async def close_partial(self, direction: str, qty: float, price: float, reason: str) -> None:
         if self.cfg.mode == "live":
-            order = await self.client.futures_create_order(
+            qty = await self._adjust_qty(qty)
+            await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
                 side=_opposite_side(direction),
                 type=ORDER_TYPE_MARKET,
@@ -96,7 +167,8 @@ class OrderManager:
 
     async def close_full(self, direction: str, qty: float, price: float, reason: str) -> None:
         if self.cfg.mode == "live":
-            order = await self.client.futures_create_order(
+            qty = await self._adjust_qty(qty)
+            await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
                 side=_opposite_side(direction),
                 type=ORDER_TYPE_MARKET,
@@ -117,8 +189,9 @@ class OrderManager:
                         symbol=self.cfg.symbol,
                         orderId=order["orderId"],
                     )
-            await self._place_sl(direction, entry_price, qty=None)
-            self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={entry_price}")
+            sl_price = await self._adjust_price(entry_price)
+            await self._place_sl(direction, sl_price, qty=None)
+            self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={sl_price}")
         else:
             self.log.info(f"[PAPER] Would move SL to breakeven | price={entry_price}")
 
