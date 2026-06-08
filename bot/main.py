@@ -11,7 +11,7 @@ from logger import get_logger
 from market_data import get_recent_klines, start_kline_polling
 from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest
 from signal_handler import SignalHandler
-from order_manager import OrderManager, calc_quantity
+from order_manager import OrderManager
 from position_tracker import PositionTracker
 from backtester import run_backtest
 
@@ -139,12 +139,10 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
         if not confirmed:
             return
 
-        entry_price = await order_mgr.open_position(signal)
-        if entry_price is not None:
+        result = await order_mgr.open_position(signal)
+        if result is not None:
+            entry_price, qty = result
             signal.entry_price = entry_price
-            qty = round(calc_quantity(
-                cfg.paper_balance, cfg.risk_pct, cfg.sl_pct, entry_price, cfg.leverage
-            ), 3)
             tracker.open(signal, qty=qty)
 
     async def on_htf_candle(candle: pd.Series):

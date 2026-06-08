@@ -11,12 +11,13 @@ ema_slow: 39
 volume_ma_period: 20
 volume_multiplier: 1.0
 mode: paper
-auto_mode: false
-backtest_start: "2025-06-01"
-backtest_end: "2026-03-01"
+# mode: backtest
+auto_mode: True
+backtest_start: "2024-09-01"
+backtest_end: "2025-03-01"
 paper_balance: 1000.0
 log_file: logs/bot.log
-htf_enabled: true
+htf_enabled: True
 htf_timeframe: 1h
 htf_ema_fast: 9
 htf_ema_slow: 21

@@ -70,7 +70,7 @@ class OrderManager:
                 f"qty={qty} entry≈{entry_price}"
             )
             await self._place_sl(signal.direction, signal.sl_price, qty)
-            return entry_price
+            return entry_price, qty
 
         else:
             self.log.info(
@@ -79,7 +79,7 @@ class OrderManager:
                 f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} "
                 f"balance={balance:.2f} USDT"
             )
-            return signal.entry_price
+            return signal.entry_price, qty
 
     async def close_partial(self, direction: str, qty: float, price: float, reason: str) -> None:
         if self.cfg.mode == "live":
