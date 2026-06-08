@@ -14,6 +14,11 @@ class Signal:
     tp1_price: float
     tp2_price: float
     timestamp: pd.Timestamp
+    # индикаторы на момент сигнала
+    ema_fast: float = 0.0
+    ema_slow: float = 0.0
+    volume: float = 0.0
+    volume_ma: float = 0.0
 
 
 def calculate_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
@@ -33,10 +38,6 @@ def calculate_htf_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
 
 def get_htf_trend(df_htf: pd.DataFrame, timestamp: pd.Timestamp) -> Optional[str]:
-    """
-    Returns 'LONG', 'SHORT', or None based on HTF EMA at the given timestamp.
-    Finds the last HTF candle that closed at or before the working TF candle.
-    """
     mask = df_htf.index <= timestamp
     if not mask.any():
         return None
@@ -47,7 +48,6 @@ def get_htf_trend(df_htf: pd.DataFrame, timestamp: pd.Timestamp) -> Optional[str
 
 
 def get_htf_trend_latest(df_htf: pd.DataFrame) -> Optional[str]:
-    """Returns current HTF trend from the latest available candle."""
     if df_htf is None or len(df_htf) == 0:
         return None
     row = df_htf.iloc[-1]
@@ -115,4 +115,8 @@ def get_signal(
         tp1_price=round(tp1_price, 4),
         tp2_price=round(tp2_price, 4),
         timestamp=curr.name if isinstance(curr.name, pd.Timestamp) else pd.Timestamp(curr.name),
+        ema_fast=round(float(curr["ema_fast"]), 4),
+        ema_slow=round(float(curr["ema_slow"]), 4),
+        volume=round(float(curr["volume"]), 2),
+        volume_ma=round(float(curr["volume_ma"]), 2),
     )

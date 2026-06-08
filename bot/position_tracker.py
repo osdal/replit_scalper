@@ -19,6 +19,11 @@ class Position:
     closed: bool = False
     realized_pnl: float = 0.0
     entry_timestamp: Optional[object] = None
+    # индикаторы на момент входа (для лога при закрытии)
+    entry_ema_fast: float = 0.0
+    entry_ema_slow: float = 0.0
+    entry_volume: float = 0.0
+    entry_volume_ma: float = 0.0
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -43,17 +48,19 @@ class PositionTracker:
             total_qty=qty,
             remaining_qty=qty,
             entry_timestamp=signal.timestamp,
+            entry_ema_fast=signal.ema_fast,
+            entry_ema_slow=signal.ema_slow,
+            entry_volume=signal.volume,
+            entry_volume_ma=signal.volume_ma,
         )
         self.log.info(
             f"Position opened | {signal.direction} | entry={signal.entry_price} "
-            f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} qty={qty}"
+            f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} qty={qty} | "
+            f"indicators: ema_fast={signal.ema_fast} ema_slow={signal.ema_slow} "
+            f"volume={signal.volume} volume_ma={signal.volume_ma}"
         )
 
     def check(self, current_price: float) -> Optional[str]:
-        """
-        Check current price against SL/TP1/TP2.
-        Returns: "SL" | "TP1" | "TP2" | None
-        """
         p = self.position
         if p is None or p.closed:
             return None
@@ -75,12 +82,14 @@ class PositionTracker:
         return None
 
     def apply_hit(self, hit: str, close_price: float) -> float:
-        """
-        Apply SL/TP1/TP2 hit. Returns PnL of this partial/full close.
-        """
         p = self.position
         if p is None:
             return 0.0
+
+        indicators_str = (
+            f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
+            f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
+        )
 
         if hit == "SL":
             qty = p.remaining_qty
@@ -90,7 +99,7 @@ class PositionTracker:
             p.closed = True
             self.log.warning(
                 f"SL hit | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
-                f"total_pnl={p.realized_pnl:.4f}"
+                f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
             )
             self.position = None
             return pnl
@@ -107,7 +116,7 @@ class PositionTracker:
             self.log.info(
                 f"TP1 hit | price={close_price} closed_qty={tp1_qty:.6f} "
                 f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
-                f"SL moved to breakeven: {old_sl} → {p.entry_price}"
+                f"SL moved to breakeven: {old_sl} → {p.entry_price} | {indicators_str}"
             )
             return pnl
 
@@ -119,7 +128,7 @@ class PositionTracker:
             p.closed = True
             self.log.info(
                 f"TP2 hit | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
-                f"total_pnl={p.realized_pnl:.4f}"
+                f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
             )
             self.position = None
             return pnl
