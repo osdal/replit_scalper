@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot } from "../hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
