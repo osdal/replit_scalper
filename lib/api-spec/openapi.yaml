@@ -1,22 +1,27 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Trading bot dashboard API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bots
+    description: Bot management
+  - name: trades
+    description: Trade history
+  - name: backtest
+    description: Backtesting
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +29,174 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bots:
+    get:
+      operationId: listBots
+      tags: [bots]
+      summary: List all bots with status
+      responses:
+        "200":
+          description: List of bots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BotStatus"
+
+  /bots/{symbol}:
+    get:
+      operationId: getBot
+      tags: [bots]
+      summary: Get bot details
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bot details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+        "404":
+          description: Bot not found
+
+  /bots/{symbol}/config:
+    put:
+      operationId: updateBotConfig
+      tags: [bots]
+      summary: Update bot config
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BotConfig"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bots/{symbol}/start:
+    post:
+      operationId: startBot
+      tags: [bots]
+      summary: Start bot
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+
+  /bots/{symbol}/stop:
+    post:
+      operationId: stopBot
+      tags: [bots]
+      summary: Stop bot
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+
+  /trades:
+    get:
+      operationId: listTrades
+      tags: [trades]
+      summary: List trades
+      parameters:
+        - name: symbol
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Trade list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeList"
+
+  /trades/stats:
+    get:
+      operationId: getTradeStats
+      tags: [trades]
+      summary: Aggregated trade stats per symbol
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TradeStats"
+
+  /backtest/{symbol}:
+    post:
+      operationId: runBacktest
+      tags: [backtest]
+      summary: Run backtest for a symbol
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BacktestRequest"
+      responses:
+        "200":
+          description: Backtest results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResult"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +204,120 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    Position:
+      type: object
+      properties:
+        direction:     { type: string }
+        entry_price:   { type: number }
+        sl_price:      { type: number }
+        tp1_price:     { type: number }
+        tp2_price:     { type: number }
+        total_qty:     { type: number }
+        remaining_qty: { type: number }
+        tp1_hit:       { type: boolean }
+        realized_pnl:  { type: number }
+      required: [direction, entry_price, sl_price, tp1_price, tp2_price, total_qty, remaining_qty, tp1_hit]
+
+    BotStatus:
+      type: object
+      properties:
+        symbol:         { type: string }
+        mode:           { type: string }
+        is_running:     { type: boolean }
+        last_heartbeat: { type: string, nullable: true }
+        current_price:  { type: number, nullable: true }
+        position:       { $ref: "#/components/schemas/Position", nullable: true }
+        config:         { $ref: "#/components/schemas/BotConfig" }
+      required: [symbol, mode, is_running, config]
+
+    BotConfig:
+      type: object
+      properties:
+        timeframe:          { type: string }
+        leverage:           { type: integer }
+        risk_pct:           { type: number }
+        sl_pct:             { type: number }
+        tp1_pct:            { type: number }
+        tp1_close_pct:      { type: number }
+        tp2_pct:            { type: number }
+        ema_fast:           { type: integer }
+        ema_slow:           { type: integer }
+        volume_ma_period:   { type: integer }
+        volume_multiplier:  { type: number }
+        htf_enabled:        { type: boolean }
+        htf_timeframe:      { type: string, nullable: true }
+        htf_ema_fast:       { type: integer, nullable: true }
+        htf_ema_slow:       { type: integer, nullable: true }
+        auto_mode:          { type: boolean }
+        paper_balance:      { type: number }
+      required: [timeframe, leverage, risk_pct, sl_pct, tp1_pct, tp1_close_pct, tp2_pct, ema_fast, ema_slow, volume_ma_period, volume_multiplier, htf_enabled, auto_mode, paper_balance]
+
+    ActionResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+      required: [success, message]
+
+    Trade:
+      type: object
+      properties:
+        id:           { type: integer }
+        symbol:       { type: string }
+        direction:    { type: string }
+        entry_price:  { type: number }
+        exit_price:   { type: number, nullable: true }
+        qty:          { type: number }
+        pnl:          { type: number, nullable: true }
+        exit_reason:  { type: string, nullable: true }
+        entry_time:   { type: string }
+        exit_time:    { type: string, nullable: true }
+        is_open:      { type: boolean }
+        mode:         { type: string }
+      required: [id, symbol, direction, entry_price, qty, entry_time, is_open, mode]
+
+    TradeList:
+      type: object
+      properties:
+        trades: { type: array, items: { $ref: "#/components/schemas/Trade" } }
+        total:  { type: integer }
+      required: [trades, total]
+
+    TradeStats:
+      type: object
+      properties:
+        symbol:      { type: string }
+        total:       { type: integer }
+        wins:        { type: integer }
+        losses:      { type: integer }
+        win_rate:    { type: number }
+        total_pnl:   { type: number }
+        avg_win:     { type: number }
+        avg_loss:    { type: number }
+      required: [symbol, total, wins, losses, win_rate, total_pnl, avg_win, avg_loss]
+
+    BacktestRequest:
+      type: object
+      properties:
+        start:  { type: string }
+        end:    { type: string }
+        config: { $ref: "#/components/schemas/BotConfig" }
+      required: [start, end, config]
+
+    BacktestResult:
+      type: object
+      properties:
+        total_trades: { type: integer }
+        wins:         { type: integer }
+        losses:       { type: integer }
+        win_rate:     { type: number }
+        total_pnl:    { type: number }
+        avg_win:      { type: number }
+        avg_loss:     { type: number }
+        max_drawdown: { type: number }
+        initial_balance: { type: number }
+        final_balance:   { type: number }
+        return_pct:      { type: number }
+      required: [total_trades, wins, losses, win_rate, total_pnl, avg_win, avg_loss, max_drawdown, initial_balance, final_balance, return_pct]
