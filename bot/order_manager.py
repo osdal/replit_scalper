@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 from typing import Optional, Tuple
@@ -310,9 +311,11 @@ class OrderManager:
         TP2 на бирже остаётся нетронутым.
         """
         if self.cfg.mode == "live":
+            # Отменяем старый SL
             try:
                 open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
                 stop_side = _opposite_side(direction)
+                cancelled = 0
                 for order in open_orders:
                     if (order.get("type") == FUTURE_ORDER_TYPE_STOP_MARKET
                             and order.get("side") == stop_side):
@@ -320,11 +323,25 @@ class OrderManager:
                             symbol=self.cfg.symbol,
                             orderId=order["orderId"],
                         )
+                        cancelled += 1
+                if cancelled:
+                    # Пауза чтобы биржа успела обработать отмену
+                    await asyncio.sleep(0.5)
             except Exception as e:
                 self.log.warning(f"[LIVE] Could not cancel old SL: {e}")
 
-            await self._place_sl(direction, entry_price)
-            self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={entry_price}")
+            # Выставляем новый SL с retry
+            for attempt in range(3):
+                try:
+                    await self._place_sl(direction, entry_price)
+                    self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={entry_price}")
+                    return
+                except Exception as e:
+                    if attempt < 2:
+                        self.log.warning(f"[LIVE] SL place attempt {attempt+1} failed: {e} — retrying in 1s")
+                        await asyncio.sleep(1.0)
+                    else:
+                        self.log.error(f"[LIVE] Failed to place SL after 3 attempts: {e}")
         else:
             self.log.info(f"[PAPER] Would move SL to breakeven | price={entry_price}")
 
