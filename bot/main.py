@@ -15,6 +15,7 @@ from signal_handler import SignalHandler
 from order_manager import OrderManager
 from position_tracker import PositionTracker, Position
 from backtester import run_backtest
+from db_reporter import DbReporter
 
 load_dotenv()
 
@@ -25,16 +26,9 @@ async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
     order_mgr: OrderManager, log
 ) -> None:
-    """
-    Восстанавливает позицию при перезапуске.
-    Приоритет: 1) файл состояния (точные уровни)
-               2) биржа (если файла нет — пересчёт от конфига)
-    После восстановления отменяет старые TP/SL и выставляет заново.
-    """
     if cfg.mode != "live":
         return
 
-    # 1. Пробуем загрузить из файла — там точные уровни
     if tracker.load_state():
         try:
             positions = await client.futures_position_information(symbol=cfg.symbol)
@@ -52,12 +46,10 @@ async def _sync_position_on_start(
         except Exception as e:
             log.warning(f"[SYNC] Could not verify position on exchange: {e}")
 
-        # Переставляем TP/SL с актуальными уровнями из файла
         pos = tracker.position
         await _replace_tp_sl(order_mgr, pos, log)
         return
 
-    # 2. Файла нет — запрашиваем биржу и пересчитываем уровни из конфига
     try:
         positions = await client.futures_position_information(symbol=cfg.symbol)
     except Exception as e:
@@ -115,7 +107,6 @@ async def _sync_position_on_start(
 
 
 async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
-    """Отменяет все старые TP/SL и выставляет заново по уровням из трекера."""
     try:
         await order_mgr.cancel_all_tp_sl(pos.direction)
         await order_mgr._place_all_orders(
@@ -155,24 +146,31 @@ async def main():
         api_secret=api_secret or None,
     )
 
+    reporter = DbReporter(symbol=cfg.symbol, logger=log)
+
     try:
         if cfg.mode == "backtest":
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log)
+        await _run_live_or_paper(cfg, client, log, reporter)
 
     finally:
+        await reporter.report_stopped()
+        await reporter.close()
         await client.close_connection()
         log.info("Bot stopped")
 
 
-async def _run_live_or_paper(cfg, client: AsyncClient, log):
+async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter):
     tracker   = PositionTracker(cfg, log)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
+
+    # Репортим статус запуска
+    await reporter.report_heartbeat(0)
 
     df_buffer: pd.DataFrame = await get_recent_klines(
         client=client,
@@ -216,6 +214,23 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
                     f"Heartbeat | candles={candle_count[0]} "
                     f"price={current_price:.2f} htf_trend={htf_trend_now}"
                 )
+                # Репортим heartbeat и текущую позицию в дашборд
+                await reporter.report_heartbeat(current_price)
+                if tracker.has_open_position():
+                    pos = tracker.position
+                    await reporter.report_position({
+                        "direction":    pos.direction,
+                        "entry_price":  pos.entry_price,
+                        "sl_price":     pos.sl_price,
+                        "tp1_price":    pos.tp1_price,
+                        "tp2_price":    pos.tp2_price,
+                        "total_qty":    pos.total_qty,
+                        "remaining_qty": pos.remaining_qty,
+                        "tp1_hit":      pos.tp1_hit,
+                        "realized_pnl": pos.realized_pnl,
+                    })
+                else:
+                    await reporter.report_position(None)
 
             if tracker.has_open_position():
                 hit = tracker.check(current_price)
