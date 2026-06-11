@@ -70,6 +70,7 @@ autoInstallPeers: false
 
 onlyBuiltDependencies:
   - '@swc/core'
+  - better-sqlite3
   - esbuild
   - msw
   - unrs-resolver
@@ -93,9 +94,6 @@ overrides:
   "esbuild>@esbuild/openbsd-arm64": "-"
   "esbuild>@esbuild/openbsd-x64": "-"
   "esbuild>@esbuild/sunos-x64": "-"
-  "esbuild>@esbuild/win32-arm64": "-"
-  "esbuild>@esbuild/win32-ia32": "-"
-  "esbuild>@esbuild/win32-x64": "-"
   "esbuild>@esbuild/aix-ppc64": '-'
   "esbuild>@esbuild/android-arm": '-'
   "esbuild>@esbuild/android-arm64": '-'
