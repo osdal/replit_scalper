@@ -12,7 +12,10 @@ router.get("/", async (_req, res) => {
   try {
     const bots = await db.select().from(botsTable);
     res.json(bots.map(b => ({ ...b, position: b.position ? JSON.parse(b.position as string) : null })));
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("GET /bots error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 router.get("/:symbol", async (req, res) => {
@@ -20,7 +23,10 @@ router.get("/:symbol", async (req, res) => {
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, req.params.symbol.toUpperCase()));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     res.json({ ...bot, position: bot.position ? JSON.parse(bot.position as string) : null });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("GET /bots/:symbol error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 router.put("/:symbol/config", async (req, res) => {
@@ -29,7 +35,10 @@ router.put("/:symbol/config", async (req, res) => {
     const [updated] = await db.update(botsTable).set({ ...req.body, updated_at: new Date().toISOString() }).where(eq(botsTable.symbol, symbol)).returning();
     if (!updated) return res.status(404).json({ error: "Bot not found" });
     res.json(updated);
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("PUT /bots/:symbol/config error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 router.patch("/:symbol", async (req, res) => {
@@ -42,7 +51,10 @@ router.patch("/:symbol", async (req, res) => {
       .where(eq(botsTable.symbol, symbol)).returning();
     if (!updated) return res.status(404).json({ error: "Bot not found" });
     res.json(updated);
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("PATCH /bots/:symbol error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 router.post("/:symbol/start", async (req, res) => {
@@ -60,7 +72,10 @@ router.post("/:symbol/start", async (req, res) => {
       await db.update(botsTable).set({ is_running: false, updated_at: new Date().toISOString() }).where(eq(botsTable.symbol, symbol));
     });
     res.json({ success: true, message: `Bot ${symbol} started` });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("POST /bots/:symbol/start error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 router.post("/:symbol/stop", async (req, res) => {
@@ -72,7 +87,10 @@ router.post("/:symbol/stop", async (req, res) => {
     botProcesses.delete(symbol);
     await db.update(botsTable).set({ is_running: false, updated_at: new Date().toISOString() }).where(eq(botsTable.symbol, symbol));
     res.json({ success: true, message: `Bot ${symbol} stopped` });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    console.error("POST /bots/:symbol/stop error:", e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 export default router;
