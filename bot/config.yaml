@@ -1,6 +1,6 @@
 symbol: BTCUSDT
 timeframe: 5m
-leverage: 10
+leverage: 30
 risk_pct: 1.0
 sl_pct: 0.75
 tp1_pct: 0.2
@@ -10,11 +10,12 @@ ema_fast: 6
 ema_slow: 39
 volume_ma_period: 20
 volume_multiplier: 1.0
-mode: paper
+# mode: paper
 # mode: backtest
+mode: live
 auto_mode: True
-backtest_start: "2024-09-01"
-backtest_end: "2025-03-01"
+backtest_start: "2026-05-01"
+backtest_end: "2026-06-08"
 paper_balance: 1000.0
 log_file: logs/bot.log
 htf_enabled: True

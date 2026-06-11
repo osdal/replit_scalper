@@ -71,11 +71,28 @@ async def start_kline_polling(
     poll_seconds: int = 10,
 ) -> None:
     """
-    REST polling fallback — checks for new closed candles every poll_seconds.
-    handlers: { "5m": on_5m_candle_close, "1h": on_1h_candle_close }
-    Works reliably on all platforms without WebSocket issues.
+    REST polling — checks for new closed candles every poll_seconds.
+    При старте инициализирует last_seen последней закрытой свечой,
+    чтобы не прокручивать старые свечи после перезапуска.
     """
     last_seen: Dict[str, pd.Timestamp] = {}
+
+    # Инициализируем last_seen до начала поллинга —
+    # берём последнюю закрытую свечу по каждому интервалу
+    for interval in handlers:
+        try:
+            klines = await client.futures_klines(
+                symbol=symbol, interval=interval, limit=2
+            )
+            df = _klines_to_df(klines)
+            last_seen[interval] = df.iloc[-2].name
+            if logger:
+                logger.info(
+                    f"Polling init | {interval} last_seen={last_seen[interval]}"
+                )
+        except Exception as e:
+            if logger:
+                logger.error(f"Polling init error ({interval}): {e}")
 
     if logger:
         logger.info(
@@ -102,15 +119,22 @@ async def start_kline_polling(
                         )
                     candle = pd.Series({
                         "open_time": candle_time,
-                        "open":  closed["open"],
-                        "high":  closed["high"],
-                        "low":   closed["low"],
-                        "close": closed["close"],
+                        "open":   closed["open"],
+                        "high":   closed["high"],
+                        "low":    closed["low"],
+                        "close":  closed["close"],
                         "volume": closed["volume"],
                     })
-                    result = callback(candle)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    try:
+                        result = callback(candle)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as e:
+                        if logger:
+                            logger.error(
+                                f"Candle handler error ({interval}): {e}",
+                                exc_info=True,
+                            )
 
             except Exception as e:
                 if logger:
@@ -146,15 +170,23 @@ async def start_kline_socket(
                     if logger:
                         logger.info(f"WS candle closed | {interval}")
                     candle = _kline_to_series(kline)
-                    result = on_candle_close(candle)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    try:
+                        result = on_candle_close(candle)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as e:
+                        if logger:
+                            logger.error(f"WS handler error ({interval}): {e}", exc_info=True)
 
         except (websockets.ConnectionClosed, websockets.WebSocketException) as e:
             if logger:
-                logger.warning(f"WebSocket disconnected ({interval}): {e} — reconnecting in {reconnect_delay}s")
+                logger.warning(
+                    f"WebSocket disconnected ({interval}): {e} — reconnecting in {reconnect_delay}s"
+                )
         except Exception as e:
             if logger:
-                logger.error(f"WebSocket error ({interval}): {e} — reconnecting in {reconnect_delay}s")
+                logger.error(
+                    f"WebSocket error ({interval}): {e} — reconnecting in {reconnect_delay}s"
+                )
 
         await asyncio.sleep(reconnect_delay)

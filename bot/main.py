@@ -22,15 +22,42 @@ HEARTBEAT_CANDLES = 3
 
 
 async def _sync_position_on_start(
-    cfg, client: AsyncClient, tracker: PositionTracker, log
+    cfg, client: AsyncClient, tracker: PositionTracker,
+    order_mgr: OrderManager, log
 ) -> None:
     """
-    При старте в live-режиме проверяет открытые позиции на бирже.
-    Если позиция есть — восстанавливает её в трекере.
+    Восстанавливает позицию при перезапуске.
+    Приоритет: 1) файл состояния (точные уровни)
+               2) биржа (если файла нет — пересчёт от конфига)
+    После восстановления отменяет старые TP/SL и выставляет заново.
     """
     if cfg.mode != "live":
         return
 
+    # 1. Пробуем загрузить из файла — там точные уровни
+    if tracker.load_state():
+        try:
+            positions = await client.futures_position_information(symbol=cfg.symbol)
+            exchange_has_position = any(
+                abs(float(p.get("positionAmt", 0))) > 0 for p in positions
+            )
+            if not exchange_has_position:
+                log.warning(
+                    f"[SYNC] State file has position but exchange shows none — "
+                    f"clearing state file"
+                )
+                tracker.position = None
+                tracker._clear_state()
+                return
+        except Exception as e:
+            log.warning(f"[SYNC] Could not verify position on exchange: {e}")
+
+        # Переставляем TP/SL с актуальными уровнями из файла
+        pos = tracker.position
+        await _replace_tp_sl(order_mgr, pos, log)
+        return
+
+    # 2. Файла нет — запрашиваем биржу и пересчитываем уровни из конфига
     try:
         positions = await client.futures_position_information(symbol=cfg.symbol)
     except Exception as e:
@@ -50,7 +77,6 @@ async def _sync_position_on_start(
             log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
             continue
 
-        # Восстанавливаем уровни SL/TP из конфига относительно цены входа
         sl_dist  = entry_price * cfg.sl_pct  / 100
         tp1_dist = entry_price * cfg.tp1_pct / 100
         tp2_dist = entry_price * cfg.tp2_pct / 100
@@ -73,21 +99,41 @@ async def _sync_position_on_start(
             total_qty=qty,
             remaining_qty=qty,
         )
+        tracker._save_state()
 
         log.info(
-            f"[SYNC] Restored position | {direction} {cfg.symbol} "
+            f"[SYNC] Restored from exchange | {direction} {cfg.symbol} "
             f"qty={qty} entry={entry_price} "
-            f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f}"
+            f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f} "
+            f"(levels recalculated from config)"
         )
+
+        await _replace_tp_sl(order_mgr, tracker.position, log)
         return
 
     log.info(f"[SYNC] No open position found for {cfg.symbol}")
 
 
+async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
+    """Отменяет все старые TP/SL и выставляет заново по уровням из трекера."""
+    try:
+        await order_mgr.cancel_all_tp_sl(pos.direction)
+        await order_mgr._place_all_orders(
+            direction=pos.direction,
+            total_qty=pos.remaining_qty,
+            sl_price=pos.sl_price,
+            tp1_price=pos.tp1_price,
+            tp2_price=pos.tp2_price,
+        )
+        log.info(f"[SYNC] TP/SL orders replaced on exchange")
+    except Exception as e:
+        log.error(f"[SYNC] Failed to replace TP/SL orders: {e}")
+
+
 async def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
-    log = get_logger(log_file=cfg.log_file, mode=cfg.mode)
+    log = get_logger(log_file=cfg.log_file, mode=cfg.mode, symbol=cfg.symbol)
 
     log.info(f"Bot starting | mode={cfg.mode} symbol={cfg.symbol} tf={cfg.timeframe}")
     log.info(
@@ -122,12 +168,11 @@ async def main():
 
 
 async def _run_live_or_paper(cfg, client: AsyncClient, log):
-    tracker  = PositionTracker(cfg, log)
+    tracker   = PositionTracker(cfg, log)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
-    handler  = SignalHandler(cfg, log)
+    handler   = SignalHandler(cfg, log)
 
-    # Восстанавливаем позицию с биржи если бот перезапустился
-    await _sync_position_on_start(cfg, client, tracker, log)
+    await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
 
     df_buffer: pd.DataFrame = await get_recent_klines(
         client=client,
@@ -157,58 +202,67 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log):
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
+        try:
+            new_row = pd.DataFrame([candle]).set_index("open_time")
+            df_buffer = pd.concat([df_buffer, new_row]).tail(500)
+            df_buffer = calculate_indicators(df_buffer, cfg)
 
-        new_row = pd.DataFrame([candle]).set_index("open_time")
-        df_buffer = pd.concat([df_buffer, new_row]).tail(500)
-        df_buffer = calculate_indicators(df_buffer, cfg)
+            current_price = float(candle["close"])
+            candle_count[0] += 1
 
-        current_price = float(candle["close"])
-        candle_count[0] += 1
-
-        if candle_count[0] % HEARTBEAT_CANDLES == 0:
-            htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
-            log.info(
-                f"Heartbeat | candles={candle_count[0]} "
-                f"price={current_price:.2f} htf_trend={htf_trend_now}"
-            )
-
-        if tracker.has_open_position():
-            hit = tracker.check(current_price)
-            if hit:
-                pos = tracker.position
-                if hit == "TP1":
-                    tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
-                    await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
-                    tracker.apply_hit(hit, current_price)
-                    await order_mgr.move_sl_to_breakeven(pos.direction, pos.entry_price)
-                else:
-                    await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
-                    tracker.apply_hit(hit, current_price)
-            return
-
-        raw_signal = get_signal(df_buffer, cfg)
-        if raw_signal is None:
-            return
-
-        if cfg.htf_enabled:
-            htf_trend = get_htf_trend_latest(htf_buffer)
-            if htf_trend is not None and raw_signal.direction != htf_trend:
+            if candle_count[0] % HEARTBEAT_CANDLES == 0:
+                htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
                 log.info(
-                    f"Signal {raw_signal.direction} BLOCKED by HTF "
-                    f"| htf_trend={htf_trend} entry={raw_signal.entry_price:.2f}"
+                    f"Heartbeat | candles={candle_count[0]} "
+                    f"price={current_price:.2f} htf_trend={htf_trend_now}"
                 )
+
+            if tracker.has_open_position():
+                hit = tracker.check(current_price)
+                if hit:
+                    pos = tracker.position
+                    if hit == "TP1":
+                        tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
+                        closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
+                        if closed:
+                            tracker.apply_hit(hit, current_price)
+                            await order_mgr.move_sl_to_breakeven(pos.direction, pos.entry_price)
+                        else:
+                            tracker.force_close(reason="exchange_stop_at_TP1", close_price=current_price)
+                    else:
+                        closed = await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
+                        if closed:
+                            tracker.apply_hit(hit, current_price)
+                        else:
+                            tracker.force_close(reason=f"exchange_stop_at_{hit}", close_price=current_price)
                 return
 
-        signal = raw_signal
-        confirmed = await handler.confirm(signal)
-        if not confirmed:
-            return
+            raw_signal = get_signal(df_buffer, cfg)
+            if raw_signal is None:
+                return
 
-        result = await order_mgr.open_position(signal)
-        if result is not None:
-            entry_price, qty = result
-            signal.entry_price = entry_price
-            tracker.open(signal, qty=qty)
+            if cfg.htf_enabled:
+                htf_trend = get_htf_trend_latest(htf_buffer)
+                if htf_trend is not None and raw_signal.direction != htf_trend:
+                    log.info(
+                        f"Signal {raw_signal.direction} BLOCKED by HTF "
+                        f"| htf_trend={htf_trend} entry={raw_signal.entry_price:.2f}"
+                    )
+                    return
+
+            signal = raw_signal
+            confirmed = await handler.confirm(signal)
+            if not confirmed:
+                return
+
+            result = await order_mgr.open_position(signal)
+            if result is not None:
+                entry_price, qty = result
+                signal.entry_price = entry_price
+                tracker.open(signal, qty=qty)
+
+        except Exception as e:
+            log.error(f"on_candle error: {e}", exc_info=True)
 
     async def on_htf_candle(candle: pd.Series):
         nonlocal htf_buffer
