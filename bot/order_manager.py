@@ -171,7 +171,7 @@ class OrderManager:
                     except Exception as ce:
                         self.log.warning(f"[LIVE] Could not cancel algo order {algo_id}: {ce}")
         except Exception as e:
-            self.log.warning(f"[LIVE] cancel algo orders error: {e}")
+            self.log.debug(f"[LIVE] cancel algo orders (no algo orders or endpoint N/A): {e}")
 
         await asyncio.sleep(1.0)
 
