@@ -108,7 +108,12 @@ async def _sync_position_on_start(
 
 async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
     try:
+        # Сначала отменяем все открытые ордера
         await order_mgr.cancel_all_tp_sl(pos.direction)
+        # Увеличенная пауза чтобы биржа точно обработала отмены
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.5)
+        # Выставляем новые TP/SL
         await order_mgr._place_all_orders(
             direction=pos.direction,
             total_qty=pos.remaining_qty,
@@ -118,7 +123,7 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
         )
         log.info(f"[SYNC] TP/SL orders replaced on exchange")
     except Exception as e:
-        log.error(f"[SYNC] Failed to replace TP/SL orders: {e}")
+        log.error(f"[SYNC] Failed to replace TP/SL orders: {e}", exc_info=True)
 
 
 async def main():
