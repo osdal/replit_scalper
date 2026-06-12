@@ -263,6 +263,14 @@ class OrderManager:
         )
         qty = await self._adjust_qty(raw_qty)
 
+        if qty <= 0:
+            self.log.error(
+                f"[LIVE] Calculated qty={raw_qty:.6f} rounds to 0 after stepSize adjustment "
+                f"(stepSize={self._step_size}) — skipping order. "
+                f"Increase risk_pct or reduce leverage."
+            )
+            return None
+
         if self.cfg.mode == "live":
             await self._set_leverage()
             order = await self.client.futures_create_order(
