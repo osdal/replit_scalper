@@ -137,8 +137,10 @@ class OrderManager:
 
     async def cancel_all_tp_sl(self, direction: str) -> None:
         """
-        Отменяет все открытые ордера включая алго-ордера (STOP_MARKET с closePosition=True).
-        python-binance выставляет их через /fapi/v1/order/algo — отменять нужно отдельно.
+        Отменяет все открытые ордера включая алго-ордера.
+        Binance имеет два типа ордеров:
+        - Обычные: futures_cancel_all_open_orders
+        - Алго (closePosition=True): /fapi/v1/openOrders (GET) + /fapi/v1/order/algo (DELETE)
         """
         if self.cfg.mode != "live":
             return
@@ -150,16 +152,26 @@ class OrderManager:
         except Exception as e:
             self.log.warning(f"[LIVE] cancel regular orders error: {e}")
 
-        # 2. Отменяем алго-ордера через прямой API запрос
+        # 2. Получаем список алго-ордеров и отменяем каждый
         try:
-            await self.client._request_futures_api(
-                "delete", "openOrders/algo", signed=True,
+            algo_orders = await self.client._request_futures_api(
+                "get", "openOrders/algo", signed=True,
                 data={"symbol": self.cfg.symbol}
             )
-            self.log.info(f"[LIVE] Algo orders cancelled | symbol={self.cfg.symbol}")
+            orders = algo_orders.get("orders", []) if isinstance(algo_orders, dict) else []
+            for order in orders:
+                algo_id = order.get("algoId") or order.get("orderId")
+                if algo_id:
+                    try:
+                        await self.client._request_futures_api(
+                            "delete", "order/algo", signed=True,
+                            data={"symbol": self.cfg.symbol, "algoId": algo_id}
+                        )
+                        self.log.info(f"[LIVE] Algo order cancelled | algoId={algo_id}")
+                    except Exception as ce:
+                        self.log.warning(f"[LIVE] Could not cancel algo order {algo_id}: {ce}")
         except Exception as e:
-            # Если алго-ордеров нет — биржа вернёт ошибку, это нормально
-            self.log.debug(f"[LIVE] cancel algo orders: {e}")
+            self.log.warning(f"[LIVE] cancel algo orders error: {e}")
 
         await asyncio.sleep(1.0)
 
