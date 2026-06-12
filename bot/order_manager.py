@@ -136,23 +136,23 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def cancel_all_tp_sl(self, direction: str) -> None:
-        """Отменяет все открытые TP и SL ордера по символу."""
+        """Отменяет все открытые ордера по символу (SL, TP1, TP2)."""
         if self.cfg.mode != "live":
             return
         try:
             open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
-            stop_side = _opposite_side(direction)
             for order in open_orders:
                 otype = order.get("type", "")
-                side  = order.get("side", "")
-                if side == stop_side and otype in (
-                    FUTURE_ORDER_TYPE_STOP_MARKET, "TAKE_PROFIT_MARKET", ORDER_TYPE_LIMIT
-                ):
+                try:
                     await self.client.futures_cancel_order(
                         symbol=self.cfg.symbol,
                         orderId=order["orderId"],
                     )
                     self.log.info(f"[LIVE] Cancelled order | type={otype} id={order['orderId']}")
+                except Exception as ce:
+                    self.log.warning(f"[LIVE] Could not cancel order {order['orderId']}: {ce}")
+            if open_orders:
+                await asyncio.sleep(0.5)
         except Exception as e:
             self.log.warning(f"[LIVE] cancel_all_tp_sl error: {e}")
 
