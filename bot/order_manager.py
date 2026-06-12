@@ -307,28 +307,35 @@ class OrderManager:
 
     async def move_sl_to_breakeven(self, direction: str, entry_price: float) -> None:
         """
-        После срабатывания TP1 — отменяем старый SL и выставляем новый на безубыток.
-        TP2 на бирже остаётся нетронутым.
+        После срабатывания TP1 — отменяем старый SL и TAKE_PROFIT_MARKET если есть,
+        выставляем новый SL на безубыток. Лимитный TP2 остаётся нетронутым.
         """
         if self.cfg.mode == "live":
-            # Отменяем старый SL
             try:
                 open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
                 stop_side = _opposite_side(direction)
                 cancelled = 0
                 for order in open_orders:
-                    if (order.get("type") == FUTURE_ORDER_TYPE_STOP_MARKET
-                            and order.get("side") == stop_side):
-                        await self.client.futures_cancel_order(
-                            symbol=self.cfg.symbol,
-                            orderId=order["orderId"],
-                        )
-                        cancelled += 1
+                    otype = order.get("type", "")
+                    side  = order.get("side", "")
+                    # Отменяем STOP_MARKET и TAKE_PROFIT_MARKET — они используют closePosition=True
+                    # Лимитные TP ордера (LIMIT) не трогаем
+                    if side == stop_side and otype in (
+                        FUTURE_ORDER_TYPE_STOP_MARKET, "TAKE_PROFIT_MARKET"
+                    ):
+                        try:
+                            await self.client.futures_cancel_order(
+                                symbol=self.cfg.symbol,
+                                orderId=order["orderId"],
+                            )
+                            cancelled += 1
+                            self.log.info(f"[LIVE] Cancelled {otype} for SL move")
+                        except Exception as ce:
+                            self.log.warning(f"[LIVE] Could not cancel order {order['orderId']}: {ce}")
                 if cancelled:
-                    # Пауза чтобы биржа успела обработать отмену
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.8)
             except Exception as e:
-                self.log.warning(f"[LIVE] Could not cancel old SL: {e}")
+                self.log.warning(f"[LIVE] Could not fetch open orders: {e}")
 
             # Выставляем новый SL с retry
             for attempt in range(3):
@@ -338,8 +345,10 @@ class OrderManager:
                     return
                 except Exception as e:
                     if attempt < 2:
-                        self.log.warning(f"[LIVE] SL place attempt {attempt+1} failed: {e} — retrying in 1s")
-                        await asyncio.sleep(1.0)
+                        self.log.warning(
+                            f"[LIVE] SL place attempt {attempt+1} failed: {e} — retrying in 1.5s"
+                        )
+                        await asyncio.sleep(1.5)
                     else:
                         self.log.error(f"[LIVE] Failed to place SL after 3 attempts: {e}")
         else:
