@@ -167,17 +167,31 @@ class OrderManager:
     #  Place orders                                                        #
     # ------------------------------------------------------------------ #
 
-    async def _place_sl(self, direction: str, sl_price: float) -> None:
+    async def _place_sl(self, direction: str, sl_price: float, qty: float = 0.0) -> None:
+        """
+        Выставляет Stop-Market ордер.
+        Использует reduceOnly + quantity вместо closePosition=True,
+        чтобы избежать algoOrder endpoint и ошибки -4130.
+        """
         stop_side = _opposite_side(direction)
         sl_price = await self._adjust_price(sl_price)
+
+        if qty > 0:
+            use_qty = await self._adjust_qty(qty)
+        else:
+            # Получаем реальный размер позиции с биржи
+            real_qty = await self._get_real_position_qty(direction)
+            use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001)
+
         await self.client.futures_create_order(
             symbol=self.cfg.symbol,
             side=stop_side,
             type=FUTURE_ORDER_TYPE_STOP_MARKET,
             stopPrice=sl_price,
-            closePosition=True,
+            quantity=use_qty,
+            reduceOnly=True,
         )
-        self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price}")
+        self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price} qty={use_qty}")
 
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
         """Выставляет лимитный TP ордер с reduceOnly."""
@@ -210,7 +224,8 @@ class OrderManager:
         tp1_qty = await self._adjust_qty(total_qty * self.cfg.tp1_close_pct / 100)
         tp2_qty = await self._adjust_qty(total_qty - tp1_qty)
 
-        await self._place_sl(direction, sl_price)
+        # Передаём qty явно чтобы не использовать closePosition=True (algoOrder)
+        await self._place_sl(direction, sl_price, qty=total_qty)
         await self._place_tp_limit(direction, tp1_price, tp1_qty)
         await self._place_tp_limit(direction, tp2_price, tp2_qty)
 
