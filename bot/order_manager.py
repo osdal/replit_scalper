@@ -48,6 +48,7 @@ class OrderManager:
         self.client = client
         self._step_size: Optional[float] = None
         self._price_precision: Optional[int] = None
+        self._tick_size: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     #  Symbol filters                                                      #
@@ -63,7 +64,9 @@ class OrderManager:
                 for f in s["filters"]:
                     if f["filterType"] == "LOT_SIZE":
                         self._step_size = float(f["stepSize"])
-                        return
+                    if f["filterType"] == "PRICE_FILTER":
+                        self._tick_size = float(f["tickSize"])
+                return
         raise RuntimeError(f"Symbol {self.cfg.symbol} not found in futures_exchange_info")
 
     async def _adjust_qty(self, qty: float) -> float:
@@ -76,6 +79,10 @@ class OrderManager:
         if self.cfg.mode != "live":
             return round(price, 4)
         await self._get_symbol_filters()
+        # Округляем по tickSize если он загружен, иначе по pricePrecision
+        if self._tick_size:
+            precision = max(0, round(-math.log10(self._tick_size)))
+            return round(round(price / self._tick_size) * self._tick_size, precision)
         return round(price, self._price_precision)
 
     # ------------------------------------------------------------------ #
