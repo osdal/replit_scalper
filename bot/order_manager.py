@@ -136,23 +136,18 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def cancel_all_tp_sl(self, direction: str) -> None:
-        """Отменяет все открытые ордера по символу (SL, TP1, TP2)."""
+        """
+        Отменяет все открытые ордера по символу включая алго-ордера.
+        futures_get_open_orders не возвращает алго-ордера (STOP, TP выставленные
+        через algoOrder endpoint) — поэтому используем cancel_all_open_orders.
+        """
         if self.cfg.mode != "live":
             return
         try:
-            open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
-            for order in open_orders:
-                otype = order.get("type", "")
-                try:
-                    await self.client.futures_cancel_order(
-                        symbol=self.cfg.symbol,
-                        orderId=order["orderId"],
-                    )
-                    self.log.info(f"[LIVE] Cancelled order | type={otype} id={order['orderId']}")
-                except Exception as ce:
-                    self.log.warning(f"[LIVE] Could not cancel order {order['orderId']}: {ce}")
-            if open_orders:
-                await asyncio.sleep(0.5)
+            # Отменяем ВСЕ ордера включая алго через batch cancel
+            result = await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
+            self.log.info(f"[LIVE] All open orders cancelled | symbol={self.cfg.symbol}")
+            await asyncio.sleep(0.8)
         except Exception as e:
             self.log.warning(f"[LIVE] cancel_all_tp_sl error: {e}")
 
