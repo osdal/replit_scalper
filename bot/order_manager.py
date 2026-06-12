@@ -137,19 +137,31 @@ class OrderManager:
 
     async def cancel_all_tp_sl(self, direction: str) -> None:
         """
-        Отменяет все открытые ордера по символу включая алго-ордера.
-        futures_get_open_orders не возвращает алго-ордера (STOP, TP выставленные
-        через algoOrder endpoint) — поэтому используем cancel_all_open_orders.
+        Отменяет все открытые ордера включая алго-ордера (STOP_MARKET с closePosition=True).
+        python-binance выставляет их через /fapi/v1/order/algo — отменять нужно отдельно.
         """
         if self.cfg.mode != "live":
             return
+
+        # 1. Отменяем обычные ордера
         try:
-            # Отменяем ВСЕ ордера включая алго через batch cancel
-            result = await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
-            self.log.info(f"[LIVE] All open orders cancelled | symbol={self.cfg.symbol}")
-            await asyncio.sleep(0.8)
+            await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
+            self.log.info(f"[LIVE] Regular orders cancelled | symbol={self.cfg.symbol}")
         except Exception as e:
-            self.log.warning(f"[LIVE] cancel_all_tp_sl error: {e}")
+            self.log.warning(f"[LIVE] cancel regular orders error: {e}")
+
+        # 2. Отменяем алго-ордера через прямой API запрос
+        try:
+            await self.client._request_futures_api(
+                "delete", "openOrders/algo", signed=True,
+                data={"symbol": self.cfg.symbol}
+            )
+            self.log.info(f"[LIVE] Algo orders cancelled | symbol={self.cfg.symbol}")
+        except Exception as e:
+            # Если алго-ордеров нет — биржа вернёт ошибку, это нормально
+            self.log.debug(f"[LIVE] cancel algo orders: {e}")
+
+        await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------ #
     #  Place orders                                                        #
