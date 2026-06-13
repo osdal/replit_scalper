@@ -1,11 +1,14 @@
 import json
 import os
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
 import logging
 
 from strategy import Signal
 from config import Config
+
+if TYPE_CHECKING:
+    from db_reporter import DbReporter
 
 STATE_FILE_TEMPLATE = "state_{symbol}.json"
 
@@ -40,37 +43,39 @@ class Position:
 
 
 class PositionTracker:
-    def __init__(self, cfg: Config, logger: logging.Logger):
+    def __init__(self, cfg: Config, logger: logging.Logger, reporter: Optional["DbReporter"] = None):
         self.cfg = cfg
         self.log = logger
+        self.reporter = reporter
         self.position: Optional[Position] = None
         self._state_file = _state_file(cfg.symbol)
+        self._trade_id: Optional[int] = None  # ID сделки в БД
 
     # ------------------------------------------------------------------ #
     #  Persistence                                                         #
     # ------------------------------------------------------------------ #
 
     def _save_state(self) -> None:
-        """Сохраняет текущую позицию в JSON файл."""
         if self.position is None:
             self._clear_state()
             return
         p = self.position
         data = {
-            "direction":    p.direction,
-            "entry_price":  p.entry_price,
-            "sl_price":     p.sl_price,
-            "tp1_price":    p.tp1_price,
-            "tp2_price":    p.tp2_price,
-            "total_qty":    p.total_qty,
+            "direction":     p.direction,
+            "entry_price":   p.entry_price,
+            "sl_price":      p.sl_price,
+            "tp1_price":     p.tp1_price,
+            "tp2_price":     p.tp2_price,
+            "total_qty":     p.total_qty,
             "remaining_qty": p.remaining_qty,
-            "tp1_hit":      p.tp1_hit,
-            "realized_pnl": p.realized_pnl,
+            "tp1_hit":       p.tp1_hit,
+            "realized_pnl":  p.realized_pnl,
             "entry_timestamp": str(p.entry_timestamp) if p.entry_timestamp else None,
             "entry_ema_fast":  p.entry_ema_fast,
             "entry_ema_slow":  p.entry_ema_slow,
             "entry_volume":    p.entry_volume,
             "entry_volume_ma": p.entry_volume_ma,
+            "trade_id":        self._trade_id,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -79,7 +84,6 @@ class PositionTracker:
             self.log.error(f"[STATE] Failed to save state: {e}")
 
     def _clear_state(self) -> None:
-        """Удаляет файл состояния когда позиция закрыта."""
         try:
             if os.path.exists(self._state_file):
                 os.remove(self._state_file)
@@ -87,10 +91,6 @@ class PositionTracker:
             self.log.error(f"[STATE] Failed to clear state: {e}")
 
     def load_state(self) -> bool:
-        """
-        Загружает позицию из файла состояния.
-        Возвращает True если позиция успешно восстановлена.
-        """
         if not os.path.exists(self._state_file):
             return False
         try:
@@ -112,6 +112,7 @@ class PositionTracker:
                 entry_volume=data.get("entry_volume", 0.0),
                 entry_volume_ma=data.get("entry_volume_ma", 0.0),
             )
+            self._trade_id = data.get("trade_id")
             self.log.info(
                 f"[STATE] Restored from file | {self.position.direction} "
                 f"entry={self.position.entry_price} "
@@ -125,6 +126,95 @@ class PositionTracker:
         except Exception as e:
             self.log.error(f"[STATE] Failed to load state: {e}")
             return False
+
+    # ------------------------------------------------------------------ #
+    #  Reporter helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def _report_open(self, signal: Signal, qty: float) -> None:
+        if not self.reporter:
+            return
+        try:
+            trade_data = {
+                "symbol":      self.cfg.symbol,
+                "direction":   signal.direction,
+                "entry_price": signal.entry_price,
+                "sl_price":    signal.sl_price,
+                "tp1_price":   signal.tp1_price,
+                "tp2_price":   signal.tp2_price,
+                "qty":         qty,
+                "entry_time":  str(signal.timestamp).replace(" ", "T"),
+                "is_open":     True,
+                "mode":        self.cfg.mode,
+                "ema_fast":    signal.ema_fast,
+                "ema_slow":    signal.ema_slow,
+                "volume":      signal.volume,
+                "volume_ma":   signal.volume_ma,
+            }
+            trade_id = await self.reporter.report_trade(trade_data)
+            if trade_id:
+                self._trade_id = trade_id
+        except Exception as e:
+            self.log.debug(f"[REPORTER] report_open error: {e}")
+
+    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str) -> None:
+        if not self.reporter or not self._trade_id:
+            return
+        try:
+            import datetime
+            await self.reporter.patch_trade(self._trade_id, {
+                "exit_price":  exit_price,
+                "qty":         qty,
+                "pnl":         pnl,
+                "exit_reason": reason,
+                "exit_time":   datetime.datetime.utcnow().isoformat(),
+                "is_open":     False,
+            })
+            self._trade_id = None
+        except Exception as e:
+            self.log.debug(f"[REPORTER] report_close error: {e}")
+
+    async def _report_tp1(self, exit_price: float, qty: float, pnl: float) -> None:
+        """TP1 — записываем частичное закрытие как отдельную сделку."""
+        if not self.reporter:
+            return
+        try:
+            p = self.position
+            if not p:
+                return
+            import datetime
+            # Закрываем текущую сделку по TP1
+            if self._trade_id:
+                await self.reporter.patch_trade(self._trade_id, {
+                    "exit_price":  exit_price,
+                    "qty":         qty,
+                    "pnl":         pnl,
+                    "exit_reason": "TP1",
+                    "exit_time":   datetime.datetime.utcnow().isoformat(),
+                    "is_open":     False,
+                })
+            # Создаём новую сделку для остатка позиции
+            new_trade = {
+                "symbol":      self.cfg.symbol,
+                "direction":   p.direction,
+                "entry_price": p.entry_price,
+                "sl_price":    p.entry_price,  # SL на безубытке
+                "tp1_price":   p.tp1_price,
+                "tp2_price":   p.tp2_price,
+                "qty":         p.remaining_qty,
+                "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
+                "is_open":     True,
+                "mode":        self.cfg.mode,
+                "ema_fast":    p.entry_ema_fast,
+                "ema_slow":    p.entry_ema_slow,
+                "volume":      p.entry_volume,
+                "volume_ma":   p.entry_volume_ma,
+            }
+            trade_id = await self.reporter.report_trade(new_trade)
+            if trade_id:
+                self._trade_id = trade_id
+        except Exception as e:
+            self.log.debug(f"[REPORTER] report_tp1 error: {e}")
 
     # ------------------------------------------------------------------ #
     #  Trading logic                                                       #
@@ -145,6 +235,7 @@ class PositionTracker:
             entry_volume=signal.volume,
             entry_volume_ma=signal.volume_ma,
         )
+        self._trade_id = None
         self._save_state()
         self.log.info(
             f"Position opened | {signal.direction} | entry={signal.entry_price} "
@@ -153,17 +244,21 @@ class PositionTracker:
             f"volume={signal.volume} volume_ma={signal.volume_ma}"
         )
 
+    async def open_async(self, signal: Signal, qty: float) -> None:
+        """Открывает позицию и репортит в БД."""
+        self.open(signal, qty)
+        await self._report_open(signal, qty)
+        self._save_state()
+
     def force_close(self, reason: str, close_price: float) -> float:
         p = self.position
         if p is None:
             return 0.0
-
         qty = p.remaining_qty
         pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
         p.realized_pnl += pnl
         p.remaining_qty = 0.0
         p.closed = True
-
         indicators_str = (
             f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
             f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
@@ -176,11 +271,15 @@ class PositionTracker:
         self._clear_state()
         return pnl
 
+    async def force_close_async(self, reason: str, close_price: float) -> float:
+        pnl = self.force_close(reason, close_price)
+        await self._report_close(close_price, 0, pnl, "SL")
+        return pnl
+
     def check(self, current_price: float) -> Optional[str]:
         p = self.position
         if p is None or p.closed:
             return None
-
         if p.direction == "LONG":
             if current_price <= p.sl_price:
                 return "SL"
@@ -201,7 +300,6 @@ class PositionTracker:
         p = self.position
         if p is None:
             return 0.0
-
         indicators_str = (
             f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
             f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
@@ -230,7 +328,7 @@ class PositionTracker:
             p.tp1_hit = True
             old_sl = p.sl_price
             p.sl_price = p.entry_price
-            self._save_state()  # обновляем файл — remaining_qty и tp1_hit изменились
+            self._save_state()
             self.log.info(
                 f"TP1 hit | price={close_price} closed_qty={tp1_qty:.6f} "
                 f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
@@ -253,6 +351,24 @@ class PositionTracker:
             return pnl
 
         return 0.0
+
+    async def apply_hit_async(self, hit: str, close_price: float) -> float:
+        """Применяет hit и репортит в БД."""
+        p = self.position
+        tp1_qty = 0.0
+        if hit == "TP1" and p:
+            tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
+            tp1_qty = min(tp1_qty, p.remaining_qty)
+
+        pnl = self.apply_hit(hit, close_price)
+
+        if hit == "TP1":
+            await self._report_tp1(close_price, tp1_qty, pnl)
+            self._save_state()
+        elif hit in ("SL", "TP2"):
+            await self._report_close(close_price, p.remaining_qty if p else 0, pnl, hit)
+
+        return pnl
 
     @staticmethod
     def _calc_pnl(direction: str, entry: float, exit_price: float, qty: float) -> float:

@@ -168,7 +168,7 @@ async def main():
 
 
 async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter):
-    tracker   = PositionTracker(cfg, log)
+    tracker   = PositionTracker(cfg, log, reporter=reporter)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
 
@@ -245,20 +245,20 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
                         tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
                         if closed:
-                            tracker.apply_hit(hit, current_price)
+                            await tracker.apply_hit_async(hit, current_price)
                             await order_mgr.move_sl_to_breakeven(
                                 pos.direction, pos.entry_price,
                                 remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
                                 tp2_price=pos.tp2_price,
                             )
                         else:
-                            tracker.force_close(reason="exchange_stop_at_TP1", close_price=current_price)
+                            await tracker.force_close_async(reason="exchange_stop_at_TP1", close_price=current_price)
                     else:
                         closed = await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
                         if closed:
-                            tracker.apply_hit(hit, current_price)
+                            await tracker.apply_hit_async(hit, current_price)
                         else:
-                            tracker.force_close(reason=f"exchange_stop_at_{hit}", close_price=current_price)
+                            await tracker.force_close_async(reason=f"exchange_stop_at_{hit}", close_price=current_price)
                 return
 
             raw_signal = get_signal(df_buffer, cfg)
@@ -283,7 +283,7 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
             if result is not None:
                 entry_price, qty = result
                 signal.entry_price = entry_price
-                tracker.open(signal, qty=qty)
+                await tracker.open_async(signal, qty=qty)
 
         except Exception as e:
             log.error(f"on_candle error: {e}", exc_info=True)

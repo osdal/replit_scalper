@@ -1,9 +1,7 @@
 """
 Отправляет состояние бота в API сервер по HTTP.
-Не требует прямого подключения к БД — работает через REST API.
 """
 import asyncio
-import json
 import logging
 import os
 from typing import Optional
@@ -18,8 +16,6 @@ API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
 
 class DbReporter:
-    """Асинхронно репортит состояние бота в дашборд."""
-
     def __init__(self, symbol: str, logger: logging.Logger):
         self.symbol = symbol
         self.log = logger
@@ -41,21 +37,41 @@ class DbReporter:
     async def report_stopped(self) -> None:
         await self._patch({"is_running": False, "position": None})
 
-    async def report_trade(self, trade: dict) -> None:
-        """Записывает сделку в историю."""
+    async def report_trade(self, trade: dict) -> Optional[int]:
+        """Записывает новую сделку. Возвращает ID созданной записи."""
         session = await self._get_session()
         if session is None:
-            return
+            return None
         try:
             async with session.post(
                 f"{API_URL}/trades",
                 json=trade,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
-                if resp.status >= 400:
-                    self.log.warning(f"[REPORTER] trade POST failed: {resp.status}")
+                if resp.status in (200, 201):
+                    data = await resp.json()
+                    return data.get("id")
+                else:
+                    self.log.debug(f"[REPORTER] trade POST failed: {resp.status}")
         except Exception as e:
             self.log.debug(f"[REPORTER] trade error: {e}")
+        return None
+
+    async def patch_trade(self, trade_id: int, data: dict) -> None:
+        """Обновляет существующую сделку (закрытие)."""
+        session = await self._get_session()
+        if session is None:
+            return
+        try:
+            async with session.patch(
+                f"{API_URL}/trades/{trade_id}",
+                json=data,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400:
+                    self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
+        except Exception as e:
+            self.log.debug(f"[REPORTER] patch_trade error: {e}")
 
     async def _patch(self, data: dict) -> None:
         session = await self._get_session()
