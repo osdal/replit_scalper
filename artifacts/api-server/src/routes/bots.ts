@@ -150,8 +150,19 @@ router.post("/:symbol/stop", async (req, res) => {
       return res.json({ success: false, message: "Bot not running" });
     }
 
+    // Удаляем файл состояния позиции
+    const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
+    try {
+      if (require("fs").existsSync(stateFile)) {
+        require("fs").unlinkSync(stateFile);
+        console.log(`[STOP] Deleted state file: ${stateFile}`);
+      }
+    } catch (e) {
+      console.warn(`[STOP] Could not delete state file: ${e}`);
+    }
+
     await db.update(botsTable)
-      .set({ is_running: false, updated_at: new Date().toISOString() })
+      .set({ is_running: false, position: null, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol));
 
     res.json({ success: true, message: `Bot ${symbol} stopped` });
