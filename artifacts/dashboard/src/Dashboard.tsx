@@ -79,10 +79,14 @@ function fmt(n: number | null | undefined, decimals = 2) {
 
 function fmtTime(iso: string | null) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("ru-RU", {
-    month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit",
-  });
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const day   = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const year  = String(d.getFullYear()).slice(2); // 2026 → 26
+  const h     = String(d.getHours()).padStart(2, "0");
+  const m     = String(d.getMinutes()).padStart(2, "0");
+  return `${day}.${month}.${year} ${h}:${m}`;
 }
 
 function heartbeatAge(ts: string | null): string {
