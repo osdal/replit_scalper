@@ -40,7 +40,33 @@ for (const file of configs) {
   const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
   const symbol = (raw.symbol as string).toUpperCase();
   const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
-  if (existing) { console.log(`  ${symbol} already exists — skipping`); continue; }
+  if (existing) {
+    // Обновляем mode и конфигурацию из yaml
+    await db.update(botsTable).set({
+      mode:             (raw.mode as string) || "paper",
+      timeframe:        raw.timeframe as string,
+      leverage:         raw.leverage as number,
+      risk_pct:         raw.risk_pct as number,
+      sl_pct:           raw.sl_pct as number,
+      tp1_pct:          raw.tp1_pct as number,
+      tp1_close_pct:    raw.tp1_close_pct as number,
+      tp2_pct:          raw.tp2_pct as number,
+      ema_fast:         raw.ema_fast as number,
+      ema_slow:         raw.ema_slow as number,
+      volume_ma_period: raw.volume_ma_period as number,
+      volume_multiplier: raw.volume_multiplier as number,
+      htf_enabled:      (raw.htf_enabled as boolean) || false,
+      htf_timeframe:    (raw.htf_timeframe as string) || null,
+      htf_ema_fast:     (raw.htf_ema_fast as number) || null,
+      htf_ema_slow:     (raw.htf_ema_slow as number) || null,
+      auto_mode:        (raw.auto_mode as boolean) ?? true,
+      paper_balance:    (raw.paper_balance as number) || 1000,
+      log_file:         raw.log_file as string,
+      updated_at:       new Date().toISOString(),
+    }).where(eq(botsTable.symbol, symbol));
+    console.log(`  ${symbol} updated from ${file}`);
+    continue;
+  }
 
   await db.insert(botsTable).values({
     symbol, mode: (raw.mode as string) || "paper",
