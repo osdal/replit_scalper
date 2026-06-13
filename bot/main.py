@@ -246,7 +246,11 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
                         if closed:
                             tracker.apply_hit(hit, current_price)
-                            await order_mgr.move_sl_to_breakeven(pos.direction, pos.entry_price)
+                            await order_mgr.move_sl_to_breakeven(
+                                pos.direction, pos.entry_price,
+                                remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
+                                tp2_price=pos.tp2_price,
+                            )
                         else:
                             tracker.force_close(reason="exchange_stop_at_TP1", close_price=current_price)
                     else:

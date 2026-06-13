@@ -354,44 +354,32 @@ class OrderManager:
             self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
             return True
 
-    async def move_sl_to_breakeven(self, direction: str, entry_price: float) -> None:
+    async def move_sl_to_breakeven(
+        self, direction: str, entry_price: float,
+        remaining_qty: float = 0.0, tp2_price: float = 0.0
+    ) -> None:
         """
-        После срабатывания TP1 — отменяем старый SL и TAKE_PROFIT_MARKET если есть,
-        выставляем новый SL на безубыток. Лимитный TP2 остаётся нетронутым.
+        После срабатывания TP1:
+        1. Отменяем ВСЕ открытые ордера (включая Conditional/алго через cancel_all)
+        2. Выставляем новый SL на безубыток
+        3. Выставляем TP2 заново (он тоже отменился)
         """
         if self.cfg.mode == "live":
+            # Отменяем все ордера — и Basic и Conditional
             try:
-                open_orders = await self.client.futures_get_open_orders(symbol=self.cfg.symbol)
-                stop_side = _opposite_side(direction)
-                cancelled = 0
-                for order in open_orders:
-                    otype = order.get("type", "")
-                    side  = order.get("side", "")
-                    # Отменяем STOP_MARKET и TAKE_PROFIT_MARKET — они используют closePosition=True
-                    # Лимитные TP ордера (LIMIT) не трогаем
-                    if side == stop_side and otype in (
-                        FUTURE_ORDER_TYPE_STOP_MARKET, "TAKE_PROFIT_MARKET"
-                    ):
-                        try:
-                            await self.client.futures_cancel_order(
-                                symbol=self.cfg.symbol,
-                                orderId=order["orderId"],
-                            )
-                            cancelled += 1
-                            self.log.info(f"[LIVE] Cancelled {otype} for SL move")
-                        except Exception as ce:
-                            self.log.warning(f"[LIVE] Could not cancel order {order['orderId']}: {ce}")
-                if cancelled:
-                    await asyncio.sleep(0.8)
+                await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
+                self.log.info(f"[LIVE] All orders cancelled before SL move")
+                await asyncio.sleep(1.0)
             except Exception as e:
-                self.log.warning(f"[LIVE] Could not fetch open orders: {e}")
+                self.log.warning(f"[LIVE] Could not cancel orders: {e}")
 
             # Выставляем новый SL с retry
             for attempt in range(3):
                 try:
-                    await self._place_sl(direction, entry_price)
+                    qty = remaining_qty if remaining_qty > 0 else 0.0
+                    await self._place_sl(direction, entry_price, qty=qty)
                     self.log.info(f"[LIVE] SL moved to breakeven | stopPrice={entry_price}")
-                    return
+                    break
                 except Exception as e:
                     if attempt < 2:
                         self.log.warning(
@@ -400,6 +388,16 @@ class OrderManager:
                         await asyncio.sleep(1.5)
                     else:
                         self.log.error(f"[LIVE] Failed to place SL after 3 attempts: {e}")
+                        return
+
+            # Выставляем TP2 заново если передан
+            if tp2_price > 0 and remaining_qty > 0:
+                try:
+                    qty = await self._adjust_qty(remaining_qty)
+                    await self._place_tp_limit(direction, tp2_price, qty)
+                    self.log.info(f"[LIVE] TP2 re-placed after SL move | price={tp2_price} qty={qty}")
+                except Exception as e:
+                    self.log.error(f"[LIVE] Failed to re-place TP2: {e}")
         else:
             self.log.info(f"[PAPER] Would move SL to breakeven | price={entry_price}")
 
