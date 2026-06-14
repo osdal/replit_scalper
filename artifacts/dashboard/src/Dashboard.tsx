@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import OptimizerTab from "./OptimizerTab";
 import { fetchBots, fetchTrades, fetchStats, startBot, stopBot } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -440,6 +441,9 @@ export default function Dashboard() {
               </TabsTrigger>
               <TabsTrigger value="stats" className="data-[state=active]:bg-zinc-700">
                 <Settings className="w-4 h-4 mr-1.5" />Stats
+              </TabsTrigger>
+              <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
+                <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
               </TabsTrigger>
             </TabsList>
 
