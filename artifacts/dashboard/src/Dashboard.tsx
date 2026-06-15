@@ -359,6 +359,9 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  // Состояние оптимизатора — хранится здесь чтобы не сбрасывалось при переключении вкладок
+  const [optJobId, setOptJobId] = useState<string | null>(null);
+  const [optJob, setOptJob] = useState<any | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -467,7 +470,7 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
-              <OptimizerTab />
+              <OptimizerTab jobId={optJobId} job={optJob} setJobId={setOptJobId} setJob={setOptJob} />
             </TabsContent>
           </Tabs>
         </div>

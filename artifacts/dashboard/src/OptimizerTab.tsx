@@ -31,13 +31,18 @@ interface JobStatus {
 
 const SYMBOLS = ["ETHUSDT", "SOLUSDT", "BTCUSDT", "TRXUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT"];
 
-export default function OptimizerTab() {
+interface OptimizerTabProps {
+  jobId: string | null;
+  job: JobStatus | null;
+  setJobId: (id: string | null) => void;
+  setJob: (job: JobStatus | null) => void;
+}
+
+export default function OptimizerTab({ jobId, job, setJobId, setJob }: OptimizerTabProps) {
   const [symbol, setSymbol]   = useState("ETHUSDT");
   const [start, setStart]     = useState("2026-05-01");
   const [end, setEnd]         = useState("2026-06-13");
   const [trials, setTrials]   = useState(100);
-  const [jobId, setJobId]     = useState<string | null>(null);
-  const [job, setJob]         = useState<JobStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
 
