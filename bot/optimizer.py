@@ -240,7 +240,7 @@ Examples:
         best = study.best_value if study.best_value is not None else 0.0
         bar_len = 30
         filled = int(bar_len * n / args.trials)
-        bar = "█" * filled + "░" * (bar_len - filled)
+        bar = "#" * filled + "-" * (bar_len - filled)
         print(f"\r  [{bar}] {n}/{args.trials}  best={best:.4f}", end="", flush=True)
 
     study.optimize(
