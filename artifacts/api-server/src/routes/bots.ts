@@ -42,7 +42,7 @@ async function killPid(pid: number): Promise<void> {
     if (process.platform === "win32") {
       await execAsync(`taskkill /PID ${pid} /F`);
     } else {
-      process.kill(pid, "SIGTERM");
+      process.kill(pid, "SIGKILL");
     }
   } catch (e) {
     // процесс уже завершён
@@ -136,7 +136,10 @@ router.post("/:symbol/stop", async (req, res) => {
     // Сначала пробуем через Map (запущен через дашборд)
     const proc = botProcesses.get(symbol);
     if (proc) {
-      proc.kill("SIGTERM");
+      // Используем SIGKILL для форсированного завершения, если SIGTERM не сработает
+      if (!proc.killed) {
+        proc.kill("SIGKILL");
+      }
       botProcesses.delete(symbol);
     }
 
