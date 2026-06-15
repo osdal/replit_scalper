@@ -142,7 +142,7 @@ def save_csv(study: optuna.Study, out_path: str) -> None:
             row.update(t.params)
             writer.writerow(row)
 
-    print(f"  Full results (top 100) saved → {out_path}")
+    print(f"  Full results (top 100) saved -> {out_path}")
 
 
 async def download_data(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame | None]:
@@ -215,7 +215,7 @@ Examples:
 
     print(f"\n  Symbol:    {cfg.symbol}")
     print(f"  Timeframe: {cfg.timeframe}")
-    print(f"  Period:    {cfg.backtest_start}  →  {cfg.backtest_end}")
+    print(f"  Period:    {cfg.backtest_start} -> {cfg.backtest_end}")
     print(f"  Trials:    {args.trials}")
     print(f"\n  Downloading historical data from Binance...")
 
