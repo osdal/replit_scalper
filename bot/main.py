@@ -213,13 +213,7 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
             current_price = float(candle["close"])
             candle_count[0] += 1
 
-            if candle_count[0] % HEARTBEAT_CANDLES == 0:
-                htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
-                log.info(
-                    f"Heartbeat | candles={candle_count[0]} "
-                    f"price={current_price:.2f} htf_trend={htf_trend_now}"
-                )
-                # Репортим heartbeat и текущую позицию в дашборд
+            # Репортим heartbeat и позицию каждую свечу
                 await reporter.report_heartbeat(current_price)
                 if tracker.has_open_position():
                     pos = tracker.position
@@ -236,6 +230,13 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
                     })
                 else:
                     await reporter.report_position(None)
+
+        if candle_count[0] % HEARTBEAT_CANDLES == 0:
+                htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
+                log.info(
+                    f"Heartbeat | candles={candle_count[0]} "
+                    f"price={current_price:.2f} htf_trend={htf_trend_now}"
+                )
 
             if tracker.has_open_position():
                 hit = tracker.check(current_price)
