@@ -45,3 +45,8 @@ export async function runBacktest(symbol: string, payload: Record<string, unknow
   });
   return r.json();
 }
+
+export async function syncBinance(): Promise<{ success: boolean; synced: number }> {
+  const r = await fetch(`${API}/binance-sync`, { method: "POST" });
+  return r.json();
+}

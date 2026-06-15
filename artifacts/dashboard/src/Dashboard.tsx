@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -386,6 +386,20 @@ export default function Dashboard() {
   }, [load]);
 
   const [toggling, setToggling] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const result = await syncBinance();
+      alert(`Synced ${result.synced} trades from Binance`);
+      await load();
+    } catch (e) {
+      alert('Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleToggle = async (bot: Bot) => {
     if (toggling) return; // предотвращаем двойной клик
@@ -414,9 +428,15 @@ export default function Dashboard() {
             Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
-          <RefreshCw className="w-4 h-4 mr-2" />Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+            <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? 'Syncing...' : 'Sync Binance'}
+          </Button>
+          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+            <RefreshCw className="w-4 h-4 mr-2" />Refresh
+          </Button>
+        </div>
       </div>
 
       {loading ? (
