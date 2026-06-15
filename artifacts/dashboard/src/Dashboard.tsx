@@ -100,7 +100,7 @@ function heartbeatAge(ts: string | null): string {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle }: { bot: Bot; onToggle: () => void }) {
+function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void; isToggling: boolean }) {
   const pos = bot.position;
   const isLong = pos?.direction === "LONG";
   const unrealizedPnl = pos && bot.current_price
@@ -125,9 +125,11 @@ function BotCard({ bot, onToggle }: { bot: Bot; onToggle: () => void }) {
           size="sm"
           variant={bot.is_running ? "destructive" : "default"}
           onClick={onToggle}
+          disabled={isToggling}
           className="h-7 px-3"
         >
-          {bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
+          {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
+           bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
         </Button>
       </CardHeader>
 
@@ -383,10 +385,23 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [load]);
 
+  const [toggling, setToggling] = useState<string | null>(null);
+
   const handleToggle = async (bot: Bot) => {
-    if (bot.is_running) await stopBot(bot.symbol);
-    else await startBot(bot.symbol);
-    await load();
+    if (toggling) return; // предотвращаем двойной клик
+    setToggling(bot.symbol);
+    try {
+      if (bot.is_running) {
+        await stopBot(bot.symbol);
+      } else {
+        await startBot(bot.symbol);
+      }
+      // Небольшая задержка чтобы БД успела обновиться
+      await new Promise(r => setTimeout(r, 1000));
+      await load();
+    } finally {
+      setToggling(null);
+    }
   };
 
   return (
@@ -427,7 +442,7 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} />
+                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} />
                 ))}
               </div>
             )}
