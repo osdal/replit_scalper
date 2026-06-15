@@ -465,6 +465,10 @@ export default function Dashboard() {
             <TabsContent value="stats" className="mt-4">
               <StatsTable stats={stats} />
             </TabsContent>
+
+            <TabsContent value="optimizer" className="mt-4">
+              <OptimizerTab />
+            </TabsContent>
           </Tabs>
         </div>
       )}
