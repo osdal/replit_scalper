@@ -36,8 +36,8 @@ MIN_TRADES = 10
 
 def score(stats: BacktestStats) -> float:
     """
-    profit_factor × sqrt(n_trades)
-    Balances quality and quantity — prevents single lucky trades from winning.
+    profit_factor * sqrt(n_trades)
+    Balances quality and quantity - prevents single lucky trades from winning.
     Returns 0 if fewer than MIN_TRADES trades.
     """
     if stats.total_trades < MIN_TRADES:
@@ -110,7 +110,7 @@ def print_top(study: optuna.Study, n: int = 10) -> None:
         print(f"    {k:25s} = {v}")
     print(f"  Best score: {best.value:.4f}")
     print(f"{'=' * 72}")
-    header = f"  {'Rank':>4}  {'Score':>6}  {'EMA_F':>5}  {'EMA_S':>5}  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'Vol×':>5}  {'TP1cl%':>6}"
+    header = f"  {'Rank':>4}  {'Score':>6}  {'EMA_F':>5}  {'EMA_S':>5}  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'VolX':>5}  {'TP1cl%':>6}"
     print(header)
     print(f"  {'-' * 66}")
     for rank, t in enumerate(trials[:n], start=1):
@@ -260,7 +260,7 @@ Examples:
 
     log.info(
         f"Optimization done | {cfg.symbol} {cfg.timeframe} "
-        f"{cfg.backtest_start}→{cfg.backtest_end} | "
+        f"{cfg.backtest_start}->{cfg.backtest_end} | "
         f"trials={args.trials} | best={study.best_value:.4f}"
     )
 
