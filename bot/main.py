@@ -214,24 +214,24 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
             candle_count[0] += 1
 
             # Репортим heartbeat и позицию каждую свечу
-                await reporter.report_heartbeat(current_price)
-                if tracker.has_open_position():
-                    pos = tracker.position
-                    await reporter.report_position({
-                        "direction":    pos.direction,
-                        "entry_price":  pos.entry_price,
-                        "sl_price":     pos.sl_price,
-                        "tp1_price":    pos.tp1_price,
-                        "tp2_price":    pos.tp2_price,
-                        "total_qty":    pos.total_qty,
-                        "remaining_qty": pos.remaining_qty,
-                        "tp1_hit":      pos.tp1_hit,
-                        "realized_pnl": pos.realized_pnl,
-                    })
-                else:
-                    await reporter.report_position(None)
+            await reporter.report_heartbeat(current_price)
+            if tracker.has_open_position():
+                pos = tracker.position
+                await reporter.report_position({
+                    "direction":    pos.direction,
+                    "entry_price":  pos.entry_price,
+                    "sl_price":     pos.sl_price,
+                    "tp1_price":    pos.tp1_price,
+                    "tp2_price":    pos.tp2_price,
+                    "total_qty":    pos.total_qty,
+                    "remaining_qty": pos.remaining_qty,
+                    "tp1_hit":      pos.tp1_hit,
+                    "realized_pnl": pos.realized_pnl,
+                })
+            else:
+                await reporter.report_position(None)
 
-        if candle_count[0] % HEARTBEAT_CANDLES == 0:
+            if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
                 log.info(
                     f"Heartbeat | candles={candle_count[0]} "
