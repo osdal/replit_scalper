@@ -69,11 +69,14 @@ async def start_kline_polling(
     handlers: Dict[str, Callable],
     logger: Optional[logging.Logger] = None,
     poll_seconds: int = 10,
+    shutdown_event: Optional[asyncio.Event] = None,
 ) -> None:
     """
     REST polling — checks for new closed candles every poll_seconds.
     При старте инициализирует last_seen последней закрытой свечой,
     чтобы не прокручивать старые свечи после перезапуска.
+    
+    shutdown_event: если передан, polling выходит когда событие установлено.
     """
     last_seen: Dict[str, pd.Timestamp] = {}
 
@@ -101,6 +104,12 @@ async def start_kline_polling(
         )
 
     while True:
+        # Проверяем shutdown_event перед каждой итерацией
+        if shutdown_event and shutdown_event.is_set():
+            if logger:
+                logger.info("Shutdown event received, stopping polling")
+            break
+        
         for interval, callback in handlers.items():
             try:
                 klines = await client.futures_klines(
@@ -140,7 +149,19 @@ async def start_kline_polling(
                 if logger:
                     logger.error(f"Polling error ({interval}): {e}")
 
-        await asyncio.sleep(poll_seconds)
+        try:
+            # Используем wait_for с timeout вместо sleep, чтобы проверять shutdown_event чаще
+            await asyncio.wait_for(
+                shutdown_event.wait() if shutdown_event else asyncio.sleep(poll_seconds),
+                timeout=poll_seconds
+            )
+            if shutdown_event and shutdown_event.is_set():
+                if logger:
+                    logger.info("Shutdown event received during sleep, stopping polling")
+                break
+        except asyncio.TimeoutError:
+            # Timeout ожидается, просто продолжаем цикл
+            pass
 
 
 async def start_kline_socket(
@@ -150,12 +171,22 @@ async def start_kline_socket(
     on_candle_close: Callable,
     logger: Optional[logging.Logger] = None,
     reconnect_delay: int = 5,
+    shutdown_event: Optional[asyncio.Event] = None,
 ) -> None:
-    """Single-stream WebSocket."""
+    """Single-stream WebSocket.
+    
+    shutdown_event: если передан, соединение закрывается когда событие установлено.
+    """
     stream = f"{symbol.lower()}@kline_{interval}"
     url = f"{FUTURES_WS_URL}/{stream}"
 
     while True:
+        # Проверяем shutdown_event перед каждым переподключением
+        if shutdown_event and shutdown_event.is_set():
+            if logger:
+                logger.info("Shutdown event received, stopping WebSocket")
+            break
+        
         try:
             if logger:
                 logger.info(f"WebSocket connecting | {url}")
@@ -163,6 +194,12 @@ async def start_kline_socket(
                 if logger:
                     logger.info(f"WebSocket connected | {interval}")
                 async for raw in ws:
+                    # Проверяем shutdown перед обработкой каждого сообщения
+                    if shutdown_event and shutdown_event.is_set():
+                        if logger:
+                            logger.info("Shutdown event received, closing WebSocket")
+                        return
+                    
                     msg = json.loads(raw)
                     kline = msg.get("k", {})
                     if not kline.get("x"):
@@ -189,4 +226,15 @@ async def start_kline_socket(
                     f"WebSocket error ({interval}): {e} — reconnecting in {reconnect_delay}s"
                 )
 
-        await asyncio.sleep(reconnect_delay)
+        # Используем wait_for для проверки shutdown_event во время переподключения
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait() if shutdown_event else asyncio.sleep(reconnect_delay),
+                timeout=reconnect_delay
+            )
+            if shutdown_event and shutdown_event.is_set():
+                if logger:
+                    logger.info("Shutdown event received during reconnect delay, stopping")
+                break
+        except asyncio.TimeoutError:
+            pass
