@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import signal
 from typing import Optional
 
 import pandas as pd
@@ -20,6 +21,9 @@ from db_reporter import DbReporter
 load_dotenv()
 
 HEARTBEAT_CANDLES = 3
+
+# Глобальная переменная для управления основным циклом
+shutdown_event: Optional[asyncio.Event] = None
 
 
 async def _sync_position_on_start(
@@ -126,7 +130,21 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
         log.error(f"[SYNC] Failed to replace TP/SL orders: {e}", exc_info=True)
 
 
+def _setup_signal_handlers(log):
+    """Регистрируем обработчики сигналов для graceful shutdown."""
+    def signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        log.info(f"Received signal {sig_name} ({signum}), initiating graceful shutdown...")
+        if shutdown_event:
+            shutdown_event.set()
+    
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+
 async def main():
+    global shutdown_event
+    
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
     log = get_logger(log_file=cfg.log_file, mode=cfg.mode, symbol=cfg.symbol)
@@ -152,13 +170,19 @@ async def main():
     )
 
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
+    
+    # Инициализируем событие для shutdown
+    shutdown_event = asyncio.Event()
+    
+    # Регистрируем обработчики сигналов
+    _setup_signal_handlers(log)
 
     try:
         if cfg.mode == "backtest":
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log, reporter)
+        await _run_live_or_paper(cfg, client, log, reporter, shutdown_event)
 
     finally:
         await reporter.report_stopped()
@@ -167,7 +191,7 @@ async def main():
         log.info("Bot stopped")
 
 
-async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter):
+async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter, shutdown_event: asyncio.Event):
     tracker   = PositionTracker(cfg, log, reporter=reporter)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
@@ -306,12 +330,14 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
     if cfg.htf_enabled:
         handlers[cfg.htf_timeframe] = on_htf_candle
 
+    # Запускаем polling с передачей shutdown_event
     await start_kline_polling(
         client=client,
         symbol=cfg.symbol,
         handlers=handlers,
         logger=log,
         poll_seconds=10,
+        shutdown_event=shutdown_event,
     )
 
 
