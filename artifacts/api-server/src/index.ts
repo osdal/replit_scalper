@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { db, botsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
 import { exec } from "child_process";
 import { promisify } from "util";
 
@@ -23,7 +24,7 @@ async function resetStaleRunningBots(): Promise<void> {
       if (!isAlive) {
         await db.update(botsTable)
           .set({ is_running: false, updated_at: new Date().toISOString() })
-          .where(require("drizzle-orm").eq(botsTable.symbol, bot.symbol));
+          .where(eq(botsTable.symbol, bot.symbol));
         logger.info({ symbol: bot.symbol }, "Reset stale bot status to stopped");
       }
     }
