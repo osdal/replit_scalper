@@ -53,9 +53,10 @@ router.post("/", async (_req, res) => {
           symbol, limit: 1000,
         });
 
-        // 2. Получаем реальный PnL из income history
+        // 2. Получаем реальный PnL из income history за последние 30 дней
+        const startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
         const income: any[] = await binanceGet("/fapi/v1/income", {
-          symbol, incomeType: "REALIZED_PNL", limit: 1000,
+          symbol, incomeType: "REALIZED_PNL", limit: 1000, startTime,
         });
 
         if (!userTrades.length) continue;
