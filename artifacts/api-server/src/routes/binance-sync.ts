@@ -182,3 +182,31 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
 }
 
 export default router;
+
+// GET /binance-sync/income/:symbol — сырые income записи с Binance
+router.get("/income/:symbol", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const income: any[] = await binanceGet("/fapi/v1/income", {
+      symbol, incomeType: "REALIZED_PNL", limit: 1000, startTime,
+    });
+    res.json(income);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET /binance-sync/trades/:symbol — сырые userTrades с Binance  
+router.get("/trades/:symbol", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const trades: any[] = await binanceGet("/fapi/v1/userTrades", {
+      symbol, limit: 1000, startTime,
+    });
+    res.json(trades);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
