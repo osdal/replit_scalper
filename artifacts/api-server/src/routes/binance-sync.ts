@@ -92,25 +92,17 @@ router.get("/positions", async (_req, res) => {
 });
 
 /**
- * Группирует userTrades в открытие/закрытие позиций.
- * PnL берётся из income history для точности (после комиссий).
+ * Группирует userTrades в позиции.
+ * PnL суммируется из income history за период каждой позиции.
  */
 function groupPositions(trades: any[], symbol: string, income: any[]) {
   const positions: any[] = [];
-
-  // Создаём карту income по времени для быстрого поиска
-  const incomeByTime = new Map<number, number>();
-  for (const inc of income) {
-    const t = Math.floor(inc.time / 1000) * 1000; // округляем до секунды
-    incomeByTime.set(t, (incomeByTime.get(t) || 0) + parseFloat(inc.income));
-  }
 
   let openQty    = 0;
   let openSide   = "";
   let entryPrice = 0;
   let entryTime  = 0;
   let totalQty   = 0;
-  let closePnl   = 0;
   let exitPrice  = 0;
   let exitTime   = 0;
 
@@ -119,30 +111,26 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
     const price = parseFloat(t.price);
     const side  = t.side as string;
     const time  = t.time as number;
-    const pnl   = parseFloat(t.realizedPnl || "0");
 
     if (openQty === 0) {
-      // Открытие
       openSide   = side === "BUY" ? "LONG" : "SHORT";
       entryPrice = price;
       entryTime  = time;
       openQty    = qty;
       totalQty   = qty;
-      closePnl   = 0;
     } else if (
       (openSide === "LONG"  && side === "SELL") ||
       (openSide === "SHORT" && side === "BUY")
     ) {
-      // Закрытие
-      closePnl += pnl;
       exitPrice = price;
       exitTime  = time;
       openQty  -= qty;
 
       if (openQty <= 0.000001) {
-        // Ищем реальный PnL из income (точнее — включает комиссии)
-        const incomeKey = Math.floor(time / 1000) * 1000;
-        const realPnl = incomeByTime.get(incomeKey) ?? closePnl;
+        // Суммируем весь income за период позиции (entryTime -> exitTime + 5 sec buffer)
+        const realPnl = income
+          .filter(inc => inc.time >= entryTime && inc.time <= exitTime + 5000)
+          .reduce((sum, inc) => sum + parseFloat(inc.income), 0);
 
         positions.push({
           symbol,
@@ -161,18 +149,15 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
           mode:        "live",
         });
         openQty  = 0;
-        closePnl = 0;
         totalQty = 0;
       }
     } else {
-      // Добавление к позиции (усреднение)
       entryPrice = (entryPrice * openQty + price * qty) / (openQty + qty);
       openQty   += qty;
       totalQty  += qty;
     }
   }
 
-  // Незакрытая позиция
   if (openQty > 0.000001) {
     positions.push({
       symbol,
