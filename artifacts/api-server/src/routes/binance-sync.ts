@@ -212,9 +212,8 @@ router.get("/income/:symbol", async (req, res) => {
 router.get("/trades/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const trades: any[] = await binanceGet("/fapi/v1/userTrades", {
-      symbol, limit: 1000, startTime,
+      symbol, limit: 100,
     });
     res.json(trades);
   } catch (e) {
