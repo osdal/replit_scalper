@@ -53,16 +53,10 @@ router.post("/", async (_req, res) => {
           symbol, limit: 1000,
         });
 
-        // 2. Получаем реальный PnL из income history за последние 30 дней
-        const startTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
-        const income: any[] = await binanceGet("/fapi/v1/income", {
-          symbol, incomeType: "REALIZED_PNL", limit: 1000, startTime,
-        });
-
         if (!userTrades.length) continue;
 
-        // 3. Группируем userTrades в позиции
-        const positions = groupPositions(userTrades, symbol, income);
+        // 2. Группируем userTrades в позиции (realizedPnl уже есть в каждой сделке)
+        const positions = groupPositions(userTrades, symbol);
 
         for (const pos of positions) {
           await db.insert(tradesTable).values(pos);
@@ -94,19 +88,10 @@ router.get("/positions", async (_req, res) => {
 
 /**
  * Группирует userTrades в позиции.
- * PnL берётся из income через tradeId — точное совпадение с Binance.
+ * realizedPnl берётся напрямую из каждой сделки — точное совпадение с Binance.
  */
-function groupPositions(trades: any[], symbol: string, income: any[]) {
+function groupPositions(trades: any[], symbol: string) {
   const positions: any[] = [];
-
-  // Карта tradeId -> income для быстрого поиска
-  const incomeByTradeId = new Map<string, number>();
-  for (const inc of income) {
-    if (inc.tradeId) {
-      const existing = incomeByTradeId.get(String(inc.tradeId)) || 0;
-      incomeByTradeId.set(String(inc.tradeId), existing + parseFloat(inc.income));
-    }
-  }
 
   let openQty    = 0;
   let openSide   = "";
@@ -118,13 +103,14 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
   let closePnl   = 0;
 
   for (const t of trades) {
-    const qty     = parseFloat(t.qty);
-    const price   = parseFloat(t.price);
-    const side    = t.side as string;
-    const time    = t.time as number;
-    const tradeId = String(t.id);
+    const qty   = parseFloat(t.qty);
+    const price = parseFloat(t.price);
+    const side  = t.side as string;
+    const time  = t.time as number;
+    const pnl   = parseFloat(t.realizedPnl || "0");
 
     if (openQty === 0) {
+      // Открытие позиции — realizedPnl = 0
       openSide   = side === "BUY" ? "LONG" : "SHORT";
       entryPrice = price;
       entryTime  = time;
@@ -135,11 +121,11 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
       (openSide === "LONG"  && side === "SELL") ||
       (openSide === "SHORT" && side === "BUY")
     ) {
+      // Закрытие — суммируем realizedPnl
       exitPrice  = price;
       exitTime   = time;
       openQty   -= qty;
-      // Добавляем PnL из income по tradeId
-      closePnl  += incomeByTradeId.get(tradeId) || 0;
+      closePnl  += pnl;
 
       if (openQty <= 0.000001) {
         positions.push({
@@ -163,13 +149,14 @@ function groupPositions(trades: any[], symbol: string, income: any[]) {
         closePnl = 0;
       }
     } else {
-      // Усреднение
+      // Добавление к позиции (усреднение входа)
       entryPrice = (entryPrice * openQty + price * qty) / (openQty + qty);
       openQty   += qty;
       totalQty  += qty;
     }
   }
 
+  // Незакрытая позиция
   if (openQty > 0.000001) {
     positions.push({
       symbol,
