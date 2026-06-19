@@ -101,33 +101,40 @@ function groupPositions(trades: any[], symbol: string) {
   let exitPrice  = 0;
   let exitTime   = 0;
   let closePnl   = 0;
+  let openCommission = 0;
 
   for (const t of trades) {
     const qty   = parseFloat(t.qty);
     const price = parseFloat(t.price);
     const side  = t.side as string;
     const time  = t.time as number;
-    const pnl   = parseFloat(t.realizedPnl || "0");
+    const pnl        = parseFloat(t.realizedPnl || "0");
+    const commission = parseFloat(t.commission || "0");
+    const commissionUsd = t.commissionAsset === "USDT" ? commission : 0;
+    const netPnl = pnl - commissionUsd;
 
     if (openQty === 0) {
-      // Открытие позиции — realizedPnl = 0
+      // Открытие позиции — запоминаем уплаченную комиссию
       openSide   = side === "BUY" ? "LONG" : "SHORT";
       entryPrice = price;
       entryTime  = time;
       openQty    = qty;
       totalQty   = qty;
       closePnl   = 0;
+      openCommission = commissionUsd;
     } else if (
       (openSide === "LONG"  && side === "SELL") ||
       (openSide === "SHORT" && side === "BUY")
     ) {
-      // Закрытие — суммируем realizedPnl
+      // Закрытие — суммируем netPnl (после комиссии закрытия)
       exitPrice  = price;
       exitTime   = time;
       openQty   -= qty;
-      closePnl  += pnl;
+      closePnl  += netPnl;
 
       if (openQty <= 0.000001) {
+        // Вычитаем комиссию открытия один раз на всю позицию
+        const finalPnl = closePnl - openCommission;
         positions.push({
           symbol,
           direction:   openSide,
@@ -137,8 +144,8 @@ function groupPositions(trades: any[], symbol: string) {
           sl_price:    0,
           tp1_price:   0,
           tp2_price:   0,
-          pnl:         Math.round(closePnl * 10000) / 10000,
-          exit_reason: closePnl >= 0 ? "TP" : "SL",
+          pnl:         Math.round(finalPnl * 10000) / 10000,
+          exit_reason: finalPnl >= 0 ? "TP" : "SL",
           entry_time:  new Date(entryTime).toISOString(),
           exit_time:   new Date(exitTime).toISOString(),
           is_open:     false,
@@ -147,6 +154,7 @@ function groupPositions(trades: any[], symbol: string) {
         openQty  = 0;
         totalQty = 0;
         closePnl = 0;
+        openCommission = 0;
       }
     } else {
       // Добавление к позиции (усреднение входа)
