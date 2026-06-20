@@ -44,7 +44,7 @@ def calc_recovery_quantity(
     balance: float,
     risk_pct: float,
     sl_pct: float,
-    max_multiplier: Optional[float] = None,
+    max_pct: Optional[float] = None,
 ) -> float:
     """
     Рассчитывает размер позиции-компенсатора так, чтобы прибыль
@@ -54,20 +54,20 @@ def calc_recovery_quantity(
     tp1_distance   = entry_price * tp1_pct / 100
     qty            = target_profit / tp1_distance
 
-    max_multiplier (опционально) ограничивает размер позиции чтобы не превысить
-    обычный размер более чем в X раз. Если None — ограничения нет.
+    max_pct (опционально) ограничивает размер позиции в процентах от депозита.
+    Например, max_pct=50 означает что позиция не может превышать 50% от balance.
+    Если None или 0 — ограничения нет.
     """
     target_profit = debt_amount * (1 + bonus_pct / 100)
     tp1_distance = entry_price * tp1_pct / 100
     if tp1_distance <= 0:
         return 0.0
     raw_qty = target_profit / tp1_distance
-    # Если max_multiplier не задан — возвращаем сырой размер без ограничений
-    if max_multiplier is None or max_multiplier <= 0:
+    # Если max_pct не задан — возвращаем сырой размер без ограничений
+    if max_pct is None or max_pct <= 0:
         return raw_qty
-    # Ограничиваем максимальный размер позиции относительно стандартного
-    standard_qty = calc_quantity(balance, risk_pct, sl_pct, entry_price, 1)
-    max_qty = standard_qty * max_multiplier
+    # Ограничиваем максимальный размер позиции в % от депозита
+    max_qty = balance * max_pct / 100
     return min(raw_qty, max_qty)
 
 

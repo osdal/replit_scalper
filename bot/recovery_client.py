@@ -36,12 +36,12 @@ def readRecoveryConfig() -> dict:
         _config_cache = {
             "recovery_enabled": bool(raw.get("recovery_enabled", False)),
             "recovery_bonus_pct": float(raw.get("recovery_bonus_pct", 0)),
-            "recovery_max_multiplier": float(raw.get("recovery_max_multiplier", 3.0)),
+            "recovery_max_pct": float(raw.get("recovery_max_pct", 50.0)),
         }
         _config_mtime = stat.st_mtime
         return _config_cache
     except Exception:
-        return {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_multiplier": 3.0}
+        return {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_pct": 50.0}
 
 
 class RecoveryClient:

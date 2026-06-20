@@ -23,7 +23,6 @@ load_dotenv()
 
 HEARTBEAT_CANDLES = 3
 
-# Глобальная переменная для управления основным циклом
 shutdown_event: Optional[asyncio.Event] = None
 
 
@@ -309,9 +308,9 @@ async def _run_live_or_paper(
                 debt = claim["debtAmount"]
                 bonus = claim.get("bonusPct", 0.0)
                 balance = await order_mgr.get_balance()
-                # Читаем max_multiplier из recovery_config.yaml (0 = без ограничения)
+                # Читаем max_pct из recovery_config.yaml (0 = без ограничения)
                 rec_cfg = readRecoveryConfig()
-                max_mult = rec_cfg.get("recovery_max_multiplier", 3.0)
+                max_pct = rec_cfg.get("recovery_max_pct", 50.0)
                 recovery_qty = calc_recovery_quantity(
                     debt_amount=debt,
                     bonus_pct=bonus,
@@ -320,11 +319,11 @@ async def _run_live_or_paper(
                     balance=balance,
                     risk_pct=cfg.risk_pct,
                     sl_pct=cfg.sl_pct,
-                    max_multiplier=max_mult if max_mult > 0 else None,
+                    max_pct=max_pct if max_pct > 0 else None,
                 )
                 log.info(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
-                    f"bonus={bonus}% max_mult={max_mult} recovery_qty={recovery_qty:.6f}"
+                    f"bonus={bonus}% max_pct={max_pct}% recovery_qty={recovery_qty:.6f}"
                 )
 
             result = await order_mgr.open_position(signal, recovery_qty=recovery_qty)
