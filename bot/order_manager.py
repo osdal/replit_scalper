@@ -41,6 +41,7 @@ def calc_recovery_quantity(
     bonus_pct: float,
     tp1_pct: float,
     entry_price: float,
+    max_multiplier: float = 3.0,
 ) -> float:
     """
     Рассчитывает размер позиции-компенсатора так, чтобы прибыль
@@ -49,12 +50,25 @@ def calc_recovery_quantity(
     target_profit = debt_amount * (1 + bonus_pct/100)
     tp1_distance   = entry_price * tp1_pct / 100
     qty            = target_profit / tp1_distance
+
+    max_multiplier ограничивает размер позиции чтобы не превысить
+    обычный размер более чем в X раз (защита от огромных позиций при большом долге).
     """
     target_profit = debt_amount * (1 + bonus_pct / 100)
     tp1_distance = entry_price * tp1_pct / 100
     if tp1_distance <= 0:
         return 0.0
-    return target_profit / tp1_distance
+    raw_qty = target_profit / tp1_distance
+    # Ограничиваем максимальный размер позиции
+    max_qty = _standard_qty(entry_price) * max_multiplier
+    return min(raw_qty, max_qty)
+
+
+def _standard_qty(entry_price: float, balance: float = 1000.0, risk_pct: float = 1.0, sl_pct: float = 0.5) -> float:
+    """Рассчитывает стандартный размер позиции для сравнения."""
+    risk_amount = balance * risk_pct / 100
+    sl_distance_pct = sl_pct / 100
+    return risk_amount / (entry_price * sl_distance_pct)
 
 
 def _round_step(value: float, step: float) -> float:

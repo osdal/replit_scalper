@@ -74,6 +74,27 @@ class RecoveryClient:
         except Exception as e:
             self.log.debug(f"[RECOVERY] report error: {e}")
 
+    async def release(self, chain_id: int) -> None:
+        """
+        Освобождает захваченную цепочку (переводит обратно в free).
+        Вызывается если не удалось открыть позицию-компенсатор.
+        """
+        session = await self._get_session()
+        if session is None:
+            return
+        try:
+            async with session.post(
+                f"{API_URL}/recovery/release",
+                json={"symbol": self.symbol, "chainId": chain_id},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    self.log.info(f"[RECOVERY] Released chain #{chain_id}")
+                else:
+                    self.log.debug(f"[RECOVERY] release failed: {resp.status}")
+        except Exception as e:
+            self.log.debug(f"[RECOVERY] release error: {e}")
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()

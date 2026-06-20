@@ -355,11 +355,8 @@ async def _run_live_or_paper(
                 )
             elif chain_id is not None:
                 # Не удалось открыть позицию — освобождаем захваченный долг
-                # (сообщаем report с pnl=0 и тем же chain_id, сервер пометит free again? 
-                #  проще: report с маленьким отрицательным pnl=0 не подходит, поэтому
-                #  просто логируем — долг останется locked, что не идеально, но open_position
-                #  падает крайне редко (qty=0 случай уже обработан внутри))
-                log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — chain stays locked")
+                log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
+                await recovery.release(chain_id=chain_id)
 
         except Exception as e:
             log.error(f"on_candle error: {e}", exc_info=True)

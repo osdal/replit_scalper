@@ -1,4 +1,4 @@
-import { sqliteTable, text, real, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, real, integer, index } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -18,7 +18,9 @@ export const recoveryChainsTable = sqliteTable("recovery_chains", {
   created_at:    text("created_at").notNull(),
   updated_at:    text("updated_at").notNull(),
   closed_at:     text("closed_at"),
-});
+}, (table) => ({
+  statusIdx: index("idx_recovery_status").on(table.status),
+}));
 
 export const insertRecoveryChainSchema = createInsertSchema(recoveryChainsTable).omit({ id: true });
 export type InsertRecoveryChain = z.infer<typeof insertRecoveryChainSchema>;

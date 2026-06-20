@@ -6,25 +6,33 @@
 import { Router } from "express";
 import { db, recoveryChainsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
-
-const router = Router();
-
-// GET /recovery/config — глобальный флаг включён ли recovery режим
-// Хранится в простом JSON файле через fs, не в БД — чтобы менять без БД
 import fs from "fs";
 import path from "path";
 
+const router = Router();
+
+// ── Config caching ─────────────────────────────────────────────────────────
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(process.env.BOT_DIR || "../../bot", "recovery_config.yaml");
 
+let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number } | null = null;
+let _configMtime = 0;
+
 function readRecoveryConfig(): { recovery_enabled: boolean; recovery_bonus_pct: number } {
   try {
+    const stat = fs.statSync(CONFIG_PATH);
+    // Используем кэш если файл не менялся
+    if (_configCache && stat.mtimeMs === _configMtime) {
+      return _configCache;
+    }
     const yaml = require("js-yaml");
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
-    return {
+    _configCache = {
       recovery_enabled: !!raw.recovery_enabled,
       recovery_bonus_pct: Number(raw.recovery_bonus_pct) || 0,
     };
+    _configMtime = stat.mtimeMs;
+    return _configCache;
   } catch {
     return { recovery_enabled: false, recovery_bonus_pct: 0 };
   }
@@ -44,6 +52,8 @@ router.put("/config", (req, res) => {
       recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
     });
     fs.writeFileSync(CONFIG_PATH, `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`);
+    // Сбрасываем кэш после записи
+    _configCache = null;
     res.json(readRecoveryConfig());
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -128,9 +138,14 @@ router.post("/report", async (req, res) => {
     const now = new Date().toISOString();
 
     if (chainId) {
-      // Это была компенсирующая сделка
+      // Это была компенсирующая сделка — проверяем что бот является владельцем
       const [chain] = await db.select().from(recoveryChainsTable).where(eq(recoveryChainsTable.id, chainId));
       if (!chain) return res.status(404).json({ error: "Chain not found" });
+
+      // Валидация: только бот, который захватил цепочку, может по ней отчитаться
+      if (chain.locked_by && chain.locked_by !== symbol) {
+        return res.status(403).json({ error: `Chain #${chainId} is locked by ${chain.locked_by}, not ${symbol}` });
+      }
 
       if (pnl >= 0) {
         await db.update(recoveryChainsTable)
@@ -157,6 +172,35 @@ router.post("/report", async (req, res) => {
       }
       return res.json({ success: true, action: "none" });
     }
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+/**
+ * POST /recovery/release
+ * Освобождает захваченную цепочку (переводит обратно в free).
+ * Вызывается ботом если не удалось открыть позицию-компенсатор.
+ * body: { symbol, chainId }
+ */
+router.post("/release", async (req, res) => {
+  try {
+    const { symbol, chainId } = req.body;
+    if (!chainId) return res.status(400).json({ error: "chainId is required" });
+
+    const [chain] = await db.select().from(recoveryChainsTable).where(eq(recoveryChainsTable.id, chainId));
+    if (!chain) return res.status(404).json({ error: "Chain not found" });
+
+    // Только владелец может освободить
+    if (chain.locked_by && chain.locked_by !== symbol) {
+      return res.status(403).json({ error: `Chain #${chainId} is locked by ${chain.locked_by}` });
+    }
+
+    await db.update(recoveryChainsTable)
+      .set({ status: "free", locked_by: null, updated_at: new Date().toISOString() })
+      .where(eq(recoveryChainsTable.id, chainId));
+
+    res.json({ success: true, action: "released" });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
