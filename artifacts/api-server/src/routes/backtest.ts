@@ -10,11 +10,13 @@ router.post("/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const { start, end, config } = req.body;
 
-  // Конвертируем JSON в Python-совместимый формат (true -> True, false -> False)
-  const configJson = JSON.stringify(config).replace(/: true/g, ": True").replace(/: false/g, ": False");
+  // Конвертируем JSON в Python-совместимый формат
+  const configJson = JSON.stringify(config)
+    .replace(/: true/g, ": True")
+    .replace(/: false/g, ": False");
 
   // Запускаем Python бэктест через subprocess
-  const proc = spawn("python", ["-c", `
+  const pythonCode = `
 import asyncio, json, sys
 sys.path.insert(0, '${BOT_DIR}')
 from config import Config
@@ -24,13 +26,16 @@ import os
 from dotenv import load_dotenv
 load_dotenv('${BOT_DIR}/.env')
 
+config_data = ${configJson}
+print("CONFIG:", json.dumps(config_data), file=sys.stderr)
+
 cfg = Config(
   symbol='${symbol}',
   mode='backtest',
   backtest_start='${start}',
   backtest_end='${end}',
   log_file='logs/backtest.log',
-  **${configJson}
+  **config_data
 )
 
 async def main():
@@ -57,7 +62,9 @@ async def main():
     await client.close_connection()
 
 asyncio.run(main())
-  `], { cwd: BOT_DIR });
+`;
+
+  const proc = spawn("python", ["-c", pythonCode], { cwd: BOT_DIR });
 
   let output = "";
   let error  = "";
@@ -66,12 +73,13 @@ asyncio.run(main())
 
   proc.on("close", (code) => {
     if (code !== 0) {
+      console.error("[BACKTEST] Python error:", error);
       return res.status(500).json({ error: error || "Backtest failed" });
     }
     try {
       res.json(JSON.parse(output.trim()));
     } catch {
-      res.status(500).json({ error: "Failed to parse backtest output" });
+      res.status(500).json({ error: "Failed to parse backtest output", raw: output });
     }
   });
 });
