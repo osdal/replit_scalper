@@ -44,7 +44,7 @@ def calc_recovery_quantity(
     balance: float,
     risk_pct: float,
     sl_pct: float,
-    max_multiplier: float = 3.0,
+    max_multiplier: Optional[float] = None,
 ) -> float:
     """
     Рассчитывает размер позиции-компенсатора так, чтобы прибыль
@@ -54,14 +54,17 @@ def calc_recovery_quantity(
     tp1_distance   = entry_price * tp1_pct / 100
     qty            = target_profit / tp1_distance
 
-    max_multiplier ограничивает размер позиции чтобы не превысить
-    обычный размер более чем в X раз (защита от огромных позиций при большом долге).
+    max_multiplier (опционально) ограничивает размер позиции чтобы не превысить
+    обычный размер более чем в X раз. Если None — ограничения нет.
     """
     target_profit = debt_amount * (1 + bonus_pct / 100)
     tp1_distance = entry_price * tp1_pct / 100
     if tp1_distance <= 0:
         return 0.0
     raw_qty = target_profit / tp1_distance
+    # Если max_multiplier не задан — возвращаем сырой размер без ограничений
+    if max_multiplier is None or max_multiplier <= 0:
+        return raw_qty
     # Ограничиваем максимальный размер позиции относительно стандартного
     standard_qty = calc_quantity(balance, risk_pct, sl_pct, entry_price, 1)
     max_qty = standard_qty * max_multiplier
@@ -111,7 +114,6 @@ class OrderManager:
         if self.cfg.mode != "live":
             return round(price, 4)
         await self._get_symbol_filters()
-        # Округляем по tickSize если он загружен, иначе по pricePrecision
         if self._tick_size:
             precision = max(0, round(-math.log10(self._tick_size)))
             return round(round(price / self._tick_size) * self._tick_size, precision)
@@ -175,23 +177,15 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def cancel_all_tp_sl(self, direction: str) -> None:
-        """
-        Отменяет все открытые ордера включая алго-ордера.
-        Binance имеет два типа ордеров:
-        - Обычные: futures_cancel_all_open_orders
-        - Алго (closePosition=True): /fapi/v1/openOrders (GET) + /fapi/v1/order/algo (DELETE)
-        """
         if self.cfg.mode != "live":
             return
 
-        # 1. Отменяем обычные ордера
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
             self.log.info(f"[LIVE] Regular orders cancelled | symbol={self.cfg.symbol}")
         except Exception as e:
             self.log.warning(f"[LIVE] cancel regular orders error: {e}")
 
-        # 2. Получаем список алго-ордеров и отменяем каждый
         try:
             algo_orders = await self.client._request_futures_api(
                 "get", "openOrders/algo", signed=True,
@@ -219,18 +213,12 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def _place_sl(self, direction: str, sl_price: float, qty: float = 0.0) -> None:
-        """
-        Выставляет Stop-Market ордер.
-        Использует reduceOnly + quantity вместо closePosition=True,
-        чтобы избежать algoOrder endpoint и ошибки -4130.
-        """
         stop_side = _opposite_side(direction)
         sl_price = await self._adjust_price(sl_price)
 
         if qty > 0:
             use_qty = await self._adjust_qty(qty)
         else:
-            # Получаем реальный размер позиции с биржи
             real_qty = await self._get_real_position_qty(direction)
             use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001)
 
@@ -245,7 +233,6 @@ class OrderManager:
         self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price} qty={use_qty}")
 
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
-        """Выставляет лимитный TP ордер с reduceOnly."""
         side  = _opposite_side(direction)
         price = await self._adjust_price(price)
         qty   = await self._adjust_qty(qty)
@@ -268,14 +255,9 @@ class OrderManager:
         tp1_price: float,
         tp2_price: float,
     ) -> None:
-        """
-        Выставляет SL + TP1 (частичный) + TP2 (остаток) сразу после открытия.
-        TP1 закрывает tp1_close_pct% позиции, TP2 — остаток.
-        """
         tp1_qty = await self._adjust_qty(total_qty * self.cfg.tp1_close_pct / 100)
         tp2_qty = await self._adjust_qty(total_qty - tp1_qty)
 
-        # Передаём qty явно чтобы не использовать closePosition=True (algoOrder)
         await self._place_sl(direction, sl_price, qty=total_qty)
         await self._place_tp_limit(direction, tp1_price, tp1_qty)
         await self._place_tp_limit(direction, tp2_price, tp2_qty)
@@ -288,12 +270,6 @@ class OrderManager:
         self, signal: Signal,
         recovery_qty: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
-        """
-        Если recovery_qty передан — открывает компенсирующую позицию:
-        размер берётся из recovery_qty, а не из стандартного risk_pct.
-        Вызывающий код (main.py) также должен пометить позицию как
-        recovery в трекере, чтобы TP1 закрывал 100% позиции.
-        """
         if recovery_qty is not None:
             raw_qty = recovery_qty
         else:
@@ -315,7 +291,6 @@ class OrderManager:
             )
             return None
 
-        # Для recovery-сделки TP1 закрывает 100% позиции — TP2 не нужен
         tp1_close_pct = 100 if recovery_qty is not None else self.cfg.tp1_close_pct
 
         if self.cfg.mode == "live":
@@ -333,7 +308,6 @@ class OrderManager:
                 f"{' [RECOVERY]' if recovery_qty is not None else ''}"
             )
             if recovery_qty is not None:
-                # Recovery: только SL + TP1 (100% закрытие), без TP2
                 await self._place_sl(signal.direction, signal.sl_price, qty=qty)
                 await self._place_tp_limit(signal.direction, signal.tp1_price, qty)
             else:
@@ -356,20 +330,11 @@ class OrderManager:
             return signal.entry_price, qty
 
     async def close_partial(self, direction: str, qty: float, price: float, reason: str) -> bool:
-        """
-        В live режиме TP1 уже выставлен на бирже — этот метод вызывается
-        когда бот обнаружил срабатывание по цене свечи.
-        Проверяем реальную позицию и логируем факт закрытия.
-        Возвращает False если позиция уже закрыта на бирже.
-        """
         if self.cfg.mode == "live":
             real_qty = await self._get_real_position_qty(direction)
             if real_qty == 0.0:
-                self.log.warning(
-                    f"[LIVE] Partial close already executed by exchange | {reason}"
-                )
+                self.log.warning(f"[LIVE] Partial close already executed by exchange | {reason}")
                 return False
-            # TP1 исполнился на бирже — просто логируем
             self.log.info(f"[LIVE] Partial close confirmed | {reason} price≈{price}")
             return True
         else:
@@ -377,21 +342,12 @@ class OrderManager:
             return True
 
     async def close_full(self, direction: str, qty: float, price: float, reason: str) -> bool:
-        """
-        В live режиме TP2/SL уже выставлены на бирже.
-        Проверяем реальную позицию — если закрыта биржей, просто логируем.
-        Если ещё открыта (например бот поймал SL раньше стопа) — закрываем маркетом.
-        Возвращает False если позиция уже закрыта на бирже.
-        """
         if self.cfg.mode == "live":
             real_qty = await self._get_real_position_qty(direction)
             if real_qty == 0.0:
-                self.log.warning(
-                    f"[LIVE] Full close already executed by exchange | {reason}"
-                )
+                self.log.warning(f"[LIVE] Full close already executed by exchange | {reason}")
                 return False
 
-            # Позиция ещё открыта — закрываем маркетом (SL не успел сработать)
             use_qty = await self._adjust_qty(real_qty if real_qty > 0 else qty)
             await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
@@ -410,14 +366,7 @@ class OrderManager:
         self, direction: str, entry_price: float,
         remaining_qty: float = 0.0, tp2_price: float = 0.0
     ) -> None:
-        """
-        После срабатывания TP1:
-        1. Отменяем ВСЕ открытые ордера (включая Conditional/алго через cancel_all)
-        2. Выставляем новый SL на безубыток
-        3. Выставляем TP2 заново (он тоже отменился)
-        """
         if self.cfg.mode == "live":
-            # Отменяем все ордера — и Basic и Conditional
             try:
                 await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
                 self.log.info(f"[LIVE] All orders cancelled before SL move")
@@ -425,7 +374,6 @@ class OrderManager:
             except Exception as e:
                 self.log.warning(f"[LIVE] Could not cancel orders: {e}")
 
-            # Выставляем новый SL с retry
             for attempt in range(3):
                 try:
                     qty = remaining_qty if remaining_qty > 0 else 0.0
@@ -442,7 +390,6 @@ class OrderManager:
                         self.log.error(f"[LIVE] Failed to place SL after 3 attempts: {e}")
                         return
 
-            # Выставляем TP2 заново если передан
             if tp2_price > 0 and remaining_qty > 0:
                 try:
                     qty = await self._adjust_qty(remaining_qty)

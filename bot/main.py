@@ -17,7 +17,7 @@ from order_manager import OrderManager, calc_recovery_quantity
 from position_tracker import PositionTracker, Position
 from backtester import run_backtest
 from db_reporter import DbReporter
-from recovery_client import RecoveryClient
+from recovery_client import RecoveryClient, readRecoveryConfig
 
 load_dotenv()
 
@@ -113,12 +113,9 @@ async def _sync_position_on_start(
 
 async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
     try:
-        # Сначала отменяем все открытые ордера
         await order_mgr.cancel_all_tp_sl(pos.direction)
-        # Увеличенная пауза чтобы биржа точно обработала отмены
         import asyncio as _asyncio
         await _asyncio.sleep(1.5)
-        # Выставляем новые TP/SL
         await order_mgr._place_all_orders(
             direction=pos.direction,
             total_qty=pos.remaining_qty,
@@ -132,7 +129,6 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
 
 
 def _setup_signal_handlers(log):
-    """Регистрируем обработчики сигналов для graceful shutdown."""
     def signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
         log.info(f"Received signal {sig_name} ({signum}), initiating graceful shutdown...")
@@ -173,10 +169,7 @@ async def main():
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
     recovery = RecoveryClient(symbol=cfg.symbol, logger=log)
     
-    # Инициализируем событие для shutdown
     shutdown_event = asyncio.Event()
-    
-    # Регистрируем обработчики сигналов
     _setup_signal_handlers(log)
 
     try:
@@ -204,14 +197,10 @@ async def _run_live_or_paper(
     handler   = SignalHandler(cfg, log)
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
-
-    # Репортим статус запуска
     await reporter.report_heartbeat(0)
 
     df_buffer: pd.DataFrame = await get_recent_klines(
-        client=client,
-        symbol=cfg.symbol,
-        interval=cfg.timeframe,
+        client=client, symbol=cfg.symbol, interval=cfg.timeframe,
         limit=max(cfg.ema_slow * 3, 200),
     )
     df_buffer = calculate_indicators(df_buffer, cfg)
@@ -220,17 +209,12 @@ async def _run_live_or_paper(
     htf_buffer: pd.DataFrame = pd.DataFrame()
     if cfg.htf_enabled:
         htf_buffer = await get_recent_klines(
-            client=client,
-            symbol=cfg.symbol,
-            interval=cfg.htf_timeframe,
+            client=client, symbol=cfg.symbol, interval=cfg.htf_timeframe,
             limit=max(cfg.htf_ema_slow * 3, 100),
         )
         htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
         trend = get_htf_trend_latest(htf_buffer)
-        log.info(
-            f"Loaded {len(htf_buffer)} candles for HTF warm-up "
-            f"({cfg.htf_timeframe}) | trend={trend}"
-        )
+        log.info(f"Loaded {len(htf_buffer)} candles for HTF warm-up ({cfg.htf_timeframe}) | trend={trend}")
 
     candle_count = [0]
 
@@ -244,7 +228,6 @@ async def _run_live_or_paper(
             current_price = float(candle["close"])
             candle_count[0] += 1
 
-            # Репортим heartbeat и позицию каждую свечу
             await reporter.report_heartbeat(current_price)
             if tracker.has_open_position():
                 pos = tracker.position
@@ -264,17 +247,13 @@ async def _run_live_or_paper(
 
             if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
-                log.info(
-                    f"Heartbeat | candles={candle_count[0]} "
-                    f"price={current_price:.2f} htf_trend={htf_trend_now}"
-                )
+                log.info(f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} htf_trend={htf_trend_now}")
 
             if tracker.has_open_position():
                 hit = tracker.check(current_price)
                 if hit:
                     pos = tracker.position
                     if hit == "TP1" and not pos.is_recovery:
-                        # Обычный частичный TP1
                         tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
                         if closed:
@@ -291,7 +270,6 @@ async def _run_live_or_paper(
                             if pnl < 0:
                                 await recovery.report(pnl=pnl)
                     else:
-                        # TP1 на recovery-позиции (100% закрытие), либо TP2, либо SL
                         closed = await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
                         if closed:
                             pnl = await tracker.apply_hit_async(hit, current_price)
@@ -314,10 +292,7 @@ async def _run_live_or_paper(
             if cfg.htf_enabled:
                 htf_trend = get_htf_trend_latest(htf_buffer)
                 if htf_trend is not None and raw_signal.direction != htf_trend:
-                    log.info(
-                        f"Signal {raw_signal.direction} BLOCKED by HTF "
-                        f"| htf_trend={htf_trend} entry={raw_signal.entry_price:.2f}"
-                    )
+                    log.info(f"Signal {raw_signal.direction} BLOCKED by HTF | htf_trend={htf_trend}")
                     return
 
             signal = raw_signal
@@ -333,8 +308,10 @@ async def _run_live_or_paper(
                 chain_id = claim["chainId"]
                 debt = claim["debtAmount"]
                 bonus = claim.get("bonusPct", 0.0)
-                # Получаем баланс для расчёта ограничения размера позиции
                 balance = await order_mgr.get_balance()
+                # Читаем max_multiplier из recovery_config.yaml (0 = без ограничения)
+                rec_cfg = readRecoveryConfig()
+                max_mult = rec_cfg.get("recovery_max_multiplier", 3.0)
                 recovery_qty = calc_recovery_quantity(
                     debt_amount=debt,
                     bonus_pct=bonus,
@@ -343,10 +320,11 @@ async def _run_live_or_paper(
                     balance=balance,
                     risk_pct=cfg.risk_pct,
                     sl_pct=cfg.sl_pct,
+                    max_multiplier=max_mult if max_mult > 0 else None,
                 )
                 log.info(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
-                    f"bonus={bonus}% recovery_qty={recovery_qty:.6f}"
+                    f"bonus={bonus}% max_mult={max_mult} recovery_qty={recovery_qty:.6f}"
                 )
 
             result = await order_mgr.open_position(signal, recovery_qty=recovery_qty)
@@ -359,7 +337,6 @@ async def _run_live_or_paper(
                     recovery_chain_id=chain_id,
                 )
             elif chain_id is not None:
-                # Не удалось открыть позицию — освобождаем захваченный долг
                 log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
                 await recovery.release(chain_id=chain_id)
 
@@ -383,14 +360,9 @@ async def _run_live_or_paper(
     if cfg.htf_enabled:
         handlers[cfg.htf_timeframe] = on_htf_candle
 
-    # Запускаем polling с передачей shutdown_event
     await start_kline_polling(
-        client=client,
-        symbol=cfg.symbol,
-        handlers=handlers,
-        logger=log,
-        poll_seconds=10,
-        shutdown_event=shutdown_event,
+        client=client, symbol=cfg.symbol, handlers=handlers,
+        logger=log, poll_seconds=10, shutdown_event=shutdown_event,
     )
 
 

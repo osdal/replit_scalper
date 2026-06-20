@@ -15,6 +15,34 @@ except ImportError:
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
+# ── Config caching ─────────────────────────────────────────────────────────
+_CONFIG_PATH = os.getenv("RECOVERY_CONFIG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_config.yaml"))
+
+_config_cache: Optional[dict] = None
+_config_mtime: float = 0
+
+
+def readRecoveryConfig() -> dict:
+    """Читает recovery_config.yaml с кэшированием."""
+    global _config_cache, _config_mtime
+    try:
+        stat = os.stat(_CONFIG_PATH)
+        if _config_cache and stat.st_mtime == _config_mtime:
+            return _config_cache
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            import yaml as _yaml
+            raw = _yaml.safe_load(f) or {}
+        _config_cache = {
+            "recovery_enabled": bool(raw.get("recovery_enabled", False)),
+            "recovery_bonus_pct": float(raw.get("recovery_bonus_pct", 0)),
+            "recovery_max_multiplier": float(raw.get("recovery_max_multiplier", 3.0)),
+        }
+        _config_mtime = stat.st_mtime
+        return _config_cache
+    except Exception:
+        return {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_multiplier": 3.0}
+
 
 class RecoveryClient:
     def __init__(self, symbol: str, logger: logging.Logger):
@@ -33,7 +61,6 @@ class RecoveryClient:
         """
         Пытается захватить свободный долг перед открытием новой позиции.
         Возвращает: {"chainId": int|None, "debtAmount": float, "bonusPct": float, "enabled": bool}
-        Если API недоступен или recovery выключен — chainId=None, enabled=False.
         """
         default = {"chainId": None, "debtAmount": 0.0, "bonusPct": 0.0, "enabled": False}
         session = await self._get_session()
@@ -53,10 +80,7 @@ class RecoveryClient:
         return default
 
     async def report(self, pnl: float, chain_id: Optional[int] = None) -> None:
-        """
-        Сообщает результат закрытой сделки.
-        chain_id передаётся если эта сделка была компенсатором.
-        """
+        """Сообщает результат закрытой сделки."""
         session = await self._get_session()
         if session is None:
             return
@@ -75,10 +99,7 @@ class RecoveryClient:
             self.log.debug(f"[RECOVERY] report error: {e}")
 
     async def release(self, chain_id: int) -> None:
-        """
-        Освобождает захваченную цепочку (переводит обратно в free).
-        Вызывается если не удалось открыть позицию-компенсатор.
-        """
+        """Освобождает захваченную цепочку (переводит обратно в free)."""
         session = await self._get_session()
         if session is None:
             return
