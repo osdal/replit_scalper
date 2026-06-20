@@ -280,14 +280,14 @@ function TradesTable({ trades }: { trades: Trade[] }) {
       <Table>
         <TableHeader>
           <TableRow className="border-zinc-800 hover:bg-transparent">
-            {["Symbol", "Dir", "Entry", "Exit", "Qty", "PnL", "Reason", "Open", "Close"].map((h) => (
+            {["Symbol", "Dir", "Entry", "Exit", "Qty", "PnL", "Reason", "Mode", "Open", "Close"].map((h) => (
               <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
             ))}
           </TableRow>
         </TableHeader>
         <TableBody>
           {trades.length === 0 && (
-            <TableRow><TableCell colSpan={9} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
+            <TableRow><TableCell colSpan={10} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
           )}
           {trades.map((t) => (
             <TableRow key={t.id} className="border-zinc-800 hover:bg-zinc-800/50">
@@ -309,6 +309,11 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                     {t.exit_reason}
                   </Badge>
                 )}
+              </TableCell>
+              <TableCell>
+                <Badge variant={t.mode === "live" ? "default" : "secondary"} className="text-xs">
+                  {t.mode?.toUpperCase() || "—"}
+                </Badge>
               </TableCell>
               <TableCell className="text-zinc-400 text-xs">{fmtTime(t.entry_time)}</TableCell>
               <TableCell className="text-zinc-400 text-xs">{fmtTime(t.exit_time)}</TableCell>
