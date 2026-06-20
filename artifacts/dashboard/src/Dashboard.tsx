@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
+import RecoveryTab from "./RecoveryTab";
 import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -13,7 +14,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
-  Play, Square, RefreshCw, Settings,
+  Play, Square, RefreshCw, Settings, Link2,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -483,6 +484,9 @@ export default function Dashboard() {
               <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
                 <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
               </TabsTrigger>
+              <TabsTrigger value="recovery" className="data-[state=active]:bg-zinc-700">
+                <Link2 className="w-4 h-4 mr-1.5" />Recovery
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="chart" className="mt-4">
@@ -506,6 +510,10 @@ export default function Dashboard() {
 
             <TabsContent value="optimizer" className="mt-4">
               <OptimizerTab jobId={optJobId} job={optJob} setJobId={setOptJobId} setJob={setOptJob} />
+            </TabsContent>
+
+            <TabsContent value="recovery" className="mt-4">
+              <RecoveryTab />
             </TabsContent>
           </Tabs>
         </div>

@@ -34,6 +34,22 @@ router.get("/config", (_req, res) => {
   res.json(readRecoveryConfig());
 });
 
+// PUT /recovery/config — изменить настройки recovery режима
+router.put("/config", (req, res) => {
+  try {
+    const { recovery_enabled, recovery_bonus_pct } = req.body;
+    const yaml = require("js-yaml");
+    const content = yaml.dump({
+      recovery_enabled: !!recovery_enabled,
+      recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
+    });
+    fs.writeFileSync(CONFIG_PATH, `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`);
+    res.json(readRecoveryConfig());
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 /**
  * POST /recovery/claim
  * Бот вызывает это перед открытием новой позиции.
