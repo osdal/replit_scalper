@@ -11,9 +11,10 @@ router.post("/:symbol", async (req, res) => {
   const { start, end, config } = req.body;
 
   // Конвертируем JSON в Python-совместимый формат
+  // true -> True, false -> False (для всех булевых полей)
   const configJson = JSON.stringify(config)
-    .replace(/: true/g, ": True")
-    .replace(/: false/g, ": False");
+    .replace(/:\s*true/g, ": True")
+    .replace(/:\s*false/g, ": False");
 
   // Запускаем Python бэктест через subprocess
   const pythonCode = `
@@ -27,7 +28,6 @@ from dotenv import load_dotenv
 load_dotenv('${BOT_DIR}/.env')
 
 config_data = ${configJson}
-print("CONFIG:", json.dumps(config_data), file=sys.stderr)
 
 cfg = Config(
   symbol='${symbol}',
