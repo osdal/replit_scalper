@@ -172,7 +172,7 @@ async def main():
 
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
     recovery = RecoveryClient(symbol=cfg.symbol, logger=log)
-
+    
     # Инициализируем событие для shutdown
     shutdown_event = asyncio.Event()
     
@@ -333,11 +333,16 @@ async def _run_live_or_paper(
                 chain_id = claim["chainId"]
                 debt = claim["debtAmount"]
                 bonus = claim.get("bonusPct", 0.0)
+                # Получаем баланс для расчёта ограничения размера позиции
+                balance = await order_mgr.get_balance()
                 recovery_qty = calc_recovery_quantity(
                     debt_amount=debt,
                     bonus_pct=bonus,
                     tp1_pct=cfg.tp1_pct,
                     entry_price=signal.entry_price,
+                    balance=balance,
+                    risk_pct=cfg.risk_pct,
+                    sl_pct=cfg.sl_pct,
                 )
                 log.info(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
