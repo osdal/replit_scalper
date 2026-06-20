@@ -10,6 +10,9 @@ router.post("/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const { start, end, config } = req.body;
 
+  // Конвертируем JSON в Python-совместимый формат (true -> True, false -> False)
+  const configJson = JSON.stringify(config).replace(/: true/g, ": True").replace(/: false/g, ": False");
+
   // Запускаем Python бэктест через subprocess
   const proc = spawn("python", ["-c", `
 import asyncio, json, sys
@@ -27,7 +30,7 @@ cfg = Config(
   backtest_start='${start}',
   backtest_end='${end}',
   log_file='logs/backtest.log',
-  **${JSON.stringify(config)}
+  **${configJson}
 )
 
 async def main():
