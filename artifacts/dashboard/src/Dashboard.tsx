@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
+import BacktestTab from "./BacktestTab";
 import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -14,7 +15,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
-  Play, Square, RefreshCw, Settings, Link2, Download,
+  Play, Square, RefreshCw, Settings, Link2, Download, History,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -515,6 +516,9 @@ export default function Dashboard() {
               <TabsTrigger value="stats" className="data-[state=active]:bg-zinc-700">
                 <Settings className="w-4 h-4 mr-1.5" />Stats
               </TabsTrigger>
+              <TabsTrigger value="backtest" className="data-[state=active]:bg-zinc-700">
+                <History className="w-4 h-4 mr-1.5" />Backtest
+              </TabsTrigger>
               <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
                 <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
               </TabsTrigger>
@@ -561,6 +565,10 @@ export default function Dashboard() {
 
             <TabsContent value="stats" className="mt-4">
               <StatsTable stats={stats} />
+            </TabsContent>
+
+            <TabsContent value="backtest" className="mt-4">
+              <BacktestTab />
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
