@@ -35,6 +35,41 @@ router.get("/stats", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+router.get("/export", async (_req, res) => {
+  try {
+    const trades = await db
+      .select()
+      .from(tradesTable)
+      .where(eq(tradesTable.is_open, false))
+      .orderBy(desc(tradesTable.entry_time));
+
+    const headers = [
+      "ID", "Symbol", "Direction", "Entry Price", "Exit Price",
+      "Quantity", "PnL", "Exit Reason", "Entry Time", "Exit Time", "Mode"
+    ];
+
+    const rows = trades.map(t => [
+      t.id, t.symbol, t.direction, t.entry_price,
+      t.exit_price || "", t.qty, t.pnl || "",
+      t.exit_reason || "", t.entry_time, t.exit_time || "", t.mode
+    ]);
+
+    const csv = [
+      headers.join(","),
+      ...rows.map(row => row.map(cell =>
+        typeof cell === 'string' && cell.includes(',') ? `"${cell}"` : cell
+      ).join(","))
+    ].join("\n");
+
+    const timestamp = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="trades-export-${timestamp}.csv"`);
+    res.send(csv);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 router.post("/", async (req, res) => {
   try {
     const [trade] = await db.insert(tradesTable).values(req.body).returning();

@@ -14,7 +14,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
-  Play, Square, RefreshCw, Settings, Link2,
+  Play, Square, RefreshCw, Settings, Link2, Download,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ function fmtTime(iso: string | null) {
   if (isNaN(d.getTime())) return "—";
   const day   = String(d.getDate()).padStart(2, "0");
   const month = String(d.getMonth() + 1).padStart(2, "0");
-  const year  = String(d.getFullYear()).slice(2); // 2026 → 26
+  const year  = String(d.getFullYear()).slice(2);
   const h     = String(d.getHours()).padStart(2, "0");
   const m     = String(d.getMinutes()).padStart(2, "0");
   return `${day}.${month}.${year} ${h}:${m}`;
@@ -135,7 +135,6 @@ function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void
       </CardHeader>
 
       <CardContent className="space-y-3">
-        {/* Price & heartbeat */}
         <div className="flex justify-between text-sm">
           <span className="text-zinc-400">Price</span>
           <span className="font-mono font-semibold">
@@ -147,7 +146,6 @@ function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void
           <span className="text-zinc-300">{heartbeatAge(bot.last_heartbeat)}</span>
         </div>
 
-        {/* Config pills */}
         <div className="flex flex-wrap gap-1 pt-1">
           {[
             `${bot.leverage}x`,
@@ -163,7 +161,6 @@ function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void
           ))}
         </div>
 
-        {/* Open position */}
         {pos ? (
           <div className="rounded-lg bg-zinc-800 p-3 space-y-2 mt-2">
             <div className="flex items-center justify-between">
@@ -367,9 +364,12 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  // Состояние оптимизатора — хранится здесь чтобы не сбрасывалось при переключении вкладок
   const [optJobId, setOptJobId] = useState<string | null>(null);
   const [optJob, setOptJob] = useState<any | null>(null);
+  // Фильтр по торговой паре
+  const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
+  const symbols = [...new Set(trades.map(t => t.symbol))].sort();
+  const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
 
   const load = useCallback(async () => {
     try {
@@ -408,7 +408,7 @@ export default function Dashboard() {
   };
 
   const handleToggle = async (bot: Bot) => {
-    if (toggling) return; // предотвращаем двойной клик
+    if (toggling) return;
     setToggling(bot.symbol);
     try {
       if (bot.is_running) {
@@ -416,11 +416,43 @@ export default function Dashboard() {
       } else {
         await startBot(bot.symbol);
       }
-      // Небольшая задержка чтобы БД успела обновиться
       await new Promise(r => setTimeout(r, 1000));
       await load();
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleExportCSV = () => {
+    try {
+      const headers = [
+        "ID", "Symbol", "Direction", "Entry Price", "Exit Price",
+        "Quantity", "PnL", "Exit Reason", "Entry Time", "Exit Time", "Mode"
+      ];
+      const rows = filteredTrades.map(t => [
+        t.id, t.symbol, t.direction, t.entry_price,
+        t.exit_price || "", t.qty, t.pnl || "",
+        t.exit_reason || "", t.entry_time, t.exit_time || "", t.mode
+      ]);
+      const csv = [
+        headers.join(","),
+        ...rows.map(row => row.map(cell =>
+          typeof cell === 'string' && cell.includes(',') ? `"${cell}"` : cell
+        ).join(","))
+      ].join("\n");
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const suffix = selectedSymbol === "all" ? "all" : selectedSymbol;
+      a.download = `trades-export-${suffix}-${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Failed to export trades. Please try again.');
     }
   };
 
@@ -451,10 +483,8 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="space-y-6">
-          {/* Summary stats */}
           <StatsRow stats={stats} />
 
-          {/* Bot cards */}
           <div>
             <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
               <Activity className="w-5 h-5 text-zinc-400" />Bots
@@ -474,7 +504,6 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Tabs: chart / trades / stats */}
           <Tabs defaultValue="chart">
             <TabsList className="bg-zinc-900 border border-zinc-800">
               <TabsTrigger value="chart" className="data-[state=active]:bg-zinc-700">
@@ -506,7 +535,28 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="trades" className="mt-4">
-              <TradesTable trades={trades} />
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <select
+                  value={selectedSymbol}
+                  onChange={e => setSelectedSymbol(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                >
+                  <option value="all">All symbols</option>
+                  {symbols.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleExportCSV}
+                  className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export CSV
+                </Button>
+              </div>
+              <TradesTable trades={filteredTrades} />
             </TabsContent>
 
             <TabsContent value="stats" className="mt-4">
