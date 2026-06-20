@@ -36,6 +36,27 @@ def calc_quantity(
     return quantity
 
 
+def calc_recovery_quantity(
+    debt_amount: float,
+    bonus_pct: float,
+    tp1_pct: float,
+    entry_price: float,
+) -> float:
+    """
+    Рассчитывает размер позиции-компенсатора так, чтобы прибыль
+    при полном закрытии на TP1 (100% позиции) покрыла debt_amount + бонус.
+
+    target_profit = debt_amount * (1 + bonus_pct/100)
+    tp1_distance   = entry_price * tp1_pct / 100
+    qty            = target_profit / tp1_distance
+    """
+    target_profit = debt_amount * (1 + bonus_pct / 100)
+    tp1_distance = entry_price * tp1_pct / 100
+    if tp1_distance <= 0:
+        return 0.0
+    return target_profit / tp1_distance
+
+
 def _round_step(value: float, step: float) -> float:
     precision = max(0, round(-math.log10(step)))
     return round(math.floor(value / step) * step, precision)
@@ -252,15 +273,27 @@ class OrderManager:
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
 
-    async def open_position(self, signal: Signal) -> Optional[Tuple[float, float]]:
-        balance = await self.get_balance()
-        raw_qty = calc_quantity(
-            balance=balance,
-            risk_pct=self.cfg.risk_pct,
-            sl_pct=self.cfg.sl_pct,
-            entry_price=signal.entry_price,
-            leverage=self.cfg.leverage,
-        )
+    async def open_position(
+        self, signal: Signal,
+        recovery_qty: Optional[float] = None,
+    ) -> Optional[Tuple[float, float]]:
+        """
+        Если recovery_qty передан — открывает компенсирующую позицию:
+        размер берётся из recovery_qty, а не из стандартного risk_pct.
+        Вызывающий код (main.py) также должен пометить позицию как
+        recovery в трекере, чтобы TP1 закрывал 100% позиции.
+        """
+        if recovery_qty is not None:
+            raw_qty = recovery_qty
+        else:
+            balance = await self.get_balance()
+            raw_qty = calc_quantity(
+                balance=balance,
+                risk_pct=self.cfg.risk_pct,
+                sl_pct=self.cfg.sl_pct,
+                entry_price=signal.entry_price,
+                leverage=self.cfg.leverage,
+            )
         qty = await self._adjust_qty(raw_qty)
 
         if qty <= 0:
@@ -270,6 +303,9 @@ class OrderManager:
                 f"Increase risk_pct or reduce leverage."
             )
             return None
+
+        # Для recovery-сделки TP1 закрывает 100% позиции — TP2 не нужен
+        tp1_close_pct = 100 if recovery_qty is not None else self.cfg.tp1_close_pct
 
         if self.cfg.mode == "live":
             await self._set_leverage()
@@ -283,15 +319,20 @@ class OrderManager:
             self.log.info(
                 f"[LIVE] Market order placed | {signal.direction} {self.cfg.symbol} "
                 f"qty={qty} entry≈{entry_price}"
+                f"{' [RECOVERY]' if recovery_qty is not None else ''}"
             )
-            # Выставляем SL + TP1 + TP2 на бирже сразу
-            await self._place_all_orders(
-                direction=signal.direction,
-                total_qty=qty,
-                sl_price=signal.sl_price,
-                tp1_price=signal.tp1_price,
-                tp2_price=signal.tp2_price,
-            )
+            if recovery_qty is not None:
+                # Recovery: только SL + TP1 (100% закрытие), без TP2
+                await self._place_sl(signal.direction, signal.sl_price, qty=qty)
+                await self._place_tp_limit(signal.direction, signal.tp1_price, qty)
+            else:
+                await self._place_all_orders(
+                    direction=signal.direction,
+                    total_qty=qty,
+                    sl_price=signal.sl_price,
+                    tp1_price=signal.tp1_price,
+                    tp2_price=signal.tp2_price,
+                )
             return entry_price, qty
 
         else:

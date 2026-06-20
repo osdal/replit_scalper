@@ -32,6 +32,17 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live'
 )`);
 
+await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  debt_amount REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'free',
+  locked_by TEXT,
+  locked_trade_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  closed_at TEXT
+)`);
+
 console.log("Tables created");
 
 const configs = fs.readdirSync(BOT_DIR).filter(f => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");

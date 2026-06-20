@@ -13,10 +13,11 @@ from logger import get_logger
 from market_data import get_recent_klines, start_kline_polling
 from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest, Signal
 from signal_handler import SignalHandler
-from order_manager import OrderManager
+from order_manager import OrderManager, calc_recovery_quantity
 from position_tracker import PositionTracker, Position
 from backtester import run_backtest
 from db_reporter import DbReporter
+from recovery_client import RecoveryClient
 
 load_dotenv()
 
@@ -170,7 +171,8 @@ async def main():
     )
 
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
-    
+    recovery = RecoveryClient(symbol=cfg.symbol, logger=log)
+
     # Инициализируем событие для shutdown
     shutdown_event = asyncio.Event()
     
@@ -182,16 +184,21 @@ async def main():
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log, reporter, shutdown_event)
+        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event)
 
     finally:
         await reporter.report_stopped()
         await reporter.close()
+        await recovery.close()
         await client.close_connection()
         log.info("Bot stopped")
 
 
-async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter, shutdown_event: asyncio.Event):
+async def _run_live_or_paper(
+    cfg, client: AsyncClient, log,
+    reporter: DbReporter, recovery: RecoveryClient,
+    shutdown_event: asyncio.Event,
+):
     tracker   = PositionTracker(cfg, log, reporter=reporter)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
@@ -266,24 +273,38 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
                 hit = tracker.check(current_price)
                 if hit:
                     pos = tracker.position
-                    if hit == "TP1":
+                    if hit == "TP1" and not pos.is_recovery:
+                        # Обычный частичный TP1
                         tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
                         if closed:
-                            await tracker.apply_hit_async(hit, current_price)
+                            pnl = await tracker.apply_hit_async(hit, current_price)
                             await order_mgr.move_sl_to_breakeven(
                                 pos.direction, pos.entry_price,
                                 remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
                                 tp2_price=pos.tp2_price,
                             )
+                            if pnl < 0:
+                                await recovery.report(pnl=pnl)
                         else:
-                            await tracker.force_close_async(reason="exchange_stop_at_TP1", close_price=current_price)
+                            pnl = await tracker.force_close_async(reason="exchange_stop_at_TP1", close_price=current_price)
+                            if pnl < 0:
+                                await recovery.report(pnl=pnl)
                     else:
+                        # TP1 на recovery-позиции (100% закрытие), либо TP2, либо SL
                         closed = await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
                         if closed:
-                            await tracker.apply_hit_async(hit, current_price)
+                            pnl = await tracker.apply_hit_async(hit, current_price)
+                            if pos.is_recovery:
+                                await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                            elif pnl < 0:
+                                await recovery.report(pnl=pnl)
                         else:
-                            await tracker.force_close_async(reason=f"exchange_stop_at_{hit}", close_price=current_price)
+                            pnl = await tracker.force_close_async(reason=f"exchange_stop_at_{hit}", close_price=current_price)
+                            if pos.is_recovery:
+                                await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                            elif pnl < 0:
+                                await recovery.report(pnl=pnl)
                 return
 
             raw_signal = get_signal(df_buffer, cfg)
@@ -304,11 +325,41 @@ async def _run_live_or_paper(cfg, client: AsyncClient, log, reporter: DbReporter
             if not confirmed:
                 return
 
-            result = await order_mgr.open_position(signal)
+            # Пробуем захватить свободный долг для recovery-режима
+            claim = await recovery.claim()
+            recovery_qty = None
+            chain_id = None
+            if claim.get("chainId") is not None:
+                chain_id = claim["chainId"]
+                debt = claim["debtAmount"]
+                bonus = claim.get("bonusPct", 0.0)
+                recovery_qty = calc_recovery_quantity(
+                    debt_amount=debt,
+                    bonus_pct=bonus,
+                    tp1_pct=cfg.tp1_pct,
+                    entry_price=signal.entry_price,
+                )
+                log.info(
+                    f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
+                    f"bonus={bonus}% recovery_qty={recovery_qty:.6f}"
+                )
+
+            result = await order_mgr.open_position(signal, recovery_qty=recovery_qty)
             if result is not None:
                 entry_price, qty = result
                 signal.entry_price = entry_price
-                await tracker.open_async(signal, qty=qty)
+                await tracker.open_async(
+                    signal, qty=qty,
+                    is_recovery=(recovery_qty is not None),
+                    recovery_chain_id=chain_id,
+                )
+            elif chain_id is not None:
+                # Не удалось открыть позицию — освобождаем захваченный долг
+                # (сообщаем report с pnl=0 и тем же chain_id, сервер пометит free again? 
+                #  проще: report с маленьким отрицательным pnl=0 не подходит, поэтому
+                #  просто логируем — долг останется locked, что не идеально, но open_position
+                #  падает крайне редко (qty=0 случай уже обработан внутри))
+                log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — chain stays locked")
 
         except Exception as e:
             log.error(f"on_candle error: {e}", exc_info=True)

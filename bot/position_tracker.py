@@ -34,6 +34,8 @@ class Position:
     entry_ema_slow: float = 0.0
     entry_volume: float = 0.0
     entry_volume_ma: float = 0.0
+    is_recovery: bool = False       # True если это компенсирующая сделка
+    recovery_chain_id: Optional[int] = None
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -75,6 +77,8 @@ class PositionTracker:
             "entry_ema_slow":  p.entry_ema_slow,
             "entry_volume":    p.entry_volume,
             "entry_volume_ma": p.entry_volume_ma,
+            "is_recovery":     p.is_recovery,
+            "recovery_chain_id": p.recovery_chain_id,
             "trade_id":        self._trade_id,
         }
         try:
@@ -111,6 +115,8 @@ class PositionTracker:
                 entry_ema_slow=data.get("entry_ema_slow", 0.0),
                 entry_volume=data.get("entry_volume", 0.0),
                 entry_volume_ma=data.get("entry_volume_ma", 0.0),
+                is_recovery=data.get("is_recovery", False),
+                recovery_chain_id=data.get("recovery_chain_id"),
             )
             self._trade_id = data.get("trade_id")
             self.log.info(
@@ -220,7 +226,10 @@ class PositionTracker:
     #  Trading logic                                                       #
     # ------------------------------------------------------------------ #
 
-    def open(self, signal: Signal, qty: float) -> None:
+    def open(
+        self, signal: Signal, qty: float,
+        is_recovery: bool = False, recovery_chain_id: Optional[int] = None,
+    ) -> None:
         self.position = Position(
             direction=signal.direction,
             entry_price=signal.entry_price,
@@ -234,19 +243,25 @@ class PositionTracker:
             entry_ema_slow=signal.ema_slow,
             entry_volume=signal.volume,
             entry_volume_ma=signal.volume_ma,
+            is_recovery=is_recovery,
+            recovery_chain_id=recovery_chain_id,
         )
         self._trade_id = None
         self._save_state()
+        tag = " [RECOVERY]" if is_recovery else ""
         self.log.info(
-            f"Position opened | {signal.direction} | entry={signal.entry_price} "
+            f"Position opened{tag} | {signal.direction} | entry={signal.entry_price} "
             f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} qty={qty} | "
             f"indicators: ema_fast={signal.ema_fast} ema_slow={signal.ema_slow} "
             f"volume={signal.volume} volume_ma={signal.volume_ma}"
         )
 
-    async def open_async(self, signal: Signal, qty: float) -> None:
+    async def open_async(
+        self, signal: Signal, qty: float,
+        is_recovery: bool = False, recovery_chain_id: Optional[int] = None,
+    ) -> None:
         """Открывает позицию и репортит в БД."""
-        self.open(signal, qty)
+        self.open(signal, qty, is_recovery=is_recovery, recovery_chain_id=recovery_chain_id)
         await self._report_open(signal, qty)
         self._save_state()
 
@@ -320,6 +335,21 @@ class PositionTracker:
             return pnl
 
         if hit == "TP1":
+            if p.is_recovery:
+                # Recovery-позиция: TP1 закрывает 100% позиции сразу
+                qty = p.remaining_qty
+                pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
+                p.realized_pnl += pnl
+                p.remaining_qty = 0.0
+                p.closed = True
+                self.log.info(
+                    f"TP1 hit [RECOVERY] | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
+                    f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
+                )
+                self.position = None
+                self._clear_state()
+                return pnl
+
             tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
             tp1_qty = min(tp1_qty, p.remaining_qty)
             pnl = self._calc_pnl(p.direction, p.entry_price, close_price, tp1_qty)
@@ -355,14 +385,19 @@ class PositionTracker:
     async def apply_hit_async(self, hit: str, close_price: float) -> float:
         """Применяет hit и репортит в БД."""
         p = self.position
+        is_recovery_tp1_full_close = hit == "TP1" and p and p.is_recovery
         tp1_qty = 0.0
-        if hit == "TP1" and p:
+        if hit == "TP1" and p and not p.is_recovery:
             tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
             tp1_qty = min(tp1_qty, p.remaining_qty)
 
+        remaining_before = p.remaining_qty if p else 0
         pnl = self.apply_hit(hit, close_price)
 
-        if hit == "TP1":
+        if is_recovery_tp1_full_close:
+            # Recovery TP1 — это полное закрытие, репортим как close, не partial
+            await self._report_close(close_price, remaining_before, pnl, "TP1")
+        elif hit == "TP1":
             await self._report_tp1(close_price, tp1_qty, pnl)
             self._save_state()
         elif hit in ("SL", "TP2"):
