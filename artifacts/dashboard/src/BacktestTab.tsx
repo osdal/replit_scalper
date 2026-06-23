@@ -1,7 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Badge } from "./components/ui/badge";
 import { Play, RefreshCw, TrendingUp, TrendingDown, DollarSign, BarChart2 } from "lucide-react";
 import { runBacktest } from "./hooks/useApi";
 
@@ -60,6 +59,7 @@ const DEFAULT_CONFIG: BotConfig = {
 };
 
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+const STORAGE_KEY = "backtest_result";
 
 export default function BacktestTab() {
   const [symbol, setSymbol] = useState("BTCUSDT");
@@ -69,6 +69,32 @@ export default function BacktestTab() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Восстанавливаем результат из localStorage при монтировании
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object" && "total_trades" in parsed) {
+          setResult(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Сохраняем результат в localStorage при изменении
+  useEffect(() => {
+    if (result) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(result));
+      } catch {
+        // ignore
+      }
+    }
+  }, [result]);
 
   const handleRun = async () => {
     setRunning(true);
