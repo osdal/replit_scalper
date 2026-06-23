@@ -110,9 +110,24 @@ router.post("/:symbol/start", async (req, res) => {
     const proc = spawn("python", ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
-      stdio: "ignore", // не открывать консольное окно
+      stdio: ["ignore", "pipe", "pipe"], // pipe stdout/stderr чтобы видеть логи
     });
     botProcesses.set(symbol, proc);
+
+    // Перенаправляем вывод бота в консоль API сервера
+    const botTag = `[BOT ${symbol}]`;
+    proc.stdout?.on("data", (d) => {
+      const lines = d.toString().trim().split("\n");
+      for (const line of lines) {
+        if (line.trim()) console.log(`${botTag} ${line}`);
+      }
+    });
+    proc.stderr?.on("data", (d) => {
+      const lines = d.toString().trim().split("\n");
+      for (const line of lines) {
+        if (line.trim()) console.error(`${botTag} ${line}`);
+      }
+    });
 
     await db.update(botsTable)
       .set({ is_running: true, updated_at: new Date().toISOString() })
