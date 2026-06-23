@@ -52,6 +52,7 @@ class RecoveryClient:
 
     async def _get_session(self):
         if not HAS_AIOHTTP:
+            self.log.warning("[RECOVERY] aiohttp not available, recovery disabled")
             return None
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
@@ -65,18 +66,22 @@ class RecoveryClient:
         default = {"chainId": None, "debtAmount": 0.0, "bonusPct": 0.0, "enabled": False}
         session = await self._get_session()
         if session is None:
+            self.log.debug("[RECOVERY] claim: no session (aiohttp unavailable)")
             return default
         try:
+            self.log.info(f"[RECOVERY] claim: POST {API_URL}/recovery/claim symbol={self.symbol}")
             async with session.post(
                 f"{API_URL}/recovery/claim",
                 json={"symbol": self.symbol},
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
+                data = await resp.json()
+                self.log.info(f"[RECOVERY] claim: response status={resp.status} data={data}")
                 if resp.status == 200:
-                    return await resp.json()
-                self.log.debug(f"[RECOVERY] claim failed: {resp.status}")
+                    return data
+                self.log.warning(f"[RECOVERY] claim failed: status={resp.status}")
         except Exception as e:
-            self.log.debug(f"[RECOVERY] claim error: {e}")
+            self.log.error(f"[RECOVERY] claim error: {e}")
         return default
 
     async def report(self, pnl: float, chain_id: Optional[int] = None) -> None:
@@ -88,15 +93,19 @@ class RecoveryClient:
             payload = {"symbol": self.symbol, "pnl": pnl}
             if chain_id is not None:
                 payload["chainId"] = chain_id
+            self.log.info(f"[RECOVERY] report: POST {API_URL}/recovery/report payload={payload}")
             async with session.post(
                 f"{API_URL}/recovery/report",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
-                if resp.status != 200:
-                    self.log.debug(f"[RECOVERY] report failed: {resp.status}")
+                if resp.status == 200:
+                    data = await resp.json()
+                    self.log.info(f"[RECOVERY] report: success data={data}")
+                else:
+                    self.log.warning(f"[RECOVERY] report failed: status={resp.status}")
         except Exception as e:
-            self.log.debug(f"[RECOVERY] report error: {e}")
+            self.log.error(f"[RECOVERY] report error: {e}")
 
     async def release(self, chain_id: int) -> None:
         """Освобождает захваченную цепочку (переводит обратно в free)."""
@@ -112,9 +121,9 @@ class RecoveryClient:
                 if resp.status == 200:
                     self.log.info(f"[RECOVERY] Released chain #{chain_id}")
                 else:
-                    self.log.debug(f"[RECOVERY] release failed: {resp.status}")
+                    self.log.warning(f"[RECOVERY] release failed: {resp.status}")
         except Exception as e:
-            self.log.debug(f"[RECOVERY] release error: {e}")
+            self.log.error(f"[RECOVERY] release error: {e}")
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
