@@ -6,82 +6,47 @@ const router = Router();
 const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
 
 // POST /backtest/:symbol
+// Передаёт параметры бэктеста в Python-процесс через stdin как JSON —
+// никакой код не собирается строкой, поэтому нет риска инъекции через
+// поля symbol/config (которые приходят из тела запроса от клиента).
 router.post("/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const { start, end, config } = req.body;
 
-  // Конвертируем JSON в Python-совместимый формат
-  // true -> True, false -> False (для всех булевых полей)
-  const configJson = JSON.stringify(config)
-    .replace(/:\s*true/g, ": True")
-    .replace(/:\s*false/g, ": False");
+  if (!start || !end) {
+    return res.status(400).json({ error: "start and end are required" });
+  }
 
-  // Запускаем Python бэктест через subprocess
-  const pythonCode = `
-import asyncio, json, sys
-sys.path.insert(0, '${BOT_DIR}')
-from config import Config
-from backtester import run_backtest
-from binance import AsyncClient
-import os
-from dotenv import load_dotenv
-load_dotenv('${BOT_DIR}/.env')
-
-config_data = ${configJson}
-
-cfg = Config(
-  symbol='${symbol}',
-  mode='backtest',
-  backtest_start='${start}',
-  backtest_end='${end}',
-  log_file='logs/backtest.log',
-  **config_data
-)
-
-async def main():
-  client = await AsyncClient.create(
-    api_key=os.getenv('BINANCE_API_KEY'),
-    api_secret=os.getenv('BINANCE_API_SECRET'),
-  )
-  try:
-    stats = await run_backtest(cfg, client, __import__('logging').getLogger())
-    print(json.dumps({
-      'total_trades': stats.total_trades,
-      'wins': stats.wins,
-      'losses': stats.losses,
-      'win_rate': round(stats.win_rate, 1),
-      'total_pnl': round(stats.total_pnl, 4),
-      'avg_win': round(stats.avg_win, 4),
-      'avg_loss': round(stats.avg_loss, 4),
-      'max_drawdown': round(stats.max_drawdown, 2),
-      'initial_balance': stats.initial_balance,
-      'final_balance': round(stats.final_balance, 2),
-      'return_pct': round((stats.final_balance - stats.initial_balance) / stats.initial_balance * 100, 2),
-    }))
-  finally:
-    await client.close_connection()
-
-asyncio.run(main())
-`;
-
-  const proc = spawn("python", ["-c", pythonCode], { cwd: BOT_DIR });
+  const proc = spawn("python", ["backtest_runner.py"], { cwd: BOT_DIR });
 
   let output = "";
-  let error  = "";
-  proc.stdout.on("data", (d) => output += d);
-  proc.stderr.on("data", (d) => error  += d);
+  let error = "";
+  proc.stdout.on("data", (d) => (output += d));
+  proc.stderr.on("data", (d) => (error += d));
 
   proc.on("close", (code) => {
-    if (code !== 0) {
+    if (code !== 0 && !output.trim()) {
       console.error("[BACKTEST] Python error:", error);
       return res.status(500).json({ error: error || "Backtest failed" });
     }
     try {
-      res.json(JSON.parse(output.trim()));
+      const parsed = JSON.parse(output.trim());
+      if (parsed.error) {
+        return res.status(400).json(parsed);
+      }
+      res.json(parsed);
     } catch {
-      res.status(500).json({ error: "Failed to parse backtest output", raw: output });
+      res.status(500).json({ error: "Failed to parse backtest output", raw: output, stderr: error });
     }
   });
+
+  proc.on("error", (err) => {
+    res.status(500).json({ error: `Failed to start backtest process: ${err.message}` });
+  });
+
+  // Передаём параметры через stdin как JSON — безопасно, без сборки кода строкой
+  proc.stdin.write(JSON.stringify({ symbol, start, end, config }));
+  proc.stdin.end();
 });
 
 export default router;

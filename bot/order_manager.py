@@ -270,10 +270,10 @@ class OrderManager:
         self, signal: Signal,
         recovery_qty: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
+        balance = await self.get_balance()
         if recovery_qty is not None:
             raw_qty = recovery_qty
         else:
-            balance = await self.get_balance()
             raw_qty = calc_quantity(
                 balance=balance,
                 risk_pct=self.cfg.risk_pct,
