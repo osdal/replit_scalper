@@ -22,11 +22,12 @@ TRADE_KEYWORDS = (
     "[SYNC] Restored position",
     "[STATE] Restored from file",
     "[SYNC] Restored from exchange",
+    "[RECOVERY]",
 )
 
 
 class TradeOnlyFilter(logging.Filter):
-    """Пропускает в файл только сообщения о сделках."""
+    """Пропускает в файл только сообщения о сделках и recovery."""
     def filter(self, record: logging.LogRecord) -> bool:
         return any(kw in record.getMessage() for kw in TRADE_KEYWORDS)
 
