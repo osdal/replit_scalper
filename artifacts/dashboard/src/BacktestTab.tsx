@@ -38,6 +38,17 @@ interface BotConfig {
   paper_balance: number;
 }
 
+interface BacktestParams {
+  symbol: string;
+  ema_fast: number;
+  ema_slow: number;
+  sl_pct: number;
+  tp1_pct: number;
+  tp2_pct: number;
+  volume_multiplier: number;
+  tp1_close_pct: number;
+}
+
 const DEFAULT_CONFIG: BotConfig = {
   timeframe: "5m",
   leverage: 10,
@@ -61,14 +72,49 @@ const DEFAULT_CONFIG: BotConfig = {
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const STORAGE_KEY = "backtest_result";
 
-export default function BacktestTab() {
-  const [symbol, setSymbol] = useState("BTCUSDT");
+interface BacktestTabProps {
+  initialParams?: BacktestParams | null;
+}
+
+export default function BacktestTab({ initialParams }: BacktestTabProps) {
+  const [symbol, setSymbol] = useState(initialParams?.symbol ?? "BTCUSDT");
   const [startDate, setStartDate] = useState("2024-01-01");
   const [endDate, setEndDate] = useState("2024-04-01");
-  const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<BotConfig>(() => {
+    if (initialParams) {
+      return {
+        ...DEFAULT_CONFIG,
+        ema_fast: initialParams.ema_fast,
+        ema_slow: initialParams.ema_slow,
+        sl_pct: initialParams.sl_pct,
+        tp1_pct: initialParams.tp1_pct,
+        tp2_pct: initialParams.tp2_pct,
+        volume_multiplier: initialParams.volume_multiplier,
+        tp1_close_pct: initialParams.tp1_close_pct,
+      };
+    }
+    return DEFAULT_CONFIG;
+  });
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Применяем параметры из оптимизатора при их изменении
+  useEffect(() => {
+    if (initialParams) {
+      setSymbol(initialParams.symbol);
+      setConfig(prev => ({
+        ...prev,
+        ema_fast: initialParams.ema_fast,
+        ema_slow: initialParams.ema_slow,
+        sl_pct: initialParams.sl_pct,
+        tp1_pct: initialParams.tp1_pct,
+        tp2_pct: initialParams.tp2_pct,
+        volume_multiplier: initialParams.volume_multiplier,
+        tp1_close_pct: initialParams.tp1_close_pct,
+      }));
+    }
+  }, [initialParams]);
 
   // Восстанавливаем результат из localStorage при монтировании
   useEffect(() => {
@@ -133,7 +179,6 @@ export default function BacktestTab() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {/* Symbol */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Symbol</label>
               <input
@@ -144,8 +189,6 @@ export default function BacktestTab() {
                 placeholder="BTCUSDT"
               />
             </div>
-
-            {/* Timeframe */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Timeframe</label>
               <select
@@ -158,8 +201,6 @@ export default function BacktestTab() {
                 ))}
               </select>
             </div>
-
-            {/* Start Date */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Start Date</label>
               <input
@@ -169,8 +210,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* End Date */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">End Date</label>
               <input
@@ -180,8 +219,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* Leverage */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Leverage</label>
               <input
@@ -193,8 +230,6 @@ export default function BacktestTab() {
                 max={125}
               />
             </div>
-
-            {/* Risk % */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Risk %</label>
               <input
@@ -205,8 +240,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* SL % */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">SL %</label>
               <input
@@ -217,8 +250,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* TP1 % */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">TP1 %</label>
               <input
@@ -229,8 +260,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* TP2 % */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">TP2 %</label>
               <input
@@ -241,8 +270,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* EMA Fast */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">EMA Fast</label>
               <input
@@ -252,8 +279,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* EMA Slow */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">EMA Slow</label>
               <input
@@ -263,8 +288,6 @@ export default function BacktestTab() {
                 className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
               />
             </div>
-
-            {/* Volume Multiplier */}
             <div>
               <label className="text-xs text-zinc-400 mb-1 block">Volume Multiplier</label>
               <input
@@ -289,7 +312,6 @@ export default function BacktestTab() {
                 <><Play className="w-4 h-4" />Run Backtest</>
               )}
             </Button>
-
             {error && (
               <span className="text-red-400 text-sm">{error}</span>
             )}
