@@ -23,6 +23,7 @@ TRADE_KEYWORDS = (
     "[STATE] Restored from file",
     "[SYNC] Restored from exchange",
     "[RECOVERY]",
+    "[DEBUG]",
 )
 
 
@@ -61,5 +62,29 @@ def get_logger(
     logger.addHandler(fh)
     logger.addHandler(ch)
 
+    _loggers[log_file] = logger
+    return logger
+
+
+def get_events_logger(symbol: str = "") -> logging.Logger:
+    """Логгер для ключевых событий в отдельный файл events.log."""
+    log_file = "logs/events.log"
+    if log_file in _loggers:
+        return _loggers[log_file]
+
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    fmt = "%(asctime)s [%(symbol)s] %(message)s"
+    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
+
+    logger = logging.getLogger("events")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(formatter)
+
+    logger.addHandler(fh)
     _loggers[log_file] = logger
     return logger
