@@ -254,9 +254,12 @@ async def _run_live_or_paper(
                     pos = tracker.position
                     if hit == "TP1" and not pos.is_recovery:
                         tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
+                        log.info(f"[DEBUG] TP1 hit | tp1_qty={tp1_qty} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty}")
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
+                        log.info(f"[DEBUG] close_partial returned: {closed}")
                         if closed:
                             pnl = await tracker.apply_hit_async(hit, current_price)
+                            log.info(f"[DEBUG] apply_hit_async returned: {pnl} | new sl_price={tracker.position.sl_price if tracker.position else 'N/A'}")
                             await order_mgr.move_sl_to_breakeven(
                                 pos.direction, pos.entry_price,
                                 remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
