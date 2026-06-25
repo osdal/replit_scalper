@@ -1,0 +1,91 @@
+2026-06-11 11:15:12 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=3576.218 entry=1.1185 SL=1.1101 TP1=1.1213 TP2=1.1347 balance=1000.00 USDT
+2026-06-11 11:15:12 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1185 SL=1.1101 TP1=1.1213 TP2=1.1347 qty=3576.218 | indicators: ema_fast=1.1161 ema_slow=1.1153 volume=1228620.4 volume_ma=831254.77
+2026-06-11 11:30:05 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=1072.8654 price=1.1226
+2026-06-11 11:30:05 [PAPER XRPUSDT] INFO TP1 hit | price=1.1226 closed_qty=1072.865400 remaining_qty=2503.352600 pnl=4.3987 | SL moved to breakeven: 1.1101 → 1.1185 | entry_ema_fast=1.1161 entry_ema_slow=1.1153 entry_volume=1228620.4 entry_volume_ma=831254.77
+2026-06-11 16:50:11 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=3580.059 entry=1.1173 SL=1.1089 TP1=1.1201 TP2=1.1335 balance=1000.00 USDT
+2026-06-11 16:50:11 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1173 SL=1.1089 TP1=1.1201 TP2=1.1335 qty=3580.059 | indicators: ema_fast=1.114 ema_slow=1.1139 volume=3295602.3 volume_ma=2490317.79
+2026-06-11 18:55:14 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=3580.059 price=1.1086
+2026-06-11 18:55:14 [PAPER XRPUSDT] WARNING SL hit | price=1.1086 qty=3580.059000 pnl=-31.1465 total_pnl=-31.1465 | entry_ema_fast=1.114 entry_ema_slow=1.1139 entry_volume=3295602.3 entry_volume_ma=2490317.79
+2026-06-12 05:10:13 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=3486.446 entry=1.1473 SL=1.1387 TP1=1.1502 TP2=1.1639 balance=1000.00 USDT
+2026-06-12 05:10:13 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1473 SL=1.1387 TP1=1.1502 TP2=1.1639 qty=3486.446 | indicators: ema_fast=1.142 ema_slow=1.1402 volume=2264309.4 volume_ma=767734.57
+2026-06-12 09:10:16 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=3486.446 price=1.1383
+2026-06-12 09:10:16 [PAPER XRPUSDT] WARNING SL hit | price=1.1383 qty=3486.446000 pnl=-31.3780 total_pnl=-31.3780 | entry_ema_fast=1.142 entry_ema_slow=1.1402 entry_volume=2264309.4 entry_volume_ma=767734.57
+2026-06-12 11:05:11 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=3525.161 entry=1.1347 SL=1.1262 TP1=1.1375 TP2=1.1512 balance=1000.00 USDT
+2026-06-12 11:05:11 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1347 SL=1.1262 TP1=1.1375 TP2=1.1512 qty=3525.161 | indicators: ema_fast=1.1329 ema_slow=1.1328 volume=2022651.1 volume_ma=1462303.48
+2026-06-12 11:20:02 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=1057.5483 price=1.1418
+2026-06-12 11:20:02 [PAPER XRPUSDT] INFO TP1 hit | price=1.1418 closed_qty=1057.548300 remaining_qty=2467.612700 pnl=7.5086 | SL moved to breakeven: 1.1262 → 1.1347 | entry_ema_fast=1.1329 entry_ema_slow=1.1328 entry_volume=2022651.1 entry_volume_ma=1462303.48
+2026-06-12 17:55:06 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=2372.779 entry=1.1494 SL=1.1368 TP1=1.1517 TP2=1.1528 balance=1000.00 USDT
+2026-06-12 17:55:06 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1494 SL=1.1368 TP1=1.1517 TP2=1.1528 qty=2372.779 | indicators: ema_fast=1.1389 ema_slow=1.1374 volume=7694528.9 volume_ma=2842566.3
+2026-06-12 18:15:13 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=711.8337 price=1.1564
+2026-06-12 18:15:13 [PAPER XRPUSDT] INFO TP1 hit | price=1.1564 closed_qty=711.833700 remaining_qty=1660.945300 pnl=4.9828 | SL moved to breakeven: 1.1368 → 1.1494 | entry_ema_fast=1.1389 entry_ema_slow=1.1374 entry_volume=7694528.9 entry_volume_ma=2842566.3
+2026-06-12 18:30:12 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=1660.9452999999999 price=1.1474
+2026-06-12 18:30:12 [PAPER XRPUSDT] WARNING SL hit | price=1.1474 qty=1660.945300 pnl=-3.3219 total_pnl=1.6609 | entry_ema_fast=1.1389 entry_ema_slow=1.1374 entry_volume=7694528.9 entry_volume_ma=2842566.3
+2026-06-13 08:10:04 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2407.55 entry=1.1328 SL=1.1453 TP1=1.1305 TP2=1.1294 balance=1000.00 USDT
+2026-06-13 08:10:04 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1328 SL=1.1453 TP1=1.1305 TP2=1.1294 qty=2407.55 | indicators: ema_fast=1.1337 ema_slow=1.1338 volume=578807.7 volume_ma=391541.71
+2026-06-13 08:50:14 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=722.265 price=1.1298
+2026-06-13 08:50:14 [PAPER XRPUSDT] INFO TP1 hit | price=1.1298 closed_qty=722.265000 remaining_qty=1685.285000 pnl=2.1668 | SL moved to breakeven: 1.1453 → 1.1328 | entry_ema_fast=1.1337 entry_ema_slow=1.1338 entry_volume=578807.7 entry_volume_ma=391541.71
+2026-06-13 09:30:11 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=1685.2850000000003 price=1.1328
+2026-06-13 09:30:11 [PAPER XRPUSDT] WARNING SL hit | price=1.1328 qty=1685.285000 pnl=0.0000 total_pnl=2.1668 | entry_ema_fast=1.1337 entry_ema_slow=1.1338 entry_volume=578807.7 entry_volume_ma=391541.71
+2026-06-14 00:45:12 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=2364.756 entry=1.1533 SL=1.1406 TP1=1.1556 TP2=1.1568 balance=1000.00 USDT
+2026-06-14 00:45:12 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1533 SL=1.1406 TP1=1.1556 TP2=1.1568 qty=2364.756 | indicators: ema_fast=1.1474 ema_slow=1.1467 volume=3685443.9 volume_ma=546517.33
+2026-06-14 12:20:06 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=2364.756 price=1.1406
+2026-06-14 12:20:06 [PAPER XRPUSDT] WARNING SL hit | price=1.1406 qty=2364.756000 pnl=-30.0324 total_pnl=-30.0324 | entry_ema_fast=1.1474 entry_ema_slow=1.1467 entry_volume=3685443.9 entry_volume_ma=546517.33
+2026-06-15 12:30:14 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=2302.467 entry=1.1845 SL=1.1715 TP1=1.1869 TP2=1.1881 balance=1000.00 USDT
+2026-06-15 12:30:14 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1845 SL=1.1715 TP1=1.1869 TP2=1.1881 qty=2302.467 | indicators: ema_fast=1.1822 ema_slow=1.1821 volume=6037558.2 volume_ma=1000921.94
+2026-06-16 23:05:10 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2240.98 entry=1.217 SL=1.2304 TP1=1.2146 TP2=1.2133 balance=1000.00 USDT
+2026-06-16 23:05:10 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.217 SL=1.2304 TP1=1.2146 TP2=1.2133 qty=2240.98 | indicators: ema_fast=1.2207 ema_slow=1.221 volume=2218553.8 volume_ma=1447819.07
+2026-06-17 04:00:03 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=672.294 price=1.2145
+2026-06-17 04:00:03 [PAPER XRPUSDT] INFO TP1 hit | price=1.2145 closed_qty=672.294000 remaining_qty=1568.686000 pnl=1.6807 | SL moved to breakeven: 1.2304 → 1.217 | entry_ema_fast=1.2207 entry_ema_slow=1.221 entry_volume=2218553.8 entry_volume_ma=1447819.07
+2026-06-17 04:20:13 [PAPER XRPUSDT] INFO [PAPER] Would close full | TP2 qty=1568.6860000000001 price=1.2101
+2026-06-17 04:20:13 [PAPER XRPUSDT] INFO TP2 hit | price=1.2101 qty=1568.686000 pnl=10.8239 total_pnl=12.5047 | entry_ema_fast=1.2207 entry_ema_slow=1.221 entry_volume=2218553.8 entry_volume_ma=1447819.07
+2026-06-17 22:20:06 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2286.638 entry=1.1927 SL=1.2058 TP1=1.1903 TP2=1.1891 balance=1000.00 USDT
+2026-06-17 22:20:06 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1927 SL=1.2058 TP1=1.1903 TP2=1.1891 qty=2286.638 | indicators: ema_fast=1.2053 ema_slow=1.2071 volume=8243357.2 volume_ma=4143751.23
+2026-06-17 22:25:13 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=685.9914 price=1.1859
+2026-06-17 22:25:13 [PAPER XRPUSDT] INFO TP1 hit | price=1.1859 closed_qty=685.991400 remaining_qty=1600.646600 pnl=4.6647 | SL moved to breakeven: 1.2058 → 1.1927 | entry_ema_fast=1.2053 entry_ema_slow=1.2071 entry_volume=8243357.2 entry_volume_ma=4143751.23
+2026-06-17 22:30:12 [PAPER XRPUSDT] INFO [PAPER] Would close full | TP2 qty=1600.6466 price=1.186
+2026-06-17 22:30:12 [PAPER XRPUSDT] INFO TP2 hit | price=1.186 qty=1600.646600 pnl=10.7243 total_pnl=15.3891 | entry_ema_fast=1.2053 entry_ema_slow=1.2071 entry_volume=8243357.2 entry_volume_ma=4143751.23
+2026-06-18 13:20:07 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2329.808 entry=1.1706 SL=1.1835 TP1=1.1683 TP2=1.1671 balance=1000.00 USDT
+2026-06-18 13:20:07 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1706 SL=1.1835 TP1=1.1683 TP2=1.1671 qty=2329.808 | indicators: ema_fast=1.1755 ema_slow=1.1763 volume=2978596.6 volume_ma=1236883.25
+2026-06-18 13:25:03 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=698.9424 price=1.1673
+2026-06-18 13:25:03 [PAPER XRPUSDT] INFO TP1 hit | price=1.1673 closed_qty=698.942400 remaining_qty=1630.865600 pnl=2.3065 | SL moved to breakeven: 1.1835 → 1.1706 | entry_ema_fast=1.1755 entry_ema_slow=1.1763 entry_volume=2978596.6 entry_volume_ma=1236883.25
+2026-06-19 06:15:05 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2383.98 entry=1.144 SL=1.1566 TP1=1.1417 TP2=1.1406 balance=1000.00 USDT
+2026-06-19 06:15:05 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.144 SL=1.1566 TP1=1.1417 TP2=1.1406 qty=2383.98 | indicators: ema_fast=1.147 ema_slow=1.1471 volume=1726895.9 volume_ma=602614.06
+2026-06-19 06:20:14 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=715.194 price=1.1388
+2026-06-19 06:20:14 [PAPER XRPUSDT] INFO TP1 hit | price=1.1388 closed_qty=715.194000 remaining_qty=1668.786000 pnl=3.7190 | SL moved to breakeven: 1.1566 → 1.144 | entry_ema_fast=1.147 entry_ema_slow=1.1471 entry_volume=1726895.9 entry_volume_ma=602614.06
+2026-06-19 06:25:12 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=1668.786 price=1.1452
+2026-06-19 06:25:12 [PAPER XRPUSDT] WARNING SL hit | price=1.1452 qty=1668.786000 pnl=-2.0025 total_pnl=1.7165 | entry_ema_fast=1.147 entry_ema_slow=1.1471 entry_volume=1726895.9 entry_volume_ma=602614.06
+2026-06-19 15:20:04 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=2425.32 entry=1.1245 SL=1.1369 TP1=1.1223 TP2=1.1211 balance=1000.00 USDT
+2026-06-19 15:20:04 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1245 SL=1.1369 TP1=1.1223 TP2=1.1211 qty=2425.32 | indicators: ema_fast=1.1261 ema_slow=1.1264 volume=1318951.6 volume_ma=840554.95
+2026-06-19 15:35:05 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=727.596 price=1.1218
+2026-06-19 15:35:05 [PAPER XRPUSDT] INFO TP1 hit | price=1.1218 closed_qty=727.596000 remaining_qty=1697.724000 pnl=1.9645 | SL moved to breakeven: 1.1369 → 1.1245 | entry_ema_fast=1.1261 entry_ema_slow=1.1264 entry_volume=1318951.6 entry_volume_ma=840554.95
+2026-06-19 15:40:12 [PAPER XRPUSDT] INFO [PAPER] Would close full | SL qty=1697.7240000000002 price=1.1248
+2026-06-19 15:40:12 [PAPER XRPUSDT] WARNING SL hit | price=1.1248 qty=1697.724000 pnl=-0.5093 total_pnl=1.4552 | entry_ema_fast=1.1261 entry_ema_slow=1.1264 entry_volume=1318951.6 entry_volume_ma=840554.95
+2026-06-19 20:00:16 [LIVE XRPUSDT] INFO [LIVE] Market order placed | SHORT XRPUSDT qty=67.8 entry≈1.13
+2026-06-19 20:00:17 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.142 qty=67.7
+2026-06-19 20:00:17 [LIVE XRPUSDT] INFO Position opened | SHORT | entry=1.13 SL=1.142 TP1=1.1273 TP2=1.1262 qty=67.8 | indicators: ema_fast=1.1334 ema_slow=1.1335 volume=4133321.9 volume_ma=1083694.19
+2026-06-20 07:30:11 [LIVE XRPUSDT] WARNING [LIVE] Full close already executed by exchange | SL
+2026-06-20 07:30:11 [LIVE XRPUSDT] WARNING SL hit (exchange stop) | reason=exchange_stop_at_SL price=1.1428 qty=67.800000 pnl=-0.8678 total_pnl=-0.8678 | entry_ema_fast=1.1334 entry_ema_slow=1.1335 entry_volume=4133321.9 entry_volume_ma=1083694.19
+2026-06-21 10:35:06 [PAPER XRPUSDT] INFO [PAPER] Would open LONG XRPUSDT qty=791.822 entry=1.1481 SL=1.1355 TP1=1.1504 TP2=1.1515 balance=1000.00 USDT
+2026-06-21 10:35:06 [PAPER XRPUSDT] INFO Position opened | LONG | entry=1.1481 SL=1.1355 TP1=1.1504 TP2=1.1515 qty=791.822 | indicators: ema_fast=1.1466 ema_slow=1.1465 volume=1449203.8 volume_ma=431513.81
+2026-06-21 13:10:10 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=237.5466 price=1.151
+2026-06-21 13:10:10 [PAPER XRPUSDT] INFO TP1 hit | price=1.151 closed_qty=237.546600 remaining_qty=554.275400 pnl=0.6889 | SL moved to breakeven: 1.1355 → 1.1481 | entry_ema_fast=1.1466 entry_ema_slow=1.1465 entry_volume=1449203.8 entry_volume_ma=431513.81
+2026-06-21 13:25:13 [PAPER XRPUSDT] INFO [PAPER] Would close full | TP2 qty=554.2754 price=1.1526
+2026-06-21 13:25:13 [PAPER XRPUSDT] INFO TP2 hit | price=1.1526 qty=554.275400 pnl=2.4942 total_pnl=3.1831 | entry_ema_fast=1.1466 entry_ema_slow=1.1465 entry_volume=1449203.8 entry_volume_ma=431513.81
+2026-06-21 23:20:12 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=796.54 entry=1.1413 SL=1.1539 TP1=1.139 TP2=1.1379 balance=1000.00 USDT
+2026-06-21 23:20:13 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1413 SL=1.1539 TP1=1.139 TP2=1.1379 qty=796.54 | indicators: ema_fast=1.1445 ema_slow=1.1445 volume=1344344.0 volume_ma=552143.24
+2026-06-21 23:50:12 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=238.962 price=1.1377
+2026-06-21 23:50:12 [PAPER XRPUSDT] INFO TP1 hit | price=1.1377 closed_qty=238.962000 remaining_qty=557.578000 pnl=0.8603 | SL moved to breakeven: 1.1539 → 1.1413 | entry_ema_fast=1.1445 entry_ema_slow=1.1445 entry_volume=1344344.0 entry_volume_ma=552143.24
+2026-06-22 00:10:04 [PAPER XRPUSDT] INFO [PAPER] Would close full | TP2 qty=557.578 price=1.1223
+2026-06-22 00:10:04 [PAPER XRPUSDT] INFO TP2 hit | price=1.1223 qty=557.578000 pnl=10.5940 total_pnl=11.4542 | entry_ema_fast=1.1445 entry_ema_slow=1.1445 entry_volume=1344344.0 entry_volume_ma=552143.24
+2026-06-24 05:25:08 [PAPER XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-06-24 05:25:08 [PAPER XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': False}
+2026-06-24 05:25:08 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=822.558 entry=1.1052 SL=1.1174 TP1=1.103 TP2=1.1019 balance=1000.00 USDT
+2026-06-24 05:25:08 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.1052 SL=1.1174 TP1=1.103 TP2=1.1019 qty=822.558 | indicators: ema_fast=1.1075 ema_slow=1.1078 volume=1797016.8 volume_ma=879802.01
+2026-06-24 06:10:15 [PAPER XRPUSDT] INFO [PAPER] Would close partial | TP1 qty=246.7674 price=1.1026
+2026-06-24 06:10:15 [PAPER XRPUSDT] INFO TP1 hit | price=1.1026 closed_qty=246.767400 remaining_qty=575.790600 pnl=0.6416 | SL moved to breakeven: 1.1174 → 1.1052 | entry_ema_fast=1.1075 entry_ema_slow=1.1078 entry_volume=1797016.8 entry_volume_ma=879802.01
+2026-06-24 06:15:02 [PAPER XRPUSDT] INFO [PAPER] Would close full | TP2 qty=575.7906 price=1.1014
+2026-06-24 06:15:02 [PAPER XRPUSDT] INFO TP2 hit | price=1.1014 qty=575.790600 pnl=2.1880 total_pnl=2.8296 | entry_ema_fast=1.1075 entry_ema_slow=1.1078 entry_volume=1797016.8 entry_volume_ma=879802.01
+2026-06-25 05:50:07 [PAPER XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-06-25 05:50:07 [PAPER XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': False}
+2026-06-25 05:50:07 [PAPER XRPUSDT] INFO [PAPER] Would open SHORT XRPUSDT qty=849.618 entry=1.07 SL=1.0818 TP1=1.0679 TP2=1.0668 balance=1000.00 USDT
+2026-06-25 05:50:07 [PAPER XRPUSDT] INFO Position opened | SHORT | entry=1.07 SL=1.0818 TP1=1.0679 TP2=1.0668 qty=849.618 | indicators: ema_fast=1.0724 ema_slow=1.0727 volume=2691956.3 volume_ma=906125.86
