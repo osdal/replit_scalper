@@ -8,12 +8,13 @@ import { db, recoveryChainsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
+import yaml from "js-yaml";
 
 const router = Router();
 
 // ── Config caching ─────────────────────────────────────────────────────────
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
-  path.resolve(process.env.BOT_DIR || "../../bot", "recovery_config.yaml");
+  path.resolve(process.env.BOT_DIR || "../../../../bot", "recovery_config.yaml");
 
 let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number } | null = null;
 let _configMtime = 0;
@@ -25,10 +26,10 @@ function readRecoveryConfig(): { recovery_enabled: boolean; recovery_bonus_pct: 
     if (_configCache && stat.mtimeMs === _configMtime) {
       return _configCache;
     }
-    const yaml = require("js-yaml");
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
+    const val = raw.recovery_enabled;
     _configCache = {
-      recovery_enabled: !!raw.recovery_enabled,
+      recovery_enabled: val === true || val === "true" || val === "True" || val === 1,
       recovery_bonus_pct: Number(raw.recovery_bonus_pct) || 0,
     };
     _configMtime = stat.mtimeMs;
@@ -46,7 +47,6 @@ router.get("/config", (_req, res) => {
 router.put("/config", (req, res) => {
   try {
     const { recovery_enabled, recovery_bonus_pct } = req.body;
-    const yaml = require("js-yaml");
     const content = yaml.dump({
       recovery_enabled: !!recovery_enabled,
       recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
@@ -61,8 +61,7 @@ router.put("/config", (req, res) => {
 });
 
 /**
- * POST /recovery/claim
- * Бот вызывает это перед открытием новой позиции.
+ * POST /recovery Бот вызывает это перед новой позиции.
  * Атомарно захватывает самый старый свободный долг (если есть и recovery включён).
  * body: { symbol: string }
  * Возвращает: { chainId, debtAmount } или { chainId: null } если нет свободного долга.
