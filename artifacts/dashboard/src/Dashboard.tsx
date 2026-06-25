@@ -592,7 +592,7 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <BacktestTab initialParams={backtestParams} />
+              <BacktestTab key={JSON.stringify(backtestParams)} initialParams={backtestParams} />
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
