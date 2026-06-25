@@ -67,14 +67,20 @@ def get_logger(
 
 
 def get_events_logger(symbol: str = "") -> logging.Logger:
-    """Логгер для ключевых событий в отдельный файл events.log."""
+    """
+    Логгер для ключевых событий в общий файл events.log (для всех символов).
+    symbol передаётся вызывающим кодом и подставляется прямо в текст
+    сообщения (main.py добавляет его в f-строку), а не через formatter —
+    стандартный %(symbol)s формат не работает без extra={"symbol": ...}
+    на каждом вызове .info(), что неудобно поддерживать во всех местах.
+    """
     log_file = "logs/events.log"
     if log_file in _loggers:
         return _loggers[log_file]
 
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
-    fmt = "%(asctime)s [%(symbol)s] %(message)s"
+    fmt = "%(asctime)s %(message)s"
     formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
     logger = logging.getLogger("events")

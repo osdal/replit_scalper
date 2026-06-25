@@ -47,3 +47,22 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets — never commit API keys
+.env
+.env.*
+!.env.example
+
+# Bot runtime data — generated locally, never committed
+bot/logs/
+bot/state_*.json
+data/
+
+# Local scratch files
+tree.txt
+commands.txt

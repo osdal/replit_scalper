@@ -258,12 +258,12 @@ async def _run_live_or_paper(
                     pos = tracker.position
                     if hit == "TP1" and not pos.is_recovery:
                         tp1_qty = round(pos.total_qty * cfg.tp1_close_pct / 100, 6)
-                        events.info(f"TP1_HIT | price={current_price} tp1_qty={tp1_qty} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
+                        events.info(f"[{cfg.symbol}] TP1_HIT | price={current_price} tp1_qty={tp1_qty} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
                         closed = await order_mgr.close_partial(pos.direction, tp1_qty, current_price, "TP1")
                         if closed:
                             pnl = await tracker.apply_hit_async(hit, current_price)
                             new_sl = tracker.position.sl_price if tracker.position else 'N/A'
-                            events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
+                            events.info(f"[{cfg.symbol}] TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
                             await order_mgr.move_sl_to_breakeven(
                                 pos.direction, pos.entry_price,
                                 remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
@@ -276,18 +276,18 @@ async def _run_live_or_paper(
                             if pnl < 0:
                                 await recovery.report(pnl=pnl)
                     else:
-                        events.info(f"{hit}_HIT | price={current_price} qty={pos.remaining_qty} is_recovery={pos.is_recovery} chain_id={pos.recovery_chain_id}")
+                        events.info(f"[{cfg.symbol}] {hit}_HIT | price={current_price} qty={pos.remaining_qty} is_recovery={pos.is_recovery} chain_id={pos.recovery_chain_id}")
                         closed = await order_mgr.close_full(pos.direction, pos.remaining_qty, current_price, hit)
                         if closed:
                             pnl = await tracker.apply_hit_async(hit, current_price)
-                            events.info(f"{hit}_APPLY | pnl={pnl}")
+                            events.info(f"[{cfg.symbol}] {hit}_APPLY | pnl={pnl}")
                             if pos.is_recovery:
                                 await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                             elif pnl < 0:
                                 await recovery.report(pnl=pnl)
                         else:
                             pnl = await tracker.force_close_async(reason=f"exchange_stop_at_{hit}", close_price=current_price)
-                            events.info(f"{hit}_FORCE_CLOSE | pnl={pnl}")
+                            events.info(f"[{cfg.symbol}] {hit}_FORCE_CLOSE | pnl={pnl}")
                             if pos.is_recovery:
                                 await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                             elif pnl < 0:
@@ -346,7 +346,7 @@ async def _run_live_or_paper(
                     is_recovery=is_recovery,
                     recovery_chain_id=chain_id,
                 )
-                events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
+                events.info(f"[{cfg.symbol}] POSITION_OPEN | {signal.direction} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
             elif chain_id is not None:
                 log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
                 await recovery.release(chain_id=chain_id)
