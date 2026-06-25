@@ -99,7 +99,10 @@ export default function BacktestTab({ initialParams }: BacktestTabProps) {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Применяем параметры из оптимизатора при их изменении
+  // Применяем параметры из оптимизатора при их изменении.
+  // Сбрасываем result — иначе на экране останется результат предыдущего
+  // прогона (из localStorage или прошлого Run), не соответствующий
+  // только что подставленным параметрам.
   useEffect(() => {
     if (initialParams) {
       setSymbol(initialParams.symbol);
@@ -113,6 +116,8 @@ export default function BacktestTab({ initialParams }: BacktestTabProps) {
         volume_multiplier: initialParams.volume_multiplier,
         tp1_close_pct: initialParams.tp1_close_pct,
       }));
+      setResult(null);
+      setError(null);
     }
   }, [initialParams]);
 
