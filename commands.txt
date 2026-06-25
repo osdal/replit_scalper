@@ -1,0 +1,104 @@
+олная цепочка:
+
+Replit (auto-commit) → [вручную] → GitHub → [git pull] → локальная машина
+
+Когда хочешь обновить локалку:
+
+В Replit Shell:
+git push github main
+
+На локальной машине:
+git pull
+
+Когда хочешь отправить изменения с локалки на Replit:
+
+На локальной машине:
+git add .
+git commit -m "описание изменений"
+git push
+
+В Replit Shell:
+git pull github main
+
+Шаг с git push github main в Replit Shell — единственное что нужно делать вручную. Всё остальное (git pull на локалке) — стандартный git.
+
+
+
+Запуск поиска параметров бота
+Из папки bot/:
+
+cd C:\DATA\bots\replit_scalper\bot
+
+Базовый запуск (параметры из config.yaml):
+
+python optimizer.py
+
+С указанием пары, периода и таймфрейма:
+
+python optimizer.py --symbol BTCUSDT --timeframe 5m --start 2024-01-01 --end 2024-04-01
+
+Больше триалов = точнее результат:
+
+python optimizer.py --symbol BTCUSDT --timeframe 5m --start 2024-01-01 --end 2024-04-01 --trials 300
+
+Все опции:
+
+python optimizer.py --help
+
+Опция	По умолчанию	Описание
+--symbol	из config.yaml	Торговая пара
+--timeframe	из config.yaml	Таймфрейм (1m, 5m, 15m…)
+--start	из config.yaml	Начало периода
+--end	из config.yaml	Конец периода
+--trials	100	Количество попыток
+
+
+несколько конфиг-файлов + несколько терминалов.
+
+Шаг 1. Создай отдельный конфиг для каждой пары:
+
+config_btc.yaml:
+
+symbol: BTCUSDT
+log_file: logs/btc.log
+# остальные параметры...
+
+config_eth.yaml:
+
+symbol: ETHUSDT
+log_file: logs/eth.log
+# остальные параметры...
+
+Шаг 2. Запускай каждый в своём окне терминала:
+
+# Терминал 1
+python main.py config_btc.yaml
+# Терминал 2
+python main.py config_eth.yaml
+
+Это работает уже сейчас — main.py принимает путь к конфигу как аргумент.
+
+
+1. Запустить API сервер (консоль 1):
+powershell      
+cd C:\DATA\bots\replit_scalper\artifacts\api-server
+pnpm run dev
+2. Запустить дашборд (консоль 2):
+powershell
+cd C:\DATA\bots\replit_scalper\artifacts\dashboard
+pnpm run dev
+3. Открыть браузер: http://localhost:3000
+4. Запустить ботов — через кнопку Start в дашборде на каждой карточке.
+
+Эти две консоли должны работать постоянно пока используешь дашборд. Боты запускаются и останавливаются через кнопки в браузере.
+
+# Обнови код
+git pull origin main
+
+# Перезапусти API сервер
+pnpm --filter @workspace/api-server run dev
+
+
+изменения в конфиге
+cd C:\DATA\bots\replit_scalper\artifacts\api-server
+pnpm run init-db
