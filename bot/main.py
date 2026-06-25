@@ -173,6 +173,7 @@ async def main():
     _setup_signal_handlers(log)
 
     events = get_events_logger(cfg.symbol)
+    print(f"[DEBUG] events logger: {events.name} handlers={len(events.handlers)}", flush=True)
 
     try:
         if cfg.mode == "backtest":
@@ -223,6 +224,7 @@ async def _run_live_or_paper(
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
+        _ = events  # capture events in closure
         try:
             new_row = pd.DataFrame([candle]).set_index("open_time")
             df_buffer = pd.concat([df_buffer, new_row]).tail(500)
@@ -230,6 +232,7 @@ async def _run_live_or_paper(
 
             current_price = float(candle["close"])
             candle_count[0] += 1
+            print(f"[DEBUG] on_candle #{candle_count[0]} price={current_price}", flush=True)
 
             await reporter.report_heartbeat(current_price)
             if tracker.has_open_position():

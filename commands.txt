@@ -82,7 +82,7 @@ python main.py config_eth.yaml
 1. Запустить API сервер (консоль 1):
 powershell      
 cd C:\DATA\bots\replit_scalper\artifacts\api-server
-pnpm run dev
+pnpm --filter @workspace/api-server run dev
 2. Запустить дашборд (консоль 2):
 powershell
 cd C:\DATA\bots\replit_scalper\artifacts\dashboard
