@@ -1,0 +1,19 @@
+{
+  "direction": "SHORT",
+  "entry_price": 60854.8,
+  "sl_price": 61463.348,
+  "tp1_price": 60733.0904,
+  "tp2_price": 60672.2356,
+  "total_qty": 0.049,
+  "remaining_qty": 0.049,
+  "tp1_hit": false,
+  "realized_pnl": 0.0,
+  "entry_timestamp": "2026-06-25 00:35:00",
+  "entry_ema_fast": 60921.2341,
+  "entry_ema_slow": 60927.8665,
+  "entry_volume": 643.32,
+  "entry_volume_ma": 294.91,
+  "is_recovery": false,
+  "recovery_chain_id": null,
+  "trade_id": 1339
+}
