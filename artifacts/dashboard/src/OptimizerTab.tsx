@@ -114,7 +114,6 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
 
   const handleApplyToBacktest = (result: OptResult) => {
     const p = result.params || result;
-    console.log("[OptimizerTab] handleApplyToBacktest called, params:", p);
     if (!onApplyToBacktest) return;
     onApplyToBacktest({
       symbol: result.symbol || symbol,

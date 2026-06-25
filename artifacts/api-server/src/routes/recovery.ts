@@ -19,7 +19,11 @@ const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
 let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number } | null = null;
 let _configMtime = 0;
 
-function readRecoveryConfig(): { recovery_enabled: boolean; recovery_bonus_pct: number } {
+function readRecoveryConfig(): {
+  recovery_enabled: boolean;
+  recovery_bonus_pct: number;
+  recovery_max_pct: number;
+} {
   try {
     const stat = fs.statSync(CONFIG_PATH);
     // Используем кэш если файл не менялся
@@ -31,11 +35,12 @@ function readRecoveryConfig(): { recovery_enabled: boolean; recovery_bonus_pct: 
     _configCache = {
       recovery_enabled: val === true || val === "true" || val === "True" || val === 1,
       recovery_bonus_pct: Number(raw.recovery_bonus_pct) || 0,
+      recovery_max_pct: Number(raw.recovery_max_pct) || 0,
     };
     _configMtime = stat.mtimeMs;
     return _configCache;
   } catch {
-    return { recovery_enabled: false, recovery_bonus_pct: 0 };
+    return { recovery_enabled: false, recovery_bonus_pct: 0, recovery_max_pct: 0 };
   }
 }
 
@@ -46,10 +51,18 @@ router.get("/config", (_req, res) => {
 // PUT /recovery/config — изменить настройки recovery режима
 router.put("/config", (req, res) => {
   try {
-    const { recovery_enabled, recovery_bonus_pct } = req.body;
+    const { recovery_enabled, recovery_bonus_pct, recovery_max_pct } = req.body;
+    const current = readRecoveryConfig();
     const content = yaml.dump({
       recovery_enabled: !!recovery_enabled,
       recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
+      // Если фронтенд не передал recovery_max_pct (он сейчас управляется
+      // только через ручное редактирование файла, не через UI) — сохраняем
+      // текущее значение, чтобы не затереть его молча при простом
+      // переключении тоггла recovery_enabled через дашборд.
+      recovery_max_pct: recovery_max_pct !== undefined
+        ? Number(recovery_max_pct)
+        : current.recovery_max_pct,
     });
     fs.writeFileSync(CONFIG_PATH, `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`);
     // Сбрасываем кэш после записи

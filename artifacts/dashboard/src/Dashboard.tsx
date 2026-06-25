@@ -571,7 +571,6 @@ export default function Dashboard() {
       volume_multiplier: params.volume_multiplier,
       tp1_close_pct: params.tp1_close_pct,
     };
-    console.log("[Dashboard] handleApplyToBacktest:", params.symbol, newConfig.ema_fast, newConfig.ema_slow);
     setBtSymbol(params.symbol);
     setBtConfig(newConfig);
     setBtResetKey(k => k + 1);
@@ -602,11 +601,6 @@ export default function Dashboard() {
   const updateBtConfig = (key: keyof BotConfig, value: number | string | boolean) => {
     setBtConfig({ ...btConfig, [key]: value });
   };
-
-  // Отладка: логируем изменения btConfig
-  useEffect(() => {
-    console.log("[Dashboard] btConfig updated:", btConfig.ema_fast, btConfig.ema_slow, btConfig.sl_pct, btConfig.tp1_pct, btConfig.tp2_pct, btConfig.volume_multiplier);
-  }, [btConfig]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
@@ -731,7 +725,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">Symbol</label>
                         <input
-                          key={btResetKey + "-sym"}
                           type="text"
                           value={btSymbol}
                           onChange={e => setBtSymbol(e.target.value.toUpperCase())}
@@ -742,7 +735,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">Timeframe</label>
                         <select
-                          key={btResetKey + "-tf"}
                           value={btConfig.timeframe}
                           onChange={e => updateBtConfig("timeframe", e.target.value)}
                           className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
@@ -773,7 +765,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">Leverage</label>
                         <input
-                          key={btResetKey + "-lev"}
                           type="number"
                           value={btConfig.leverage}
                           onChange={e => updateBtConfig("leverage", parseInt(e.target.value) || 1)}
@@ -785,7 +776,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">Risk %</label>
                         <input
-                          key={btResetKey + "-risk"}
                           type="number"
                           step="0.1"
                           value={btConfig.risk_pct}
@@ -796,7 +786,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">SL %</label>
                         <input
-                          key={btResetKey + "-sl"}
                           type="number"
                           step="0.05"
                           value={btConfig.sl_pct}
@@ -807,7 +796,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">TP1 %</label>
                         <input
-                          key={btResetKey + "-tp1"}
                           type="number"
                           step="0.05"
                           value={btConfig.tp1_pct}
@@ -818,7 +806,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">TP2 %</label>
                         <input
-                          key={btResetKey + "-tp2"}
                           type="number"
                           step="0.1"
                           value={btConfig.tp2_pct}
@@ -829,7 +816,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">EMA Fast</label>
                         <input
-                          key={btResetKey + "-ef"}
                           type="number"
                           value={btConfig.ema_fast}
                           onChange={e => updateBtConfig("ema_fast", parseInt(e.target.value) || 1)}
@@ -839,7 +825,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">EMA Slow</label>
                         <input
-                          key={btResetKey + "-es"}
                           type="number"
                           value={btConfig.ema_slow}
                           onChange={e => updateBtConfig("ema_slow", parseInt(e.target.value) || 1)}
@@ -849,7 +834,6 @@ export default function Dashboard() {
                       <div>
                         <label className="text-xs text-zinc-400 mb-1 block">Volume Multiplier</label>
                         <input
-                          key={btResetKey + "-vm"}
                           type="number"
                           step="0.1"
                           value={btConfig.volume_multiplier}
