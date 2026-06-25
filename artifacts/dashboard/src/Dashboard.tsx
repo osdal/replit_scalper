@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import BacktestTab from "./BacktestTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -82,6 +81,40 @@ interface BacktestParams {
   tp2_pct: number;
   volume_multiplier: number;
   tp1_close_pct: number;
+}
+
+interface BacktestResult {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  max_drawdown: number;
+  initial_balance: number;
+  final_balance: number;
+  return_pct: number;
+}
+
+interface BotConfig {
+  timeframe: string;
+  leverage: number;
+  risk_pct: number;
+  sl_pct: number;
+  tp1_pct: number;
+  tp1_close_pct: number;
+  tp2_pct: number;
+  ema_fast: number;
+  ema_slow: number;
+  volume_ma_period: number;
+  volume_multiplier: number;
+  htf_enabled: boolean;
+  htf_timeframe: string;
+  htf_ema_fast: number;
+  htf_ema_slow: number;
+  auto_mode: boolean;
+  paper_balance: number;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -370,6 +403,29 @@ function StatsTable({ stats }: { stats: Stats[] }) {
 
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 
+const DEFAULT_CONFIG: BotConfig = {
+  timeframe: "5m",
+  leverage: 10,
+  risk_pct: 1.0,
+  sl_pct: 0.5,
+  tp1_pct: 0.5,
+  tp1_close_pct: 50,
+  tp2_pct: 1.0,
+  ema_fast: 9,
+  ema_slow: 21,
+  volume_ma_period: 20,
+  volume_multiplier: 1.2,
+  htf_enabled: false,
+  htf_timeframe: "1h",
+  htf_ema_fast: 9,
+  htf_ema_slow: 21,
+  auto_mode: true,
+  paper_balance: 1000,
+};
+
+const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+const STORAGE_KEY = "backtest_result";
+
 export default function Dashboard() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -382,9 +438,42 @@ export default function Dashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
   const symbols = [...new Set(trades.map(t => t.symbol))].sort();
   const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
-  // Параметры из оптимизатора для бэктеста
-  const [backtestParams, setBacktestParams] = useState<BacktestParams | null>(null);
-  const [backtestKey, setBacktestKey] = useState<number>(0);
+  // Inline backtest state
+  const [btSymbol, setBtSymbol] = useState("BTCUSDT");
+  const [btStartDate, setBtStartDate] = useState("2024-01-01");
+  const [btEndDate, setBtEndDate] = useState("2024-04-01");
+  const [btConfig, setBtConfig] = useState<BotConfig>(DEFAULT_CONFIG);
+  const [btRunning, setBtRunning] = useState(false);
+  const [btResult, setBtResult] = useState<BacktestResult | null>(null);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [btResetKey, setBtResetKey] = useState(0);
+
+
+  // Восстанавливаем результат из localStorage при монтировании
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object" && "total_trades" in parsed) {
+          setBtResult(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Сохраняем результат в localStorage при изменении
+  useEffect(() => {
+    if (btResult) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(btResult));
+      } catch {
+        // ignore
+      }
+    }
+  }, [btResult]);
 
   const load = useCallback(async () => {
     try {
@@ -466,22 +555,58 @@ export default function Dashboard() {
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
     } catch (error) {
-      console.error('Export failed:', error);
       alert('Failed to export trades. Please try again.');
     }
   };
 
   // Callback для переноса параметров из оптимизатора в бэктест
-  const handleApplyToBacktest = useCallback((params: BacktestParams) => {
-    setBacktestParams(params);
-    setBacktestKey(prev => prev + 1);
-    // Сохраняем в localStorage чтобы BacktestTab мог прочитать
+  const handleApplyToBacktest = (params: BacktestParams) => {
+    const newConfig: BotConfig = {
+      ...DEFAULT_CONFIG,
+      ema_fast: params.ema_fast,
+      ema_slow: params.ema_slow,
+      sl_pct: params.sl_pct,
+      tp1_pct: params.tp1_pct,
+      tp2_pct: params.tp2_pct,
+      volume_multiplier: params.volume_multiplier,
+      tp1_close_pct: params.tp1_close_pct,
+    };
+    console.log("[Dashboard] handleApplyToBacktest:", params.symbol, newConfig.ema_fast, newConfig.ema_slow);
+    setBtSymbol(params.symbol);
+    setBtConfig(newConfig);
+    setBtResetKey(k => k + 1);
+  };
+
+  const handleRunBacktest = async () => {
+    setBtRunning(true);
+    setBtError(null);
+    setBtResult(null);
     try {
-      localStorage.setItem('backtest_params', JSON.stringify(params));
-    } catch {
-      // ignore
+      const res = await runBacktest(btSymbol.toUpperCase(), {
+        start: btStartDate,
+        end: btEndDate,
+        config: btConfig,
+      });
+      if (res.error) {
+        setBtError(res.error);
+      } else {
+        setBtResult(res);
+      }
+    } catch (e) {
+      setBtError("Failed to run backtest");
+    } finally {
+      setBtRunning(false);
     }
-  }, []);
+  };
+
+  const updateBtConfig = (key: keyof BotConfig, value: number | string | boolean) => {
+    setBtConfig({ ...btConfig, [key]: value });
+  };
+
+  // Отладка: логируем изменения btConfig
+  useEffect(() => {
+    console.log("[Dashboard] btConfig updated:", btConfig.ema_fast, btConfig.ema_slow, btConfig.sl_pct, btConfig.tp1_pct, btConfig.tp2_pct, btConfig.volume_multiplier);
+  }, [btConfig]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
@@ -594,7 +719,242 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <BacktestTab key={backtestKey} initialParams={backtestParams} />
+              <div className="space-y-4" key={btResetKey}>
+                <Card className="border border-zinc-800 bg-zinc-900">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base text-zinc-300 flex items-center gap-2">
+                      <BarChart2 className="w-4 h-4" />Backtest Configuration
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Symbol</label>
+                        <input
+                          key={btResetKey + "-sym"}
+                          type="text"
+                          value={btSymbol}
+                          onChange={e => setBtSymbol(e.target.value.toUpperCase())}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                          placeholder="BTCUSDT"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Timeframe</label>
+                        <select
+                          key={btResetKey + "-tf"}
+                          value={btConfig.timeframe}
+                          onChange={e => updateBtConfig("timeframe", e.target.value)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        >
+                          {TIMEFRAMES.map(tf => (
+                            <option key={tf} value={tf}>{tf}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Start Date</label>
+                        <input
+                          type="date"
+                          value={btStartDate}
+                          onChange={e => setBtStartDate(e.target.value)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">End Date</label>
+                        <input
+                          type="date"
+                          value={btEndDate}
+                          onChange={e => setBtEndDate(e.target.value)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Leverage</label>
+                        <input
+                          key={btResetKey + "-lev"}
+                          type="number"
+                          value={btConfig.leverage}
+                          onChange={e => updateBtConfig("leverage", parseInt(e.target.value) || 1)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                          min={1}
+                          max={125}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Risk %</label>
+                        <input
+                          key={btResetKey + "-risk"}
+                          type="number"
+                          step="0.1"
+                          value={btConfig.risk_pct}
+                          onChange={e => updateBtConfig("risk_pct", parseFloat(e.target.value) || 0)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">SL %</label>
+                        <input
+                          key={btResetKey + "-sl"}
+                          type="number"
+                          step="0.05"
+                          value={btConfig.sl_pct}
+                          onChange={e => updateBtConfig("sl_pct", parseFloat(e.target.value) || 0)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">TP1 %</label>
+                        <input
+                          key={btResetKey + "-tp1"}
+                          type="number"
+                          step="0.05"
+                          value={btConfig.tp1_pct}
+                          onChange={e => updateBtConfig("tp1_pct", parseFloat(e.target.value) || 0)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">TP2 %</label>
+                        <input
+                          key={btResetKey + "-tp2"}
+                          type="number"
+                          step="0.1"
+                          value={btConfig.tp2_pct}
+                          onChange={e => updateBtConfig("tp2_pct", parseFloat(e.target.value) || 0)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">EMA Fast</label>
+                        <input
+                          key={btResetKey + "-ef"}
+                          type="number"
+                          value={btConfig.ema_fast}
+                          onChange={e => updateBtConfig("ema_fast", parseInt(e.target.value) || 1)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">EMA Slow</label>
+                        <input
+                          key={btResetKey + "-es"}
+                          type="number"
+                          value={btConfig.ema_slow}
+                          onChange={e => updateBtConfig("ema_slow", parseInt(e.target.value) || 1)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">Volume Multiplier</label>
+                        <input
+                          key={btResetKey + "-vm"}
+                          type="number"
+                          step="0.1"
+                          value={btConfig.volume_multiplier}
+                          onChange={e => updateBtConfig("volume_multiplier", parseFloat(e.target.value) || 1)}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex items-center gap-4">
+                      <Button
+                        onClick={handleRunBacktest}
+                        disabled={btRunning}
+                        className="flex items-center gap-2"
+                      >
+                        {btRunning ? (
+                          <><RefreshCw className="w-4 h-4 animate-spin" />Running...</>
+                        ) : (
+                          <><Play className="w-4 h-4" />Run Backtest</>
+                        )}
+                      </Button>
+                      {btError && (
+                        <span className="text-red-400 text-sm">{btError}</span>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {btResult && (
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                            <BarChart2 className="w-4 h-4" />Total Trades
+                          </div>
+                          <div className="text-2xl font-bold font-mono text-white">{btResult.total_trades}</div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                            <TrendingUp className="w-4 h-4 text-green-400" />Win Rate
+                          </div>
+                          <div className="text-2xl font-bold font-mono text-green-400">{btResult.win_rate}%</div>
+                          <div className="text-xs text-zinc-500 mt-1">{btResult.wins}W / {btResult.losses}L</div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                            <DollarSign className="w-4 h-4" />Total PnL
+                          </div>
+                          <div className={`text-2xl font-bold font-mono ${btResult.total_pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                            {btResult.total_pnl >= 0 ? "+" : ""}{btResult.total_pnl.toFixed(4)}
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                            <TrendingDown className="w-4 h-4 text-red-400" />Max Drawdown
+                          </div>
+                          <div className="text-2xl font-bold font-mono text-red-400">{btResult.max_drawdown}%</div>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="text-xs text-zinc-400 mb-1">Initial Balance</div>
+                          <div className="text-lg font-bold font-mono text-white">${btResult.initial_balance.toFixed(2)}</div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="text-xs text-zinc-400 mb-1">Final Balance</div>
+                          <div className={`text-lg font-bold font-mono ${btResult.final_balance >= btResult.initial_balance ? "text-green-400" : "text-red-400"}`}>
+                            ${btResult.final_balance.toFixed(2)}
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="text-xs text-zinc-400 mb-1">Return</div>
+                          <div className={`text-lg font-bold font-mono ${btResult.return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                            {btResult.return_pct >= 0 ? "+" : ""}{btResult.return_pct}%
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <Card className="border border-zinc-800 bg-zinc-900">
+                        <CardContent className="pt-4 pb-3">
+                          <div className="text-xs text-zinc-400 mb-1">Avg Win / Loss</div>
+                          <div className="text-lg font-bold font-mono">
+                            <span className="text-green-400">+{btResult.avg_win.toFixed(4)}</span>
+                            {" / "}
+                            <span className="text-red-400">{btResult.avg_loss.toFixed(4)}</span>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  </>
+                )}
+              </div>
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">

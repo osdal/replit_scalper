@@ -9,6 +9,7 @@ const API = "http://localhost:5000/api";
 interface OptResult {
   rank: string;
   score: string;
+  symbol: string;
   ema_fast: string;
   ema_slow: string;
   sl_pct: string;
@@ -16,6 +17,15 @@ interface OptResult {
   tp2_pct: string;
   volume_multiplier: string;
   tp1_close_pct: string;
+  params?: {
+    ema_fast: string;
+    ema_slow: string;
+    sl_pct: string;
+    tp1_pct: string;
+    tp2_pct: string;
+    volume_multiplier: string;
+    tp1_close_pct: string;
+  };
 }
 
 interface JobStatus {
@@ -103,16 +113,18 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
   };
 
   const handleApplyToBacktest = (result: OptResult) => {
+    const p = result.params || result;
+    console.log("[OptimizerTab] handleApplyToBacktest called, params:", p);
     if (!onApplyToBacktest) return;
     onApplyToBacktest({
-      symbol,
-      ema_fast: parseInt(result.ema_fast) || 9,
-      ema_slow: parseInt(result.ema_slow) || 21,
-      sl_pct: parseFloat(result.sl_pct) || 0.5,
-      tp1_pct: parseFloat(result.tp1_pct) || 0.5,
-      tp2_pct: parseFloat(result.tp2_pct) || 1.0,
-      volume_multiplier: parseFloat(result.volume_multiplier) || 1.2,
-      tp1_close_pct: parseInt(result.tp1_close_pct) || 50,
+      symbol: result.symbol || symbol,
+      ema_fast: parseInt(p.ema_fast) || 9,
+      ema_slow: parseInt(p.ema_slow) || 21,
+      sl_pct: parseFloat(p.sl_pct) || 0.5,
+      tp1_pct: parseFloat(p.tp1_pct) || 0.5,
+      tp2_pct: parseFloat(p.tp2_pct) || 1.0,
+      volume_multiplier: parseFloat(p.volume_multiplier) || 1.2,
+      tp1_close_pct: parseInt(p.tp1_close_pct) || 50,
     });
   };
 
