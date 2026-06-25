@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 import signal
@@ -144,10 +145,8 @@ async def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
     log = get_logger(log_file=cfg.log_file, mode=cfg.mode, symbol=cfg.symbol)
-    events = get_events_logger(cfg.symbol)
 
     log.info(f"Bot starting | mode={cfg.mode} symbol={cfg.symbol} tf={cfg.timeframe}")
-    events.info(f"START | mode={cfg.mode} symbol={cfg.symbol} tf={cfg.timeframe} leverage={cfg.leverage}x risk={cfg.risk_pct}% SL={cfg.sl_pct}% TP1={cfg.tp1_pct}% TP2={cfg.tp2_pct}% tp1_close={cfg.tp1_close_pct}%")
     log.info(
         f"Config | leverage={cfg.leverage}x risk={cfg.risk_pct}% "
         f"SL={cfg.sl_pct}% TP1={cfg.tp1_pct}% TP2={cfg.tp2_pct}% auto={cfg.auto_mode}"
@@ -173,12 +172,14 @@ async def main():
     shutdown_event = asyncio.Event()
     _setup_signal_handlers(log)
 
+    events = get_events_logger(cfg.symbol)
+
     try:
         if cfg.mode == "backtest":
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event)
+        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events)
 
     finally:
         await reporter.report_stopped()
@@ -192,6 +193,7 @@ async def _run_live_or_paper(
     cfg, client: AsyncClient, log,
     reporter: DbReporter, recovery: RecoveryClient,
     shutdown_event: asyncio.Event,
+    events: logging.Logger,
 ):
     tracker   = PositionTracker(cfg, log, reporter=reporter)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
