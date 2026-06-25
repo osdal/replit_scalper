@@ -384,6 +384,7 @@ export default function Dashboard() {
   const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
   // Параметры из оптимизатора для бэктеста
   const [backtestParams, setBacktestParams] = useState<BacktestParams | null>(null);
+  const [backtestKey, setBacktestKey] = useState<number>(0);
 
   const load = useCallback(async () => {
     try {
@@ -473,6 +474,7 @@ export default function Dashboard() {
   // Callback для переноса параметров из оптимизатора в бэктест
   const handleApplyToBacktest = useCallback((params: BacktestParams) => {
     setBacktestParams(params);
+    setBacktestKey(prev => prev + 1);
     // Сохраняем в localStorage чтобы BacktestTab мог прочитать
     try {
       localStorage.setItem('backtest_params', JSON.stringify(params));
@@ -592,7 +594,7 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <BacktestTab key={JSON.stringify(backtestParams)} initialParams={backtestParams} />
+              <BacktestTab key={backtestKey} initialParams={backtestParams} />
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
