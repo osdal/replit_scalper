@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
-import { Play, Square, RefreshCw, TrendingUp } from "lucide-react";
+import { Play, Square, RefreshCw, TrendingUp, ArrowRight } from "lucide-react";
 
 const API = "http://localhost:5000/api";
 
@@ -36,9 +36,19 @@ interface OptimizerTabProps {
   job: JobStatus | null;
   setJobId: (id: string | null) => void;
   setJob: (job: JobStatus | null) => void;
+  onApplyToBacktest?: (params: {
+    symbol: string;
+    ema_fast: number;
+    ema_slow: number;
+    sl_pct: number;
+    tp1_pct: number;
+    tp2_pct: number;
+    volume_multiplier: number;
+    tp1_close_pct: number;
+  }) => void;
 }
 
-export default function OptimizerTab({ jobId, job, setJobId, setJob }: OptimizerTabProps) {
+export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBacktest }: OptimizerTabProps) {
   const [symbol, setSymbol]   = useState("ETHUSDT");
   const [start, setStart]     = useState("2026-05-01");
   const [end, setEnd]         = useState("2026-06-13");
@@ -90,6 +100,20 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob }: Optimizer
     await fetch(`${API}/optimizer/jobs/${jobId}`, { method: "DELETE" });
     setJobId(null);
     setJob(null);
+  };
+
+  const handleApplyToBacktest = (result: OptResult) => {
+    if (!onApplyToBacktest) return;
+    onApplyToBacktest({
+      symbol,
+      ema_fast: parseInt(result.ema_fast) || 9,
+      ema_slow: parseInt(result.ema_slow) || 21,
+      sl_pct: parseFloat(result.sl_pct) || 0.5,
+      tp1_pct: parseFloat(result.tp1_pct) || 0.5,
+      tp2_pct: parseFloat(result.tp2_pct) || 1.0,
+      volume_multiplier: parseFloat(result.volume_multiplier) || 1.2,
+      tp1_close_pct: parseInt(result.tp1_close_pct) || 50,
+    });
   };
 
   const isRunning = job?.status === "running";
@@ -206,23 +230,34 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob }: Optimizer
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-zinc-400 text-xs border-b border-zinc-800">
-                    {["Rank","Score","EMA F","EMA S","SL%","TP1%","TP2%","Vol×","TP1 cl%"].map(h => (
-                      <th key={h} className="text-left pb-2 pr-4">{h}</th>
+                    {["","Rank","Score","EMA F","EMA S","SL%","TP1%","TP2%","Vol×","TP1 cl%"].map(h => (
+                      <th key={h} className="text-left pb-2 pr-3">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {job.results.map((r: any, i: number) => (
                     <tr key={i} className={`border-b border-zinc-800/50 ${i === 0 ? "text-green-400 font-semibold" : "text-zinc-300"}`}>
-                      <td className="py-1.5 pr-4">{r.rank}</td>
-                      <td className="py-1.5 pr-4 font-mono">{r.score}</td>
-                      <td className="py-1.5 pr-4">{r.params?.ema_fast ?? r.ema_fast}</td>
-                      <td className="py-1.5 pr-4">{r.params?.ema_slow ?? r.ema_slow}</td>
-                      <td className="py-1.5 pr-4">{r.params?.sl_pct ?? r.sl_pct}</td>
-                      <td className="py-1.5 pr-4">{r.params?.tp1_pct ?? r.tp1_pct}</td>
-                      <td className="py-1.5 pr-4">{r.params?.tp2_pct ?? r.tp2_pct}</td>
-                      <td className="py-1.5 pr-4">{r.params?.volume_multiplier ?? r.volume_multiplier}</td>
-                      <td className="py-1.5 pr-4">{r.params?.tp1_close_pct ?? r.tp1_close_pct}</td>
+                      <td className="py-1.5 pr-3">
+                        {onApplyToBacktest && (
+                          <button
+                            onClick={() => handleApplyToBacktest(r)}
+                            className="p-1 rounded hover:bg-zinc-700 transition-colors"
+                            title="Apply to Backtest"
+                          >
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-3">{r.rank}</td>
+                      <td className="py-1.5 pr-3 font-mono">{r.score}</td>
+                      <td className="py-1.5 pr-3">{r.params?.ema_fast ?? r.ema_fast}</td>
+                      <td className="py-1.5 pr-3">{r.params?.ema_slow ?? r.ema_slow}</td>
+                      <td className="py-1.5 pr-3">{r.params?.sl_pct ?? r.sl_pct}</td>
+                      <td className="py-1.5 pr-3">{r.params?.tp1_pct ?? r.tp1_pct}</td>
+                      <td className="py-1.5 pr-3">{r.params?.tp2_pct ?? r.tp2_pct}</td>
+                      <td className="py-1.5 pr-3">{r.params?.volume_multiplier ?? r.volume_multiplier}</td>
+                      <td className="py-1.5 pr-3">{r.params?.tp1_close_pct ?? r.tp1_close_pct}</td>
                     </tr>
                   ))}
                 </tbody>

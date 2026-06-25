@@ -73,6 +73,17 @@ interface Stats {
   avg_loss: number;
 }
 
+interface BacktestParams {
+  symbol: string;
+  ema_fast: number;
+  ema_slow: number;
+  sl_pct: number;
+  tp1_pct: number;
+  tp2_pct: number;
+  volume_multiplier: number;
+  tp1_close_pct: number;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function fmt(n: number | null | undefined, decimals = 2) {
@@ -371,6 +382,8 @@ export default function Dashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
   const symbols = [...new Set(trades.map(t => t.symbol))].sort();
   const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
+  // Параметры из оптимизатора для бэктеста
+  const [backtestParams, setBacktestParams] = useState<BacktestParams | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -456,6 +469,17 @@ export default function Dashboard() {
       alert('Failed to export trades. Please try again.');
     }
   };
+
+  // Callback для переноса параметров из оптимизатора в бэктест
+  const handleApplyToBacktest = useCallback((params: BacktestParams) => {
+    setBacktestParams(params);
+    // Сохраняем в localStorage чтобы BacktestTab мог прочитать
+    try {
+      localStorage.setItem('backtest_params', JSON.stringify(params));
+    } catch {
+      // ignore
+    }
+  }, []);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
@@ -568,11 +592,11 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <BacktestTab />
+              <BacktestTab initialParams={backtestParams} />
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
-              <OptimizerTab jobId={optJobId} job={optJob} setJobId={setOptJobId} setJob={setOptJob} />
+              <OptimizerTab jobId={optJobId} job={optJob} setJobId={setOptJobId} setJob={setOptJob} onApplyToBacktest={handleApplyToBacktest} />
             </TabsContent>
 
             <TabsContent value="recovery" className="mt-4">

@@ -1,0 +1,166 @@
+2026-06-10 03:35:04 [PAPER] INFO [PAPER] Would open SHORT BNBUSDT qty=0.26 entry=591.83 SL=599.5238 TP1=588.8708 TP2=581.7689 balance=1000.00 USDT
+2026-06-10 03:35:04 [PAPER] INFO Position opened | SHORT | entry=591.83 SL=599.5238 TP1=588.8708 TP2=581.7689 qty=0.26 | indicators: ema_fast=593.5689 ema_slow=593.8059 volume=2189.1 volume_ma=1300.19
+2026-06-10 05:35:13 [PAPER] INFO [PAPER] Would close partial | TP1 qty=0.104 price=588.62
+2026-06-10 05:35:13 [PAPER] INFO TP1 hit | price=588.62 closed_qty=0.104000 remaining_qty=0.156000 pnl=0.3338 | SL moved to breakeven: 599.5238 → 591.83 | entry_ema_fast=593.5689 entry_ema_slow=593.8059 entry_volume=2189.1 entry_volume_ma=1300.19
+2026-06-10 16:40:04 [PAPER] INFO [PAPER] Would close full | SL qty=0.15600000000000003 price=594.85
+2026-06-10 16:40:04 [PAPER] WARNING SL hit | price=594.85 qty=0.156000 pnl=-0.4711 total_pnl=-0.1373 | entry_ema_fast=593.5689 entry_ema_slow=593.8059 entry_volume=2189.1 entry_volume_ma=1300.19
+2026-06-11 09:15:10 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=1.29 entry=596.49 SL=588.7356 TP1=599.4724 TP2=606.6303 balance=1000.00 USDT
+2026-06-11 09:15:10 [PAPER BNBUSDT] INFO Position opened | LONG | entry=596.49 SL=588.7356 TP1=599.4724 TP2=606.6303 qty=1.29 | indicators: ema_fast=595.4757 ema_slow=595.2927 volume=1382.19 volume_ma=912.69
+2026-06-11 13:55:11 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=1.281 entry=600.5 SL=592.6935 TP1=603.5025 TP2=610.7085 balance=1000.00 USDT
+2026-06-11 13:55:11 [PAPER BNBUSDT] INFO Position opened | LONG | entry=600.5 SL=592.6935 TP1=603.5025 TP2=610.7085 qty=1.281 | indicators: ema_fast=600.2276 ema_slow=600.1641 volume=1509.99 volume_ma=1324.3
+2026-06-11 20:45:08 [PAPER BNBUSDT] INFO [PAPER] Would close partial | TP1 qty=0.5124 price=604.72
+2026-06-11 20:45:08 [PAPER BNBUSDT] INFO TP1 hit | price=604.72 closed_qty=0.512400 remaining_qty=0.768600 pnl=2.1623 | SL moved to breakeven: 592.6935 → 600.5 | entry_ema_fast=600.2276 entry_ema_slow=600.1641 entry_volume=1509.99 entry_volume_ma=1324.3
+2026-06-12 09:20:08 [PAPER BNBUSDT] INFO [PAPER] Would close full | SL qty=0.7686 price=600.4
+2026-06-12 09:20:08 [PAPER BNBUSDT] WARNING SL hit | price=600.4 qty=0.768600 pnl=-0.0769 total_pnl=2.0855 | entry_ema_fast=600.2276 entry_ema_slow=600.1641 entry_volume=1509.99 entry_volume_ma=1324.3
+2026-06-13 04:35:08 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=1.271 entry=605.04 SL=597.1745 TP1=608.0652 TP2=615.3257 balance=1000.00 USDT
+2026-06-13 04:35:08 [PAPER BNBUSDT] INFO Position opened | LONG | entry=605.04 SL=597.1745 TP1=608.0652 TP2=615.3257 qty=1.271 | indicators: ema_fast=604.9593 ema_slow=604.9523 volume=699.89 volume_ma=627.96
+2026-06-13 09:12:00 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=605.04 SL=597.1745 TP1=608.0652 TP2=615.3257 qty=1.271 tp1_hit=False
+2026-06-13 17:55:13 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.17 entry≈610.54
+2026-06-13 17:55:14 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=602.53 qty=0.17
+2026-06-13 17:55:14 [LIVE BNBUSDT] INFO Position opened | LONG | entry=610.54 SL=602.5339 TP1=613.5224 TP2=620.848 qty=0.17 | indicators: ema_fast=609.5928 ema_slow=609.3882 volume=3469.98 volume_ma=1474.73
+2026-06-15 09:33:41 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=610.54 SL=602.5339 TP1=613.5224 TP2=620.848 qty=0.17 tp1_hit=False
+2026-06-15 11:40:16 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.33 entry≈617.01
+2026-06-15 11:40:17 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=609.06 qty=0.33
+2026-06-15 11:40:17 [LIVE BNBUSDT] INFO Position opened | LONG | entry=617.01 SL=609.058 TP1=620.1654 TP2=627.5704 qty=0.33 | indicators: ema_fast=616.6822 ema_slow=616.5855 volume=1435.36 volume_ma=1120.19
+2026-06-15 13:22:32 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=617.01 SL=609.058 TP1=620.1654 TP2=627.5704 qty=0.33 tp1_hit=False
+2026-06-15 13:22:36 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=609.06 qty=0.33
+2026-06-15 16:58:11 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=617.01 SL=609.058 TP1=620.1654 TP2=627.5704 qty=0.33 tp1_hit=False
+2026-06-15 18:45:18 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.33 entry≈627.59
+2026-06-15 18:45:18 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=619.07 qty=0.33
+2026-06-15 18:45:19 [LIVE BNBUSDT] INFO Position opened | LONG | entry=627.59 SL=619.0661 TP1=630.3561 TP2=637.8827 qty=0.33 | indicators: ema_fast=626.626 ema_slow=626.5985 volume=3418.56 volume_ma=2617.43
+2026-06-15 19:46:08 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=627.59 SL=619.0661 TP1=630.3561 TP2=637.8827 qty=0.33 tp1_hit=False
+2026-06-15 19:46:13 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=619.07 qty=0.33
+2026-06-15 23:54:12 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=627.59 SL=619.0661 TP1=630.3561 TP2=637.8827 qty=0.33 tp1_hit=False
+2026-06-16 05:00:04 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.32 entry≈616.2
+2026-06-16 05:00:05 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=624.1 qty=0.32
+2026-06-16 05:00:05 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=616.2 SL=624.0992 TP1=613.0096 TP2=605.6165 qty=0.32 | indicators: ema_fast=616.9079 ema_slow=617.101 volume=1433.65 volume_ma=1021.5
+2026-06-16 05:30:06 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈611.56
+2026-06-16 05:30:06 [LIVE BNBUSDT] INFO TP1 hit | price=611.56 closed_qty=0.128000 remaining_qty=0.192000 pnl=0.5939 | SL moved to breakeven: 624.0992 → 616.2 | entry_ema_fast=616.9079 entry_ema_slow=617.101 entry_volume=1433.65 entry_volume_ma=1021.5
+2026-06-16 05:30:07 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=616.2 qty=0.19
+2026-06-16 05:30:07 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=616.2
+2026-06-16 07:32:15 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.2 SL=616.2 TP1=613.0096 TP2=605.6165 qty=0.192 tp1_hit=True
+2026-06-16 07:32:19 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=616.2 qty=0.19
+2026-06-16 07:36:59 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.2 SL=616.2 TP1=613.0096 TP2=605.6165 qty=0.192 tp1_hit=True
+2026-06-16 12:25:14 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.33 entry≈616.36
+2026-06-16 12:25:15 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=624.34 qty=0.33
+2026-06-16 12:25:15 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=616.36 SL=624.3423 TP1=613.2484 TP2=605.8524 qty=0.33 | indicators: ema_fast=617.6606 ema_slow=617.8051 volume=2137.27 volume_ma=1621.63
+2026-06-16 14:37:52 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.36 SL=624.3423 TP1=613.2484 TP2=605.8524 qty=0.33 tp1_hit=False
+2026-06-16 14:37:56 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=624.34 qty=0.33
+2026-06-16 14:43:50 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.36 SL=624.3423 TP1=613.2484 TP2=605.8524 qty=0.33 tp1_hit=False
+2026-06-16 14:43:54 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=624.34 qty=0.33
+2026-06-16 14:54:49 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.36 SL=624.3423 TP1=613.2484 TP2=605.8524 qty=0.33 tp1_hit=False
+2026-06-16 14:54:53 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=624.34 qty=0.33
+2026-06-16 16:10:15 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈612.72
+2026-06-16 16:10:15 [LIVE BNBUSDT] INFO TP1 hit | price=612.72 closed_qty=0.132000 remaining_qty=0.198000 pnl=0.4805 | SL moved to breakeven: 624.3423 → 616.36 | entry_ema_fast=617.6606 entry_ema_slow=617.8051 entry_volume=2137.27 entry_volume_ma=1621.63
+2026-06-16 16:10:17 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=616.36 qty=0.19
+2026-06-16 16:10:17 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=616.36
+2026-06-16 16:25:19 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.36 SL=616.36 TP1=613.2484 TP2=605.8524 qty=0.198 tp1_hit=True
+2026-06-16 16:25:24 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=616.36 qty=0.19
+2026-06-16 16:29:47 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=616.36 SL=616.36 TP1=613.2484 TP2=605.8524 qty=0.198 tp1_hit=True
+2026-06-16 16:29:52 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=616.36 qty=0.19
+2026-06-16 16:30:16 [LIVE BNBUSDT] WARNING [LIVE] Full close already executed by exchange | TP2
+2026-06-16 16:30:16 [LIVE BNBUSDT] WARNING SL hit (exchange stop) | reason=exchange_stop_at_TP2 price=605.58 qty=0.198000 pnl=2.1344 total_pnl=2.6149 | entry_ema_fast=617.6606 entry_ema_slow=617.8051 entry_volume=2137.27 entry_volume_ma=1621.63
+2026-06-16 22:05:09 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.34 entry≈606.92
+2026-06-16 22:05:09 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=614.7 qty=0.34
+2026-06-16 22:05:10 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=606.92 SL=614.6985 TP1=603.776 TP2=596.4942 qty=0.34 | indicators: ema_fast=607.7603 ema_slow=607.947 volume=2194.61 volume_ma=1435.29
+2026-06-16 22:53:25 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=606.92 SL=614.6985 TP1=603.776 TP2=596.4942 qty=0.34 tp1_hit=False
+2026-06-16 22:53:30 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=614.7 qty=0.34
+2026-06-17 07:03:37 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=606.92 SL=614.6985 TP1=603.776 TP2=596.4942 qty=0.34 tp1_hit=False
+2026-06-17 07:03:42 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=614.7 qty=0.34
+2026-06-17 10:27:09 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=606.92 SL=614.6985 TP1=603.776 TP2=596.4942 qty=0.34 tp1_hit=False
+2026-06-17 10:27:14 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=614.7 qty=0.34
+2026-06-17 11:25:06 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈603.46
+2026-06-17 11:25:06 [LIVE BNBUSDT] INFO TP1 hit | price=603.46 closed_qty=0.136000 remaining_qty=0.204000 pnl=0.4706 | SL moved to breakeven: 614.6985 → 606.92 | entry_ema_fast=607.7603 entry_ema_slow=607.947 entry_volume=2194.61 entry_volume_ma=1435.29
+2026-06-17 11:25:07 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=606.92 qty=0.2
+2026-06-17 11:25:07 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=606.92
+2026-06-17 15:15:07 [LIVE BNBUSDT] WARNING [LIVE] Full close already executed by exchange | SL
+2026-06-17 15:15:07 [LIVE BNBUSDT] WARNING SL hit (exchange stop) | reason=exchange_stop_at_SL price=607.99 qty=0.204000 pnl=-0.2183 total_pnl=0.2523 | entry_ema_fast=607.7603 entry_ema_slow=607.947 entry_volume=2194.61 entry_volume_ma=1435.29
+2026-06-17 17:05:06 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.31 entry≈606.72
+2026-06-17 17:05:06 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=614.68 qty=0.31
+2026-06-17 17:05:08 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=606.72 SL=614.6783 TP1=603.756 TP2=596.4746 qty=0.31 | indicators: ema_fast=608.9115 ema_slow=609.3889 volume=8719.93 volume_ma=3987.85
+2026-06-17 17:40:10 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈603.63
+2026-06-17 17:40:10 [LIVE BNBUSDT] INFO TP1 hit | price=603.63 closed_qty=0.124000 remaining_qty=0.186000 pnl=0.3832 | SL moved to breakeven: 614.6783 → 606.72 | entry_ema_fast=608.9115 entry_ema_slow=609.3889 entry_volume=8719.93 entry_volume_ma=3987.85
+2026-06-17 17:40:12 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=606.72 qty=0.18
+2026-06-17 17:40:12 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=606.72
+2026-06-17 19:10:15 [LIVE BNBUSDT] INFO [LIVE] Full close | SL qty=0.01 price≈606.88
+2026-06-17 19:10:15 [LIVE BNBUSDT] WARNING SL hit | price=606.88 qty=0.186000 pnl=-0.0298 total_pnl=0.3534 | entry_ema_fast=608.9115 entry_ema_slow=609.3889 entry_volume=8719.93 entry_volume_ma=3987.85
+2026-06-17 21:05:06 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.31 entry≈603.47
+2026-06-17 21:05:06 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=611.28 qty=0.31
+2026-06-17 21:05:06 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=603.47 SL=611.2847 TP1=600.4228 TP2=593.1815 qty=0.31 | indicators: ema_fast=606.6113 ema_slow=606.8918 volume=10638.14 volume_ma=3919.39
+2026-06-17 22:45:05 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈598.94
+2026-06-17 22:45:05 [LIVE BNBUSDT] INFO TP1 hit | price=598.94 closed_qty=0.124000 remaining_qty=0.186000 pnl=0.5617 | SL moved to breakeven: 611.2847 → 603.47 | entry_ema_fast=606.6113 entry_ema_slow=606.8918 entry_volume=10638.14 entry_volume_ma=3919.39
+2026-06-17 22:45:07 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=603.47 qty=0.18
+2026-06-17 22:45:07 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=603.47
+2026-06-18 03:50:18 [LIVE BNBUSDT] INFO [LIVE] Full close | SL qty=0.01 price≈603.63
+2026-06-18 03:50:18 [LIVE BNBUSDT] WARNING SL hit | price=603.63 qty=0.186000 pnl=-0.0298 total_pnl=0.5320 | entry_ema_fast=606.6113 entry_ema_slow=606.8918 entry_volume=10638.14 entry_volume_ma=3919.39
+2026-06-18 09:10:12 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.33 entry≈588.81
+2026-06-18 09:10:13 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=596.34 qty=0.33
+2026-06-18 09:10:13 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=588.81 SL=596.343 TP1=585.7466 TP2=578.6823 qty=0.33 | indicators: ema_fast=589.4368 ema_slow=589.5929 volume=4910.0 volume_ma=2857.75
+2026-06-18 14:12:13 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=588.81 SL=596.343 TP1=585.7466 TP2=578.6823 qty=0.33 tp1_hit=False
+2026-06-18 14:12:17 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=596.34 qty=0.33
+2026-06-18 18:20:03 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈584.94
+2026-06-18 18:20:04 [LIVE BNBUSDT] INFO TP1 hit | price=584.94 closed_qty=0.132000 remaining_qty=0.198000 pnl=0.5108 | SL moved to breakeven: 596.343 → 588.81 | entry_ema_fast=589.4368 entry_ema_slow=589.5929 entry_volume=4910.0 entry_volume_ma=2857.75
+2026-06-18 18:20:05 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=588.81 qty=0.19
+2026-06-18 18:20:05 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=588.81
+2026-06-18 18:40:05 [LIVE BNBUSDT] INFO [LIVE] Full close | TP2 qty=0.01 price≈577.69
+2026-06-18 18:40:05 [LIVE BNBUSDT] INFO TP2 hit | price=577.69 qty=0.198000 pnl=2.2018 total_pnl=2.7126 | entry_ema_fast=589.4368 entry_ema_slow=589.5929 entry_volume=4910.0 entry_volume_ma=2857.75
+2026-06-18 21:40:13 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.36 entry≈575.59
+2026-06-18 21:40:13 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=582.96 qty=0.36
+2026-06-18 21:40:14 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=575.59 SL=582.9612 TP1=572.6026 TP2=565.6968 qty=0.36 | indicators: ema_fast=576.5108 ema_slow=576.6659 volume=3660.7 volume_ma=1835.8
+2026-06-18 22:43:59 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=575.59 SL=582.9612 TP1=572.6026 TP2=565.6968 qty=0.36 tp1_hit=False
+2026-06-18 22:44:03 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=582.96 qty=0.36
+2026-06-19 08:44:55 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=575.59 SL=582.9612 TP1=572.6026 TP2=565.6968 qty=0.36 tp1_hit=False
+2026-06-19 11:10:10 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.35 entry≈573.6
+2026-06-19 11:10:11 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=581.16 qty=0.35
+2026-06-19 11:10:12 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=573.6 SL=581.1581 TP1=570.8315 TP2=563.9471 qty=0.35 | indicators: ema_fast=574.209 ema_slow=574.3207 volume=1194.42 volume_ma=1010.14
+2026-06-19 18:06:30 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=573.6 SL=581.1581 TP1=570.8315 TP2=563.9471 qty=0.35 tp1_hit=False
+2026-06-19 18:06:35 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=581.16 qty=0.35
+2026-06-19 23:50:14 [LIVE BNBUSDT] WARNING [LIVE] Full close already executed by exchange | SL
+2026-06-19 23:50:14 [LIVE BNBUSDT] WARNING SL hit (exchange stop) | reason=exchange_stop_at_SL price=581.25 qty=0.350000 pnl=-2.6775 total_pnl=-2.6775 | entry_ema_fast=574.209 entry_ema_slow=574.3207 entry_volume=1194.42 entry_volume_ma=1010.14
+2026-06-20 02:35:09 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.32 entry≈580.74
+2026-06-20 02:35:09 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=573.32 qty=0.32
+2026-06-20 02:35:10 [LIVE BNBUSDT] INFO Position opened | LONG | entry=580.74 SL=573.3187 TP1=583.7744 TP2=590.7448 qty=0.32 | indicators: ema_fast=580.7639 ema_slow=580.7436 volume=529.29 volume_ma=468.62
+2026-06-20 08:15:14 [LIVE BNBUSDT] INFO [LIVE] Partial close confirmed | TP1 price≈584.11
+2026-06-20 08:15:14 [LIVE BNBUSDT] INFO TP1 hit | price=584.11 closed_qty=0.128000 remaining_qty=0.192000 pnl=0.4314 | SL moved to breakeven: 573.3187 → 580.74 | entry_ema_fast=580.7639 entry_ema_slow=580.7436 entry_volume=529.29 entry_volume_ma=468.62
+2026-06-20 08:15:16 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=580.74 qty=0.19
+2026-06-20 08:15:16 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=580.74
+2026-06-20 13:44:42 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=580.74 SL=580.74 TP1=583.7744 TP2=590.7448 qty=0.192 tp1_hit=True
+2026-06-20 13:44:46 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=580.74 qty=0.19
+2026-06-20 14:02:06 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=580.74 SL=580.74 TP1=583.7744 TP2=590.7448 qty=0.192 tp1_hit=True
+2026-06-20 14:02:11 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=580.74 qty=0.19
+2026-06-20 14:13:39 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=580.74 SL=580.74 TP1=583.7744 TP2=590.7448 qty=0.192 tp1_hit=True
+2026-06-20 14:13:43 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=580.74 qty=0.19
+2026-06-20 17:50:04 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=3.931 entry=587.0 SL=579.369 TP1=589.935 TP2=596.979 balance=1000.00 USDT
+2026-06-20 17:50:04 [PAPER BNBUSDT] INFO Position opened | LONG | entry=587.0 SL=579.369 TP1=589.935 TP2=596.979 qty=3.931 | indicators: ema_fast=584.5251 ema_slow=584.1006 volume=11411.11 volume_ma=2529.53
+2026-06-21 04:45:18 [PAPER BNBUSDT] INFO [PAPER] Would close partial | TP1 qty=1.5724 price=590.03
+2026-06-21 04:45:18 [PAPER BNBUSDT] INFO TP1 hit | price=590.03 closed_qty=1.572400 remaining_qty=2.358600 pnl=4.7644 | SL moved to breakeven: 579.369 → 587.0 | entry_ema_fast=584.5251 entry_ema_slow=584.1006 entry_volume=11411.11 entry_volume_ma=2529.53
+2026-06-21 15:15:09 [PAPER BNBUSDT] INFO [PAPER] Would close full | SL qty=2.3586 price=586.3
+2026-06-21 15:15:09 [PAPER BNBUSDT] WARNING SL hit | price=586.3 qty=2.358600 pnl=-1.6510 total_pnl=3.1134 | entry_ema_fast=584.5251 entry_ema_slow=584.1006 entry_volume=11411.11 entry_volume_ma=2529.53
+2026-06-21 21:35:16 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=3.903 entry=591.31 SL=583.623 TP1=594.2665 TP2=601.3623 balance=1000.00 USDT
+2026-06-21 21:35:16 [PAPER BNBUSDT] INFO Position opened | LONG | entry=591.31 SL=583.623 TP1=594.2665 TP2=601.3623 qty=3.903 | indicators: ema_fast=590.5702 ema_slow=590.5153 volume=2265.87 volume_ma=1133.85
+2026-06-22 04:30:11 [PAPER BNBUSDT] INFO [PAPER] Would close partial | TP1 qty=1.5612 price=594.45
+2026-06-22 04:30:11 [PAPER BNBUSDT] INFO TP1 hit | price=594.45 closed_qty=1.561200 remaining_qty=2.341800 pnl=4.9022 | SL moved to breakeven: 583.623 → 591.31 | entry_ema_fast=590.5702 entry_ema_slow=590.5153 entry_volume=2265.87 entry_volume_ma=1133.85
+2026-06-22 06:10:11 [PAPER BNBUSDT] INFO [PAPER] Would close full | SL qty=2.3418 price=590.64
+2026-06-22 06:10:11 [PAPER BNBUSDT] WARNING SL hit | price=590.64 qty=2.341800 pnl=-1.5690 total_pnl=3.3332 | entry_ema_fast=590.5702 entry_ema_slow=590.5153 entry_volume=2265.87 entry_volume_ma=1133.85
+2026-06-22 10:15:11 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=3.888 entry=593.6 SL=585.8832 TP1=596.568 TP2=603.6912 balance=1000.00 USDT
+2026-06-22 10:15:11 [PAPER BNBUSDT] INFO Position opened | LONG | entry=593.6 SL=585.8832 TP1=596.568 TP2=603.6912 qty=3.888 | indicators: ema_fast=592.512 ema_slow=592.3257 volume=2007.39 volume_ma=1124.64
+2026-06-22 14:35:13 [PAPER BNBUSDT] INFO [PAPER] Would close partial | TP1 qty=1.5552 price=597.13
+2026-06-22 14:35:13 [PAPER BNBUSDT] INFO TP1 hit | price=597.13 closed_qty=1.555200 remaining_qty=2.332800 pnl=5.4899 | SL moved to breakeven: 585.8832 → 593.6 | entry_ema_fast=592.512 entry_ema_slow=592.3257 entry_volume=2007.39 entry_volume_ma=1124.64
+2026-06-22 19:45:01 [PAPER BNBUSDT] INFO [PAPER] Would close full | SL qty=2.3327999999999998 price=593.44
+2026-06-22 19:45:01 [PAPER BNBUSDT] WARNING SL hit | price=593.44 qty=2.332800 pnl=-0.3732 total_pnl=5.1166 | entry_ema_fast=592.512 entry_ema_slow=592.3257 entry_volume=2007.39 entry_volume_ma=1124.64
+2026-06-23 01:05:10 [PAPER BNBUSDT] INFO [PAPER] Would open LONG BNBUSDT qty=3.899 entry=591.86 SL=584.1658 TP1=594.8193 TP2=601.9216 balance=1000.00 USDT
+2026-06-23 01:05:10 [PAPER BNBUSDT] INFO Position opened | LONG | entry=591.86 SL=584.1658 TP1=594.8193 TP2=601.9216 qty=3.899 | indicators: ema_fast=591.1644 ema_slow=591.1221 volume=1406.96 volume_ma=881.54
+2026-06-23 09:10:12 [PAPER BNBUSDT] INFO [PAPER] Would close full | SL qty=3.899 price=582.85
+2026-06-23 09:10:12 [PAPER BNBUSDT] WARNING SL hit | price=582.85 qty=3.899000 pnl=-35.1300 total_pnl=-35.1300 | entry_ema_fast=591.1644 entry_ema_slow=591.1221 entry_volume=1406.96 entry_volume_ma=881.54
+2026-06-23 16:50:05 [PAPER BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-06-23 16:50:06 [PAPER BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': False}
+2026-06-23 16:50:06 [PAPER BNBUSDT] INFO [PAPER] Would open SHORT BNBUSDT qty=4.027 entry=573.07 SL=580.5199 TP1=570.2046 TP2=563.3278 balance=1000.00 USDT
+2026-06-23 16:50:06 [PAPER BNBUSDT] INFO Position opened | SHORT | entry=573.07 SL=580.5199 TP1=570.2046 TP2=563.3278 qty=4.027 | indicators: ema_fast=573.2414 ema_slow=573.2577 volume=2921.09 volume_ma=1736.36
+2026-06-24 02:10:08 [PAPER BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-06-24 02:10:08 [PAPER BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': False}
+2026-06-24 02:10:08 [PAPER BNBUSDT] INFO [PAPER] Would open SHORT BNBUSDT qty=4.001 entry=576.78 SL=584.2781 TP1=573.8961 TP2=566.9747 balance=1000.00 USDT
+2026-06-24 02:10:08 [PAPER BNBUSDT] INFO Position opened | SHORT | entry=576.78 SL=584.2781 TP1=573.8961 TP2=566.9747 qty=4.001 | indicators: ema_fast=577.2483 ema_slow=577.2815 volume=689.34 volume_ma=615.32
+2026-06-24 16:15:10 [PAPER BNBUSDT] INFO [PAPER] Would close partial | TP1 qty=1.6004 price=573.56
+2026-06-24 16:15:10 [PAPER BNBUSDT] INFO TP1 hit | price=573.56 closed_qty=1.600400 remaining_qty=2.400600 pnl=5.1533 | SL moved to breakeven: 584.2781 → 576.78 | entry_ema_fast=577.2483 entry_ema_slow=577.2815 entry_volume=689.34 entry_volume_ma=615.32
+2026-06-24 18:35:09 [PAPER BNBUSDT] INFO [PAPER] Would close full | TP2 qty=2.4006000000000003 price=566.53
+2026-06-24 18:35:09 [PAPER BNBUSDT] INFO TP2 hit | price=566.53 qty=2.400600 pnl=24.6062 total_pnl=29.7594 | entry_ema_fast=577.2483 entry_ema_slow=577.2815 entry_volume=689.34 entry_volume_ma=615.32
