@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
+import { update_yaml_config } from "../../../bot/config.py";
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -68,10 +69,17 @@ router.get("/:symbol", async (req, res) => {
 router.put("/:symbol/config", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
+    const configUpdates = { ...req.body };
+    delete configUpdates.updated_at;
+    delete configUpdates.is_running;
+    delete configUpdates.last_heartbeat;
+    delete configUpdates.current_price;
+    delete configUpdates.position;
     const [updated] = await db.update(botsTable)
       .set({ ...req.body, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol)).returning();
     if (!updated) return res.status(404).json({ error: "Bot not found" });
+    update_yaml_config(symbol, configUpdates, BOT_DIR);
     res.json(updated);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
