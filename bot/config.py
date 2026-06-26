@@ -54,3 +54,16 @@ def load_config(path: str = "config.yaml") -> Config:
     valid_fields = {f.name for f in dataclasses.fields(Config)}
     filtered = {k: v for k, v in data.items() if k in valid_fields}
     return Config(**filtered)
+
+
+def update_yaml_config(symbol: str, params: dict, bot_dir: str = ".") -> None:
+    """Обновляет параметры в YAML-файле конфига бота."""
+    config_path = f"{bot_dir}/config_{symbol.replace('USDT', '').lower()}.yaml"
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    valid_fields = {f.name for f in dataclasses.fields(Config)}
+    for key, value in params.items():
+        if key in valid_fields:
+            data[key] = value
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)

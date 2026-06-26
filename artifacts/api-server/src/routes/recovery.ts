@@ -16,7 +16,7 @@ const router = Router();
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(process.env.BOT_DIR || "../../../../bot", "recovery_config.yaml");
 
-let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number } | null = null;
+let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number; recovery_max_pct: number } | null = null;
 let _configMtime = 0;
 
 function readRecoveryConfig(): {
@@ -119,14 +119,14 @@ router.post("/claim", async (req, res) => {
       return res.json({ chainId: null, debtAmount: 0, enabled: true });
     }
 
-    res.json({
+    return res.json({
       chainId: chain.id,
       debtAmount: chain.debt_amount,
       bonusPct: config.recovery_bonus_pct,
       enabled: true,
     });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    return res.status(500).json({ error: String(e) });
   }
 });
 
@@ -185,7 +185,7 @@ router.post("/report", async (req, res) => {
       return res.json({ success: true, action: "none" });
     }
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    return res.status(500).json({ error: String(e) });
   }
 });
 
@@ -212,9 +212,9 @@ router.post("/release", async (req, res) => {
       .set({ status: "free", locked_by: null, updated_at: new Date().toISOString() })
       .where(eq(recoveryChainsTable.id, chainId));
 
-    res.json({ success: true, action: "released" });
+    return res.json({ success: true, action: "released" });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    return res.status(500).json({ error: String(e) });
   }
 });
 

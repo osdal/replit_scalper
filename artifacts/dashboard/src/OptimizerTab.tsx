@@ -55,6 +55,8 @@ interface OptimizerTabProps {
     tp2_pct: number;
     volume_multiplier: number;
     tp1_close_pct: number;
+    start: string;
+    end: string;
   }) => void;
 }
 
@@ -124,6 +126,8 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
       tp2_pct: parseFloat(p.tp2_pct) || 1.0,
       volume_multiplier: parseFloat(p.volume_multiplier) || 1.2,
       tp1_close_pct: parseInt(p.tp1_close_pct) || 50,
+      start,
+      end,
     });
   };
 
