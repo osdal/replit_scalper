@@ -4,12 +4,47 @@ import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { update_yaml_config } from "../../../bot/config.py";
 
 const execAsync = promisify(exec);
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
 const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
+
+/**
+ * Обновляет config_<symbol>.yaml через отдельный Python-процесс.
+ * Node.js не может импортировать .py файлы как модули — update_yaml_config()
+ * живёт в bot/config.py и вызывается здесь через CLI-обёртку
+ * bot/update_config_cli.py, которой параметры передаются как JSON через stdin
+ * (тот же паттерн, что уже используется для backtest_runner.py).
+ */
+function updateYamlConfig(symbol: string, params: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("python", ["update_config_cli.py", symbol, BOT_DIR], { cwd: BOT_DIR });
+
+    let output = "";
+    let error = "";
+    proc.stdout.on("data", (d) => (output += d));
+    proc.stderr.on("data", (d) => (error += d));
+
+    proc.on("close", () => {
+      try {
+        const parsed = JSON.parse(output.trim());
+        if (parsed.error) {
+          reject(new Error(parsed.error));
+        } else {
+          resolve();
+        }
+      } catch {
+        reject(new Error(error || "update_config_cli.py produced no parseable output"));
+      }
+    });
+
+    proc.on("error", (err) => reject(err));
+
+    proc.stdin.write(JSON.stringify(params));
+    proc.stdin.end();
+  });
+}
 
 // Найти PID процесса бота по имени конфига (Windows + Linux)
 async function findBotPid(symbol: string): Promise<number | null> {
@@ -75,11 +110,25 @@ router.put("/:symbol/config", async (req, res) => {
     delete configUpdates.last_heartbeat;
     delete configUpdates.current_price;
     delete configUpdates.position;
+
     const [updated] = await db.update(botsTable)
       .set({ ...req.body, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol)).returning();
     if (!updated) return res.status(404).json({ error: "Bot not found" });
-    update_yaml_config(symbol, configUpdates, BOT_DIR);
+
+    // Синхронизируем изменения в config_<symbol>.yaml на диске — это то,
+    // что реально читает Python-бот при запуске, БД для него не источник
+    // правды. Если запись в YAML провалится — сообщаем об этом явно,
+    // вместо того чтобы вернуть успех при несинхронизированном состоянии.
+    try {
+      await updateYamlConfig(symbol, configUpdates);
+    } catch (yamlErr) {
+      return res.status(500).json({
+        error: `DB updated, but failed to write config_*.yaml: ${yamlErr}`,
+        dbUpdated: updated,
+      });
+    }
+
     res.json(updated);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
