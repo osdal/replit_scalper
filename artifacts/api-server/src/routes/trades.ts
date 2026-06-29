@@ -167,7 +167,16 @@ router.post("/sync-closed", async (_req, res) => {
             const utTime = new Date(ut.time).toISOString();
             // Берём только сделки после открытия позиции
             if (utTime > trade.entry_time && ut.realizedPnl) {
-              pnl += parseFloat(ut.realizedPnl) || 0;
+              // ВАЖНО: Binance считает Realized PNL как реализованный pnl
+              // МИНУС уплаченную комиссию по каждой сделке (мы это
+              // подтвердили эмпирически в binance-sync.ts groupPositions).
+              // realizedPnl сам по себе не включает комиссию — без вычитания
+              // эта сумма систематически переоценивает прибыль (или
+              // недооценивает убыток) на величину комиссии каждой сделки.
+              const realizedPnl = parseFloat(ut.realizedPnl) || 0;
+              const commission = parseFloat(ut.commission || "0");
+              const commissionUsd = ut.commissionAsset === "USDT" ? commission : 0;
+              pnl += realizedPnl - commissionUsd;
             }
           }
           // Рассчитываем exit_price из последней сделки

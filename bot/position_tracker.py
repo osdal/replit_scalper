@@ -411,20 +411,40 @@ class PositionTracker:
         # Сохраняем trade_id ДО apply_hit (который может вызвать _clear_state)
         trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
-        pnl = self.apply_hit(hit, close_price)
+        # ВАЖНО: apply_hit() возвращает pnl только этого конкретного события
+        # (например только убыток от SL на остатке позиции), а не общий
+        # результат сделки. Если до этого был частичный TP1 — его прибыль
+        # уже накоплена в p.realized_pnl, но не в возвращаемом значении.
+        # Сохраняем accumulated_pnl_before, чтобы для финального закрытия
+        # репортить в БД суммарный результат всей сделки (TP1 + SL/TP2),
+        # а не только последний кусок. Иначе сделка, реально закрытая в
+        # плюс (TP1 прибыль > SL убыток на остатке), попадёт в БД и
+        # дашборд как убыточная по величине одного только SL.
+        accumulated_pnl_before = p.realized_pnl if p else 0.0
+        last_event_pnl = self.apply_hit(hit, close_price)
+        total_trade_pnl = accumulated_pnl_before + last_event_pnl
 
         if is_recovery_tp1_full_close:
             # Recovery TP1 — это полное закрытие, репортим как close
-            await self._report_close(close_price, remaining_before, pnl, "TP1")
+            await self._report_close(close_price, remaining_before, total_trade_pnl, "TP1")
         elif hit == "TP1":
             # TP1 — частичное закрытие, не репортим в БД, только сохраняем состояние
             self._save_state()
         elif hit in ("SL", "TP2"):
             # SL или TP2 — полное закрытие, репортим используя сохранённый trade_id
+            # и СУММАРНЫЙ pnl сделки (включая прибыль/убыток с предыдущего TP1, если был)
             if trade_id_before:
-                await self._report_close_with_id(trade_id_before, close_price, remaining_before, pnl, hit)
+                await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, hit)
 
-        return pnl
+        # Возвращаем СУММАРНЫЙ pnl всей сделки (TP1 + это событие), а не только
+        # последнего события. main.py использует это возвращаемое значение
+        # для recovery-логики (recovery.report(pnl=...) — решение о создании
+        # цепочки компенсации) и логирования итогового результата — оба
+        # места ожидают чистый результат сделки целиком, иначе сделка,
+        # реально закрытая в плюс (TP1 прибыль > SL убыток на остатке),
+        # была бы неверно помечена как убыточная и запустила бы recovery
+        # на пустом месте.
+        return total_trade_pnl
 
     @staticmethod
     def _calc_pnl(direction: str, entry: float, exit_price: float, qty: float) -> float:
