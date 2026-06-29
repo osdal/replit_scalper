@@ -1,7 +1,7 @@
 symbol: BTCUSDT
 timeframe: 5m
-leverage: 10
-risk_pct: 3.0
+leverage: 30
+risk_pct: 5.0
 sl_pct: 1
 tp1_pct: 0.2
 tp1_close_pct: 70

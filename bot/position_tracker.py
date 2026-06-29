@@ -303,11 +303,6 @@ class PositionTracker:
         self._clear_state()
         return pnl
 
-    async def force_close_async(self, reason: str, close_price: float) -> float:
-        pnl = self.force_close(reason, close_price)
-        await self._report_close(close_price, 0, pnl, "SL")
-        return pnl
-
     def check(self, current_price: float) -> Optional[str]:
         p = self.position
         if p is None or p.closed:
@@ -343,8 +338,10 @@ class PositionTracker:
             p.realized_pnl += pnl
             p.remaining_qty = 0.0
             p.closed = True
+            # Если SL сработал после переноса (tp1_hit=True) — это закрытие по безубытку, пишем TP1
+            exit_reason = "TP1" if p.tp1_hit else "SL"
             self.log.warning(
-                f"SL hit | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
+                f"{exit_reason} hit (SL level) | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
                 f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
             )
             self.position = None
@@ -408,9 +405,10 @@ class PositionTracker:
             tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
             tp1_qty = min(tp1_qty, p.remaining_qty)
 
-        # Сохраняем trade_id ДО apply_hit (который может вызвать _clear_state)
+        # Сохраняем trade_id и tp1_hit ДО apply_hit (который может вызвать _clear_state)
         trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
+        tp1_hit_before = p.tp1_hit if p else False
         # ВАЖНО: apply_hit() возвращает pnl только этого конкретного события
         # (например только убыток от SL на остатке позиции), а не общий
         # результат сделки. Если до этого был частичный TP1 — его прибыль
@@ -433,8 +431,10 @@ class PositionTracker:
         elif hit in ("SL", "TP2"):
             # SL или TP2 — полное закрытие, репортим используя сохранённый trade_id
             # и СУММАРНЫЙ pnl сделки (включая прибыль/убыток с предыдущего TP1, если был)
+            # Если SL сработал после переноса (tp1_hit был True), пишем TP1 (закрытие по безубытку)
+            exit_reason = "TP1" if (hit == "SL" and tp1_hit_before) else hit
             if trade_id_before:
-                await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, hit)
+                await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, exit_reason)
 
         # Возвращаем СУММАРНЫЙ pnl всей сделки (TP1 + это событие), а не только
         # последнего события. main.py использует это возвращаемое значение
