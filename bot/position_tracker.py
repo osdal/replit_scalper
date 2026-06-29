@@ -9,6 +9,7 @@ from config import Config
 
 if TYPE_CHECKING:
     from db_reporter import DbReporter
+    from order_manager import OrderManager
 
 STATE_FILE_TEMPLATE = "state_{symbol}.json"
 
@@ -45,10 +46,11 @@ class Position:
 
 
 class PositionTracker:
-    def __init__(self, cfg: Config, logger: logging.Logger, reporter: Optional["DbReporter"] = None):
+    def __init__(self, cfg: Config, logger: logging.Logger, reporter: Optional["DbReporter"] = None, order_mgr: Optional["OrderManager"] = None):
         self.cfg = cfg
         self.log = logger
         self.reporter = reporter
+        self.order_mgr = order_mgr
         self.position: Optional[Position] = None
         self._state_file = _state_file(cfg.symbol)
         self._trade_id: Optional[int] = None  # ID сделки в БД
@@ -344,9 +346,11 @@ class PositionTracker:
                 f"{exit_reason} hit (SL level) | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
                 f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
             )
+            # Сохраняем время закрытия для запроса реального PnL с биржи
+            close_time_ms = int(close_price and close_price or 0)
             self.position = None
             self._clear_state()
-            return pnl
+            return pnl, exit_reason
 
         if hit == "TP1":
             if p.is_recovery:
@@ -362,7 +366,7 @@ class PositionTracker:
                 )
                 self.position = None
                 self._clear_state()
-                return pnl
+                return pnl, "TP1"
 
             tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
             tp1_qty = min(tp1_qty, p.remaining_qty)
@@ -378,7 +382,7 @@ class PositionTracker:
                 f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
                 f"SL moved to breakeven: {old_sl} → {p.entry_price} | {indicators_str}"
             )
-            return pnl
+            return pnl, None
 
         if hit == "TP2":
             qty = p.remaining_qty
@@ -392,9 +396,9 @@ class PositionTracker:
             )
             self.position = None
             self._clear_state()
-            return pnl
+            return pnl, "TP2"
 
-        return 0.0
+        return 0.0, None
 
     async def apply_hit_async(self, hit: str, close_price: float) -> float:
         """Применяет hit и репортит в БД."""
@@ -409,42 +413,42 @@ class PositionTracker:
         trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
         tp1_hit_before = p.tp1_hit if p else False
-        # ВАЖНО: apply_hit() возвращает pnl только этого конкретного события
-        # (например только убыток от SL на остатке позиции), а не общий
-        # результат сделки. Если до этого был частичный TP1 — его прибыль
-        # уже накоплена в p.realized_pnl, но не в возвращаемом значении.
-        # Сохраняем accumulated_pnl_before, чтобы для финального закрытия
-        # репортить в БД суммарный результат всей сделки (TP1 + SL/TP2),
-        # а не только последний кусок. Иначе сделка, реально закрытая в
-        # плюс (TP1 прибыль > SL убыток на остатке), попадёт в БД и
-        # дашборд как убыточная по величине одного только SL.
+        entry_time_ms = int(p.entry_timestamp.timestamp() * 1000) if p and p.entry_timestamp else 0
         accumulated_pnl_before = p.realized_pnl if p else 0.0
-        last_event_pnl = self.apply_hit(hit, close_price)
+        last_event_pnl, exit_reason_override = self.apply_hit(hit, close_price)
         total_trade_pnl = accumulated_pnl_before + last_event_pnl
 
         if is_recovery_tp1_full_close:
-            # Recovery TP1 — это полное закрытие, репортим как close
             await self._report_close(close_price, remaining_before, total_trade_pnl, "TP1")
+            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before)
         elif hit == "TP1":
             # TP1 — частичное закрытие, не репортим в БД, только сохраняем состояние
             self._save_state()
         elif hit in ("SL", "TP2"):
-            # SL или TP2 — полное закрытие, репортим используя сохранённый trade_id
-            # и СУММАРНЫЙ pnl сделки (включая прибыль/убыток с предыдущего TP1, если был)
-            # Если SL сработал после переноса (tp1_hit был True), пишем TP1 (закрытие по безубытку)
-            exit_reason = "TP1" if (hit == "SL" and tp1_hit_before) else hit
+            exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
             if trade_id_before:
                 await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, exit_reason)
+            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before)
 
-        # Возвращаем СУММАРНЫЙ pnl всей сделки (TP1 + это событие), а не только
-        # последнего события. main.py использует это возвращаемое значение
-        # для recovery-логики (recovery.report(pnl=...) — решение о создании
-        # цепочки компенсации) и логирования итогового результата — оба
-        # места ожидают чистый результат сделки целиком, иначе сделка,
-        # реально закрытая в плюс (TP1 прибыль > SL убыток на остатке),
-        # была бы неверно помечена как убыточная и запустила бы recovery
-        # на пустом месте.
         return total_trade_pnl
+
+    async def _sync_pnl_from_exchange(self, entry_time_ms: int, trade_id: Optional[int]) -> None:
+        """
+        Синхронизирует реальный PnL с биржи для закрытой сделки.
+        Запрашивает userTrades за период сделки и обновляет запись в БД.
+        """
+        if not self.order_mgr or not trade_id or entry_time_ms <= 0:
+            return
+        try:
+            exit_time_ms = int(__import__("time").time() * 1000)
+            real_pnl = await self.order_mgr.get_realized_pnl(
+                self.cfg.symbol, entry_time_ms, exit_time_ms,
+            )
+            if real_pnl is not None and abs(real_pnl) > 0.0001:
+                await self.reporter.patch_trade(trade_id, {"pnl": round(real_pnl, 4)})
+                self.log.info(f"[PNL_SYNC] Updated trade #{trade_id} PnL to {real_pnl:.4f} from Binance")
+        except Exception as e:
+            self.log.warning(f"[PNL_SYNC] Failed to sync PnL: {e}")
 
     @staticmethod
     def _calc_pnl(direction: str, entry: float, exit_price: float, qty: float) -> float:

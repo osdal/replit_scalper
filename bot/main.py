@@ -196,8 +196,8 @@ async def _run_live_or_paper(
     shutdown_event: asyncio.Event,
     events: logging.Logger,
 ):
-    tracker   = PositionTracker(cfg, log, reporter=reporter)
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
+    tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
