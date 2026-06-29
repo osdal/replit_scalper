@@ -1,6 +1,6 @@
 # Общий конфиг режима компенсации убытков (recovery mode)
 # Применяется ко всем ботам одновременно через API сервер
 
-recovery_enabled: True   # включить/выключить режим
-recovery_bonus_pct: 0     # бонус сверху к сумме долга в % (0 = без бонуса)
-recovery_max_pct: 50.0   # макс. размер позиции-компенсатора в % от депозита (0 = без ограничения)
+recovery_enabled: true
+recovery_bonus_pct: 10
+recovery_max_pct: 50
