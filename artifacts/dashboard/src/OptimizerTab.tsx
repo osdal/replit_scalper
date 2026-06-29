@@ -157,6 +157,35 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
     });
   };
 
+  const handleApplyToBot = async (result: OptResult) => {
+    const p = result.params || result;
+    const sym = result.symbol || symbol;
+    if (!confirm(`Apply these parameters to ${sym} config?\n\nEMA ${p.ema_fast}/${p.ema_slow}, SL ${p.sl_pct}%, TP1 ${p.tp1_pct}%, TP2 ${p.tp2_pct}%`)) return;
+    try {
+      const res = await fetch(`${API}/bots/${sym}/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ema_fast: parseInt(p.ema_fast) || 9,
+          ema_slow: parseInt(p.ema_slow) || 21,
+          sl_pct: parseFloat(p.sl_pct) || 0.5,
+          tp1_pct: parseFloat(p.tp1_pct) || 0.5,
+          tp2_pct: parseFloat(p.tp2_pct) || 1.0,
+          volume_multiplier: parseFloat(p.volume_multiplier) || 1.2,
+          tp1_close_pct: parseInt(p.tp1_close_pct) || 50,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert("Error: " + data.error);
+      } else {
+        alert(`${symbol} config updated. Use "Stop All & Reload" then restart the bot.`);
+      }
+    } catch (e) {
+      alert("Failed to update config: " + String(e));
+    }
+  };
+
   const isRunning = job?.status === "running";
 
   return (
@@ -279,7 +308,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
                 <tbody>
                   {job.results.map((r: any, i: number) => (
                     <tr key={i} className={`border-b border-zinc-800/50 ${i === 0 ? "text-green-400 font-semibold" : "text-zinc-300"}`}>
-                      <td className="py-1.5 pr-3">
+                      <td className="py-1.5 pr-3 flex gap-1">
                         {onApplyToBacktest && (
                           <button
                             onClick={() => handleApplyToBacktest(r)}
@@ -289,6 +318,13 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
                             <ArrowRight className="w-3.5 h-3.5" />
                           </button>
                         )}
+                        <button
+                          onClick={() => handleApplyToBot(r)}
+                          className="p-1 rounded hover:bg-green-900 transition-colors text-green-400"
+                          title="Apply to Bot (save config)"
+                        >
+                          ✓
+                        </button>
                       </td>
                       <td className="py-1.5 pr-3">{r.rank}</td>
                       <td className="py-1.5 pr-3 font-mono">{r.score}</td>
