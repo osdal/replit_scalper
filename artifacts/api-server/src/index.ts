@@ -4,8 +4,38 @@ import { db, botsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { exec } from "child_process";
 import { promisify } from "util";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Загружаем переменные из корневого .env если они не заданы
+function loadRootEnv() {
+  const rootEnvPath = path.resolve(__dirname, "../../../.env");
+  try {
+    if (fs.existsSync(rootEnvPath)) {
+      const content = fs.readFileSync(rootEnvPath, "utf8");
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const [key, ...rest] = trimmed.split("=");
+        if (!key || rest.length === 0) continue;
+        const value = rest.join("=").trim();
+        if (!process.env[key]) {
+          process.env[key] = value;
+        }
+      }
+      logger.info("Loaded env from root .env");
+    }
+  } catch (e) {
+    logger.warn({ err: e }, "Could not load root .env");
+  }
+}
+
+loadRootEnv();
 
 async function resetStaleRunningBots(): Promise<void> {
   try {
