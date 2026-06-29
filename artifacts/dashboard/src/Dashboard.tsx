@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, syncClosedTrades } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -81,6 +81,8 @@ interface BacktestParams {
   tp2_pct: number;
   volume_multiplier: number;
   tp1_close_pct: number;
+  start: string;
+  end: string;
 }
 
 interface BacktestResult {
@@ -434,6 +436,9 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [optJobId, setOptJobId] = useState<string | null>(null);
   const [optJob, setOptJob] = useState<any | null>(null);
+  const [optSymbol, setOptSymbol] = useState("BTCUSDT");
+  const [optStart, setOptStart] = useState("2026-05-01");
+  const [optEnd, setOptEnd] = useState("2026-06-13");
   // Фильтр по торговой паре
   const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
   const symbols = [...new Set(trades.map(t => t.symbol))].sort();
@@ -482,6 +487,8 @@ export default function Dashboard() {
       setTrades(Array.isArray(t?.trades) ? t.trades : []);
       setStats(Array.isArray(s) ? s : []);
       setLastRefresh(new Date());
+      // Синхронизация закрытых позиций
+      syncClosedTrades().catch(() => {});
     } catch {
       // API not available yet
     } finally {
@@ -573,6 +580,8 @@ export default function Dashboard() {
     };
     setBtSymbol(params.symbol);
     setBtConfig(newConfig);
+    setBtStartDate(params.start);
+    setBtEndDate(params.end);
     setBtResetKey(k => k + 1);
   };
 
@@ -619,6 +628,23 @@ export default function Dashboard() {
           </Button>
           <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className="w-4 h-4 mr-2" />Refresh
+          </Button>
+          <Button variant="destructive" size="sm" onClick={async () => {
+            if (confirm('Delete all trades and restart bots?')) {
+              const r = await clearTrades();
+              // Перезапускаем ботов
+              const bots = await fetchBots();
+              for (const bot of bots) {
+                if (bot.is_running) {
+                  await stopBot(bot.symbol);
+                  await startBot(bot.symbol);
+                }
+              }
+              alert(`Deleted: ${r.deleted} trades. Bots restarted. Page will reload...`);
+              window.location.reload();
+            }
+          }} className="border-red-700 text-red-300 hover:bg-red-900">
+            🗑 Clear DB
           </Button>
         </div>
       </div>
@@ -942,7 +968,19 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
-              <OptimizerTab jobId={optJobId} job={optJob} setJobId={setOptJobId} setJob={setOptJob} onApplyToBacktest={handleApplyToBacktest} />
+              <OptimizerTab
+                jobId={optJobId}
+                job={optJob}
+                setJobId={setOptJobId}
+                setJob={setOptJob}
+                onApplyToBacktest={handleApplyToBacktest}
+                symbol={optSymbol}
+                setSymbol={setOptSymbol}
+                start={optStart}
+                setStart={setOptStart}
+                end={optEnd}
+                setEnd={setOptEnd}
+              />
             </TabsContent>
 
             <TabsContent value="recovery" className="mt-4">

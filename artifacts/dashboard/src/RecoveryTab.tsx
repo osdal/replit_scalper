@@ -19,6 +19,7 @@ interface RecoveryChain {
 interface RecoveryConfig {
   recovery_enabled: boolean;
   recovery_bonus_pct: number;
+  recovery_max_pct: number;
 }
 
 function fmtTime(iso: string | null) {
@@ -37,6 +38,8 @@ export default function RecoveryTab() {
   const [chains, setChains] = useState<RecoveryChain[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [bonusPct, setBonusPct] = useState(0);
+  const [maxPct, setMaxPct] = useState(50);
 
   const load = useCallback(async () => {
     try {
@@ -46,6 +49,10 @@ export default function RecoveryTab() {
       ]);
       setConfig(c);
       setChains(Array.isArray(ch) ? ch : []);
+      if (c) {
+        setBonusPct(c.recovery_bonus_pct);
+        setMaxPct(c.recovery_max_pct);
+      }
     } catch {
       // ignore
     } finally {
@@ -68,7 +75,26 @@ export default function RecoveryTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           recovery_enabled: !config.recovery_enabled,
-          recovery_bonus_pct: config.recovery_bonus_pct,
+          recovery_bonus_pct: bonusPct,
+          recovery_max_pct: maxPct,
+        }),
+      }).then(r => r.json());
+      setConfig(updated);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveConfig = async () => {
+    setSaving(true);
+    try {
+      const updated = await fetch(`${API}/recovery/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recovery_enabled: config?.recovery_enabled ?? false,
+          recovery_bonus_pct: bonusPct,
+          recovery_max_pct: maxPct,
         }),
       }).then(r => r.json());
       setConfig(updated);
@@ -93,7 +119,7 @@ export default function RecoveryTab() {
 
   return (
     <div className="space-y-4">
-      {/* Toggle & config */}
+      {/* Config */}
       <Card className="border border-zinc-800 bg-zinc-900">
         <CardHeader className="pb-2">
           <CardTitle className="text-base text-zinc-300 flex items-center gap-2">
@@ -101,17 +127,12 @@ export default function RecoveryTab() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between mb-4">
             <div>
               <div className="text-sm text-zinc-400 mb-1">
                 Когда сделка закрывается в убыток, следующий свободный сигнал
                 компенсирует его — TP1 рассчитывается чтобы покрыть долг.
               </div>
-              {config && (
-                <div className="text-xs text-zinc-500">
-                  Bonus: {config.recovery_bonus_pct}%
-                </div>
-              )}
             </div>
             <Button
               onClick={toggleEnabled}
@@ -121,7 +142,34 @@ export default function RecoveryTab() {
               {config?.recovery_enabled ? "Disable" : "Enable"}
             </Button>
           </div>
-          <div className="mt-3">
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="text-xs text-zinc-400 mb-1 block">Bonus %</label>
+              <input
+                type="number"
+                value={bonusPct}
+                onChange={e => setBonusPct(parseFloat(e.target.value) || 0)}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                min={0}
+                step={1}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-zinc-400 mb-1 block">Max % of deposit</label>
+              <input
+                type="number"
+                value={maxPct}
+                onChange={e => setMaxPct(parseFloat(e.target.value) || 0)}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                min={0}
+                step={5}
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <Button onClick={saveConfig} disabled={saving} size="sm">
+              {saving ? "Saving..." : "Save Config"}
+            </Button>
             <Badge variant={config?.recovery_enabled ? "default" : "secondary"}>
               {config?.recovery_enabled ? "● ENABLED" : "○ DISABLED"}
             </Badge>

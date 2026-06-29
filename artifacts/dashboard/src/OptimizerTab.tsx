@@ -3,8 +3,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { Play, Square, RefreshCw, TrendingUp, ArrowRight } from "lucide-react";
+import { fetchBots } from "./hooks/useApi";
 
 const API = "http://localhost:5000/api";
+
+interface BotConfig {
+  symbol: string;
+}
 
 interface OptResult {
   rank: string;
@@ -39,8 +44,6 @@ interface JobStatus {
   results: OptResult[] | null;
 }
 
-const SYMBOLS = ["ETHUSDT", "SOLUSDT", "BTCUSDT", "TRXUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT"];
-
 interface OptimizerTabProps {
   jobId: string | null;
   job: JobStatus | null;
@@ -58,15 +61,30 @@ interface OptimizerTabProps {
     start: string;
     end: string;
   }) => void;
+  symbol: string;
+  setSymbol: (s: string) => void;
+  start: string;
+  setStart: (s: string) => void;
+  end: string;
+  setEnd: (s: string) => void;
 }
 
-export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBacktest }: OptimizerTabProps) {
-  const [symbol, setSymbol]   = useState("ETHUSDT");
-  const [start, setStart]     = useState("2026-05-01");
-  const [end, setEnd]         = useState("2026-06-13");
+export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBacktest, symbol, setSymbol, start, setStart, end, setEnd }: OptimizerTabProps) {
+  const [symbols, setSymbols] = useState<string[]>([]);
   const [trials, setTrials]   = useState(100);
   const [loading, setLoading] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
+
+  // Загружаем список пар из конфигов ботов
+  useEffect(() => {
+    fetchBots().then(bots => {
+      const syms = bots.map((b: BotConfig) => b.symbol).sort();
+      setSymbols(syms);
+      if (syms.length > 0 && !syms.includes(symbol)) {
+        setSymbol(syms[0]);
+      }
+    }).catch(() => {});
+  }, []);
 
   // Поллинг статуса задачи
   useEffect(() => {
@@ -90,6 +108,10 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
   }, [job?.output]);
 
   const handleStart = async () => {
+    if (!symbol) {
+      alert("Please select a symbol");
+      return;
+    }
     setLoading(true);
     try {
       const r = await fetch(`${API}/optimizer/run`, {
@@ -98,10 +120,14 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
         body: JSON.stringify({ symbol, start, end, trials }),
       });
       const data = await r.json();
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
       setJobId(data.jobId);
       setJob(null);
     } catch (e) {
-      alert("Failed to start optimizer");
+      alert("Failed to start optimizer: " + String(e));
     } finally {
       setLoading(false);
     }
@@ -151,7 +177,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
                 onChange={e => setSymbol(e.target.value)}
                 className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white"
               >
-                {SYMBOLS.map(s => <option key={s}>{s}</option>)}
+                {symbols.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
             <div>
