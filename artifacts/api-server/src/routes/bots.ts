@@ -4,6 +4,8 @@ import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
+import fs from "fs";
+import yaml from "js-yaml";
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -245,3 +247,74 @@ router.post("/:symbol/stop", async (req, res) => {
 });
 
 export default router;
+
+// ── Refresh: stop all bots, clear state, reload config ──────────────────────────
+
+async function reloadConfigsFromYaml(): Promise<void> {
+  const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+  for (const file of configs) {
+    const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
+    const symbol = (raw.symbol as string).toUpperCase();
+    const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+    const values = {
+      mode:             (raw.mode as string) || "paper",
+      timeframe:        raw.timeframe as string,
+      leverage:         raw.leverage as number,
+      risk_pct:         raw.risk_pct as number,
+      sl_pct:           raw.sl_pct as number,
+      tp1_pct:          raw.tp1_pct as number,
+      tp1_close_pct:    raw.tp1_close_pct as number,
+      tp2_pct:          raw.tp2_pct as number,
+      ema_fast:         raw.ema_fast as number,
+      ema_slow:         raw.ema_slow as number,
+      volume_ma_period: raw.volume_ma_period as number,
+      volume_multiplier: raw.volume_multiplier as number,
+      htf_enabled:      (raw.htf_enabled as boolean) || false,
+      htf_timeframe:    (raw.htf_timeframe as string) || null,
+      htf_ema_fast:     (raw.htf_ema_fast as number) || null,
+      htf_ema_slow:     (raw.htf_ema_slow as number) || null,
+      auto_mode:        (raw.auto_mode as boolean) ?? true,
+      paper_balance:    (raw.paper_balance as number) || 1000,
+      log_file:         raw.log_file as string,
+      is_running:       false,
+      position:         null,
+      updated_at:       new Date().toISOString(),
+    };
+    if (existing) {
+      await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
+    } else {
+      await db.insert(botsTable).values({ symbol, ...values });
+    }
+  }
+  await db.update(botsTable).set({ is_running: false, position: null });
+}
+
+async function stopAllBots(): Promise<void> {
+  const symbols = Array.from(botProcesses.keys());
+  for (const symbol of symbols) {
+    const proc = botProcesses.get(symbol);
+    if (proc && !proc.killed) proc.kill("SIGKILL");
+    botProcesses.delete(symbol);
+    const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
+    try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
+  }
+  const configFiles = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+  for (const file of configFiles) {
+    const symbol = file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT";
+    const pid = await findBotPid(symbol);
+    if (pid) {
+      try { if (process.platform === "win32") { await execAsync(`taskkill /PID ${pid} /F`); } else { process.kill(pid, "SIGKILL"); } } catch {}
+    }
+  }
+  await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
+}
+
+router.post("/refresh", async (_req, res) => {
+  try {
+    await stopAllBots();
+    await reloadConfigsFromYaml();
+    res.json({ success: true, message: "All bots stopped, configs reloaded from YAML. Ready to restart with new parameters." });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});

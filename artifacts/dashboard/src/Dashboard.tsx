@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, syncClosedTrades } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, syncClosedTrades, refreshBots } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -626,7 +626,11 @@ export default function Dashboard() {
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing...' : 'Sync Binance'}
           </Button>
-          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+          <Button variant="outline" size="sm" onClick={async () => {
+            const r = await refreshBots();
+            alert(r.message || "All bots stopped");
+            await load();
+          }} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className="w-4 h-4 mr-2" />Refresh
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {

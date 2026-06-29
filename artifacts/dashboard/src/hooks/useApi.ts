@@ -74,3 +74,8 @@ export async function updateRecoveryConfig(config: { recovery_enabled: boolean; 
   });
   return r.json();
 }
+
+export async function refreshBots(): Promise<{ success: boolean; message: string }> {
+  const r = await fetch(`${API}/bots/refresh`, { method: "POST" });
+  return r.json();
+}
