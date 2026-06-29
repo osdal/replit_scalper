@@ -2,5 +2,5 @@
 # Применяется ко всем ботам одновременно через API сервер
 
 recovery_enabled: true
-recovery_bonus_pct: 10
+recovery_bonus_pct: 20
 recovery_max_pct: 50

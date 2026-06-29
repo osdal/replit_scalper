@@ -8,13 +8,17 @@ import { db, recoveryChainsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = Router();
 
 // ── Config path ───────────────────────────────────────────────────────────
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
-  path.resolve(process.env.BOT_DIR || "../../../../bot", "recovery_config.yaml");
+  path.resolve(__dirname, "../../../../bot/recovery_config.yaml");
 
 function readRecoveryConfig(): {
   recovery_enabled: boolean;
@@ -55,8 +59,6 @@ router.put("/config", (req, res) => {
         : current.recovery_max_pct,
     });
     fs.writeFileSync(CONFIG_PATH, `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`);
-    // Сбрасываем кэш после записи
-    _configCache = null;
     res.json(readRecoveryConfig());
   } catch (e) {
     res.status(500).json({ error: String(e) });
