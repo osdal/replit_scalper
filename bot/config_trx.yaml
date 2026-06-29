@@ -1,7 +1,7 @@
 symbol: TRXUSDT
 timeframe: 5m
 leverage: 30
-risk_pct: 3.0
+risk_pct: 1.0
 sl_pct: 1
 tp1_pct: 0.35
 tp1_close_pct: 74
@@ -10,9 +10,9 @@ ema_fast: 8
 ema_slow: 33
 volume_ma_period: 20
 volume_multiplier: 1.7
-mode: paper
-# mode: backtest
 # mode: live
+# mode: backtest
+mode: live
 auto_mode: True
 backtest_start: "2026-06-01"
 backtest_end: "2026-06-15"

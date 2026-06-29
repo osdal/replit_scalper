@@ -1,7 +1,7 @@
 symbol: DOGEUSDT
 timeframe: 5m
 leverage: 30
-risk_pct: 3
+risk_pct: 1
 sl_pct: 0.85
 tp1_pct: 0.3
 tp1_close_pct: 60
@@ -10,9 +10,9 @@ ema_fast: 7
 ema_slow: 14
 volume_ma_period: 20
 volume_multiplier: 1.0
-mode: paper
-# mode: backtest
 # mode: live
+# mode: backtest
+mode: live
 auto_mode: True
 backtest_start: "2026-06-01"
 backtest_end: "2026-06-15"

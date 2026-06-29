@@ -10,9 +10,9 @@ ema_fast: 5
 ema_slow: 27
 volume_ma_period: 20
 volume_multiplier: 1.3
-mode: paper
-# mode: backtest
 # mode: live
+# mode: backtest
+mode: live
 auto_mode: True
 backtest_start: "2026-05-01"
 backtest_end: "2026-06-08"
