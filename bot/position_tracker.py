@@ -168,7 +168,7 @@ class PositionTracker:
             return
         try:
             import datetime
-            await self.reporter.patch_trade(self._trade_id, {
+            success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl,
@@ -176,51 +176,68 @@ class PositionTracker:
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
             })
+            if not success:
+                # Запись не найдена (например после очистки БД) — создаём новую
+                self.log.warning(f"[REPORTER] trade #{self._trade_id} not found, creating new record")
+                p = self.position
+                new_trade = {
+                    "symbol":      self.cfg.symbol,
+                    "direction":   p.direction if p else "LONG",
+                    "entry_price": p.entry_price if p else exit_price,
+                    "exit_price":  exit_price,
+                    "qty":         qty,
+                    "pnl":         pnl,
+                    "exit_reason": reason,
+                    "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
+                    "exit_time":   datetime.datetime.utcnow().isoformat(),
+                    "is_open":     False,
+                    "mode":        self.cfg.mode,
+                }
+                await self.reporter.report_trade(new_trade)
             self._trade_id = None
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close error: {e}")
 
-    async def _report_tp1(self, exit_price: float, qty: float, pnl: float) -> None:
-        """TP1 — записываем частичное закрытие как отдельную сделку."""
+    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str) -> None:
+        """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
         try:
-            p = self.position
-            if not p:
-                return
             import datetime
-            # Закрываем текущую сделку по TP1
-            if self._trade_id:
-                await self.reporter.patch_trade(self._trade_id, {
+            success = await self.reporter.patch_trade(trade_id, {
+                "exit_price":  exit_price,
+                "qty":         qty,
+                "pnl":         pnl,
+                "exit_reason": reason,
+                "exit_time":   datetime.datetime.utcnow().isoformat(),
+                "is_open":     False,
+            })
+            if not success:
+                # Запись не найдена (например после очистки БД) — создаём новую
+                self.log.warning(f"[REPORTER] trade #{trade_id} not found, creating new record")
+                p = self.position
+                new_trade = {
+                    "symbol":      self.cfg.symbol,
+                    "direction":   p.direction if p else "LONG",
+                    "entry_price": p.entry_price if p else exit_price,
                     "exit_price":  exit_price,
                     "qty":         qty,
                     "pnl":         pnl,
-                    "exit_reason": "TP1",
+                    "exit_reason": reason,
+                    "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
                     "is_open":     False,
-                })
-            # Создаём новую сделку для остатка позиции
-            new_trade = {
-                "symbol":      self.cfg.symbol,
-                "direction":   p.direction,
-                "entry_price": p.entry_price,
-                "sl_price":    p.entry_price,  # SL на безубытке
-                "tp1_price":   p.tp1_price,
-                "tp2_price":   p.tp2_price,
-                "qty":         p.remaining_qty,
-                "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
-                "is_open":     True,
-                "mode":        self.cfg.mode,
-                "ema_fast":    p.entry_ema_fast,
-                "ema_slow":    p.entry_ema_slow,
-                "volume":      p.entry_volume,
-                "volume_ma":   p.entry_volume_ma,
-            }
-            trade_id = await self.reporter.report_trade(new_trade)
-            if trade_id:
-                self._trade_id = trade_id
+                    "mode":        self.cfg.mode,
+                }
+                await self.reporter.report_trade(new_trade)
         except Exception as e:
-            self.log.debug(f"[REPORTER] report_tp1 error: {e}")
+            self.log.debug(f"[REPORTER] report_close_with_id error: {e}")
+
+    async def _report_tp1(self, exit_price: float, qty: float, pnl: float) -> None:
+        """TP1 — частичное закрытие. НЕ записываем в БД, только обновляем состояние."""
+        # Не репортим TP1 в БД — ждём полного закрытия позиции
+        # Состояние обновляется через apply_hit -> _save_state()
+        pass
 
     # ------------------------------------------------------------------ #
     #  Trading logic                                                       #
@@ -391,17 +408,21 @@ class PositionTracker:
             tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
             tp1_qty = min(tp1_qty, p.remaining_qty)
 
+        # Сохраняем trade_id ДО apply_hit (который может вызвать _clear_state)
+        trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
         pnl = self.apply_hit(hit, close_price)
 
         if is_recovery_tp1_full_close:
-            # Recovery TP1 — это полное закрытие, репортим как close, не partial
+            # Recovery TP1 — это полное закрытие, репортим как close
             await self._report_close(close_price, remaining_before, pnl, "TP1")
         elif hit == "TP1":
-            await self._report_tp1(close_price, tp1_qty, pnl)
+            # TP1 — частичное закрытие, не репортим в БД, только сохраняем состояние
             self._save_state()
         elif hit in ("SL", "TP2"):
-            await self._report_close(close_price, p.remaining_qty if p else 0, pnl, hit)
+            # SL или TP2 — полное закрытие, репортим используя сохранённый trade_id
+            if trade_id_before:
+                await self._report_close_with_id(trade_id_before, close_price, remaining_before, pnl, hit)
 
         return pnl
 
