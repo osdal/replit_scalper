@@ -1,8 +1,24 @@
 import { Router } from "express";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, recoveryChainsTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 
 const router = Router();
+
+// DELETE /trades — удалить все сделки
+router.delete("/", async (_req, res) => {
+  try {
+    const result = await db.delete(tradesTable).returning();
+    res.json({ deleted: result.length });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// DELETE /trades/clear-tp1 — удалить все TP1 записи (для миграции)
+router.delete("/clear-tp1", async (_req, res) => {
+  try {
+    const result = await db.delete(tradesTable).where(eq(tradesTable.exit_reason, "TP1")).returning();
+    res.json({ deleted: result.length });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
 
 router.get("/", async (req, res) => {
   try {
@@ -84,6 +100,113 @@ router.patch("/:id", async (req, res) => {
     if (!trade) return res.status(404).json({ error: "Trade not found" });
     res.json(trade);
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// POST /trades/sync-closed — синхронизировать закрытые позиции с биржей
+router.post("/sync-closed", async (_req, res) => {
+  try {
+    const API_KEY = process.env.BINANCE_API_KEY || "";
+    const API_SECRET = process.env.BINANCE_API_SECRET || "";
+    
+    if (!API_KEY || !API_SECRET) {
+      return res.status(400).json({ error: "BINANCE_API_KEY and BINANCE_API_SECRET not configured" });
+    }
+
+    // Получаем открытые сделки из БД
+    const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.is_open, true));
+    
+    if (openTrades.length === 0) {
+      return res.json({ synced: 0, message: "No open trades in DB" });
+    }
+
+    // Получаем текущие позиции с биржи
+    const crypto = await import("crypto");
+    const BASE_URL = "https://fapi.binance.com";
+    
+    function sign(params: Record<string, string | number>): string {
+      const qs = Object.entries(params).map(([k, v]) => `${k}=${v}`).join("&");
+      return crypto.createHmac("sha256", API_SECRET).update(qs).digest("hex");
+    }
+
+    function binanceGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
+      const ts = Date.now();
+      const p = { ...params, timestamp: ts };
+      const signature = sign(p);
+      const qs = Object.entries(p).map(([k, v]) => `${k}=${v}`).join("&");
+      const url = `${BASE_URL}${path}?${qs}&signature=${signature}`;
+      return fetch(url, { headers: { "X-MBX-APIKEY": API_KEY } }).then(r => r.json());
+    }
+
+    const positions = await binanceGet("/fapi/v2/positionRisk");
+    
+    // Создаём карту открытых позиций на бирже
+    const exchangePositions = new Map<string, number>();
+    for (const pos of positions) {
+      const amt = Math.abs(parseFloat(pos.positionAmt));
+      if (amt > 0) {
+        exchangePositions.set(pos.symbol, amt);
+      }
+    }
+
+    // Закрываем сделки которых нет на бирже
+    let closed = 0;
+    const now = new Date().toISOString();
+    
+    for (const trade of openTrades) {
+      if (!exchangePositions.has(trade.symbol)) {
+        // Получаем PnL из userTrades
+        let pnl = 0;
+        let exitPrice = trade.entry_price;
+        try {
+          const userTrades = await binanceGet("/fapi/v1/userTrades", {
+            symbol: trade.symbol,
+            limit: 20,
+          });
+          // Ищем сделки которые закрыли нашу позицию
+          for (const ut of userTrades) {
+            const utTime = new Date(ut.time).toISOString();
+            // Берём только сделки после открытия позиции
+            if (utTime > trade.entry_time && ut.realizedPnl) {
+              pnl += parseFloat(ut.realizedPnl) || 0;
+            }
+          }
+          // Рассчитываем exit_price из последней сделки
+          if (userTrades.length > 0) {
+            const lastTrade = userTrades[userTrades.length - 1];
+            exitPrice = parseFloat(lastTrade.price) || trade.entry_price;
+          }
+        } catch (e) {
+          // ignore
+        }
+
+        // Позиция закрыта на бирже — обновляем БД
+        await db.update(tradesTable)
+          .set({
+            is_open: false,
+            exit_time: now,
+            exit_reason: "exchange_closed",
+            exit_price: exitPrice,
+            pnl: pnl,
+          })
+          .where(eq(tradesTable.id, trade.id));
+        closed++;
+
+        // Если убыток — создаём recovery chain
+        if (pnl < 0) {
+          await db.insert(recoveryChainsTable).values({
+            debt_amount: Math.abs(pnl),
+            status: "free",
+            created_at: now,
+            updated_at: now,
+          });
+        }
+      }
+    }
+
+    res.json({ synced: closed, total: openTrades.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 export default router;

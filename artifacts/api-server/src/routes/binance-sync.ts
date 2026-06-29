@@ -15,7 +15,7 @@ const BASE_URL   = "https://fapi.binance.com";
 
 const SYMBOLS = [
   "ETHUSDT", "SOLUSDT", "BTCUSDT", "BNBUSDT",
-  "DOGEUSDT", "TRXUSDT", "XRPUSDT"
+  "DOGEUSDT", "TRXUSDT", "XRPUSDT", "ONTUSDT"
 ];
 
 function sign(params: Record<string, string | number>): string {
@@ -23,7 +23,7 @@ function sign(params: Record<string, string | number>): string {
   return crypto.createHmac("sha256", API_SECRET).update(qs).digest("hex");
 }
 
-async function binanceGet(path: string, params: Record<string, string | number> = {}) {
+async function binanceGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
   const ts = Date.now();
   const p = { ...params, timestamp: ts };
   const signature = sign(p);
