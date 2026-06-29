@@ -33,6 +33,28 @@ router.get("/", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// PATCH /trades/:id — обновить сделку (закрытие, синхронизация PnL)
+router.patch("/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const updates: Record<string, unknown> = {};
+    const allowed = ["exit_price", "pnl", "exit_reason", "qty", "is_open", "exit_time"];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+    const result = await db.update(tradesTable).set(updates).where(eq(tradesTable.id, id)).returning();
+    if (result.length === 0) {
+      return res.status(404).json({ error: "Trade not found" });
+    }
+    res.json(result[0]);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 router.get("/stats", async (_req, res) => {
   try {
     const stats = await db.run(sql`
