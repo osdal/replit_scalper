@@ -12,12 +12,9 @@ import yaml from "js-yaml";
 
 const router = Router();
 
-// ── Config caching ─────────────────────────────────────────────────────────
+// ── Config path ───────────────────────────────────────────────────────────
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(process.env.BOT_DIR || "../../../../bot", "recovery_config.yaml");
-
-let _configCache: { recovery_enabled: boolean; recovery_bonus_pct: number; recovery_max_pct: number } | null = null;
-let _configMtime = 0;
 
 function readRecoveryConfig(): {
   recovery_enabled: boolean;
@@ -25,20 +22,13 @@ function readRecoveryConfig(): {
   recovery_max_pct: number;
 } {
   try {
-    const stat = fs.statSync(CONFIG_PATH);
-    // Используем кэш если файл не менялся
-    if (_configCache && stat.mtimeMs === _configMtime) {
-      return _configCache;
-    }
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
     const val = raw.recovery_enabled;
-    _configCache = {
+    return {
       recovery_enabled: val === true || val === "true" || val === "True" || val === 1,
       recovery_bonus_pct: Number(raw.recovery_bonus_pct) || 0,
       recovery_max_pct: Number(raw.recovery_max_pct) || 0,
     };
-    _configMtime = stat.mtimeMs;
-    return _configCache;
   } catch {
     return { recovery_enabled: false, recovery_bonus_pct: 0, recovery_max_pct: 0 };
   }

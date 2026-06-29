@@ -15,31 +15,22 @@ except ImportError:
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
-# ── Config caching ─────────────────────────────────────────────────────────
+# ── Config path ───────────────────────────────────────────────────────────
 _CONFIG_PATH = os.getenv("RECOVERY_CONFIG_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_config.yaml"))
 
-_config_cache: Optional[dict] = None
-_config_mtime: float = 0
-
 
 def readRecoveryConfig() -> dict:
-    """Читает recovery_config.yaml с кэшированием."""
-    global _config_cache, _config_mtime
+    """Читает recovery_config.yaml при каждом вызове (без кэша)."""
     try:
-        stat = os.stat(_CONFIG_PATH)
-        if _config_cache and stat.st_mtime == _config_mtime:
-            return _config_cache
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             import yaml as _yaml
             raw = _yaml.safe_load(f) or {}
-        _config_cache = {
+        return {
             "recovery_enabled": bool(raw.get("recovery_enabled", False)),
             "recovery_bonus_pct": float(raw.get("recovery_bonus_pct", 0)),
             "recovery_max_pct": float(raw.get("recovery_max_pct", 50.0)),
         }
-        _config_mtime = stat.st_mtime
-        return _config_cache
     except Exception:
         return {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_pct": 50.0}
 
