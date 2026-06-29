@@ -626,6 +626,9 @@ export default function Dashboard() {
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing...' : 'Sync Binance'}
           </Button>
+          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+            <RefreshCw className="w-4 h-4 mr-2" />Refresh
+          </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
             if (!confirm(
               "Stop ALL running bots and reload their configs from YAML?\n\n" +
@@ -640,8 +643,8 @@ export default function Dashboard() {
           }} className="">
             <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
           </Button>
-          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
-            <RefreshCw className="w-4 h-4 mr-2" />Refresh
+          }} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+            <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
             if (confirm('Delete all trades and restart bots?')) {
