@@ -57,11 +57,11 @@ class DbReporter:
             self.log.debug(f"[REPORTER] trade error: {e}")
         return None
 
-    async def patch_trade(self, trade_id: int, data: dict) -> None:
-        """Обновляет существующую сделку (закрытие)."""
+    async def patch_trade(self, trade_id: int, data: dict) -> bool:
+        """Обновляет существующую сделку (закрытие). Возвращает True если успешно."""
         session = await self._get_session()
         if session is None:
-            return
+            return False
         try:
             async with session.patch(
                 f"{API_URL}/trades/{trade_id}",
@@ -70,8 +70,11 @@ class DbReporter:
             ) as resp:
                 if resp.status >= 400:
                     self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
+                    return False
+                return True
         except Exception as e:
             self.log.debug(f"[REPORTER] patch_trade error: {e}")
+            return False
 
     async def _patch(self, data: dict) -> None:
         session = await self._get_session()
