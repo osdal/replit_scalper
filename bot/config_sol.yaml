@@ -1,7 +1,7 @@
 symbol: SOLUSDT
 timeframe: 5m
 leverage: 30
-risk_pct: 2.0
+risk_pct: 1.0
 sl_pct: 0.9
 tp1_pct: 0.2
 tp1_close_pct: 50
@@ -10,9 +10,9 @@ ema_fast: 10
 ema_slow: 19
 volume_ma_period: 20
 volume_multiplier: 1.1
-mode: paper
-# mode: backtest
 # mode: live
+# mode: backtest
+mode: live
 auto_mode: True
 backtest_start: "2026-05-01"
 backtest_end: "2026-06-08"
