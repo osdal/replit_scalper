@@ -626,11 +626,21 @@ export default function Dashboard() {
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing...' : 'Sync Binance'}
           </Button>
-          <Button variant="outline" size="sm" onClick={async () => {
+          <Button variant="destructive" size="sm" onClick={async () => {
+            if (!confirm(
+              "Stop ALL running bots and reload their configs from YAML?\n\n" +
+              "This will SIGKILL every bot process and delete their local " +
+              "position state files. Open positions remain protected by " +
+              "exchange orders (SL/TP), but won't be tracked by the bot " +
+              "again until you manually restart each one."
+            )) return;
             const r = await refreshBots();
             alert(r.message || "All bots stopped");
             await load();
-          }} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+          }} className="">
+            <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
+          </Button>
+          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className="w-4 h-4 mr-2" />Refresh
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
