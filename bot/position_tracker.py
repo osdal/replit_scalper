@@ -422,8 +422,28 @@ class PositionTracker:
             await self._report_close(close_price, remaining_before, total_trade_pnl, "TP1")
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before)
         elif hit == "TP1":
-            # TP1 — частичное закрытие, не репортим в БД, только сохраняем состояние
+            # TP1 — частичное закрытие. Создаём запись в БД для закрытой части.
             self._save_state()
+            if self.reporter and p:
+                tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
+                tp1_qty = min(tp1_qty, p.remaining_qty)
+                tp1_pnl = self._calc_pnl(p.direction, p.entry_price, close_price, tp1_qty)
+                partial_trade = {
+                    "symbol": self.cfg.symbol,
+                    "direction": p.direction,
+                    "entry_price": p.entry_price,
+                    "exit_price": close_price,
+                    "qty": tp1_qty,
+                    "pnl": round(tp1_pnl, 4),
+                    "exit_reason": "TP1",
+                    "entry_time": str(p.entry_timestamp).replace(" ", "T") if p.entry_timestamp else None,
+                    "exit_time": __import__("datetime").datetime.utcnow().isoformat(),
+                    "is_open": False,
+                    "mode": self.cfg.mode,
+                }
+                new_trade_id = await self.reporter.report_trade(partial_trade)
+                # Синхронизируем PnL с биржи для этой частичной сделки
+                await self._sync_pnl_from_exchange(entry_time_ms, new_trade_id)
         elif hit in ("SL", "TP2"):
             exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
             if trade_id_before:
