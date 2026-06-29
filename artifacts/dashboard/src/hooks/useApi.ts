@@ -50,3 +50,27 @@ export async function syncBinance(): Promise<{ success: boolean; synced: number 
   const r = await fetch(`${API}/binance-sync`, { method: "POST" });
   return r.json();
 }
+
+export async function clearTrades(): Promise<{ deleted: number }> {
+  const r = await fetch(`${API}/trades`, { method: "DELETE" });
+  return r.json();
+}
+
+export async function getRecoveryConfig(): Promise<{ recovery_enabled: boolean; recovery_bonus_pct: number; recovery_max_pct: number }> {
+  const r = await fetch(`${API}/recovery/config`);
+  return r.json();
+}
+
+export async function syncClosedTrades(): Promise<{ synced: number; total: number }> {
+  const r = await fetch(`${API}/trades/sync-closed`, { method: "POST" });
+  return r.json();
+}
+
+export async function updateRecoveryConfig(config: { recovery_enabled: boolean; recovery_bonus_pct: number; recovery_max_pct: number }): Promise<{ recovery_enabled: boolean; recovery_bonus_pct: number; recovery_max_pct: number }> {
+  const r = await fetch(`${API}/recovery/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return r.json();
+}
