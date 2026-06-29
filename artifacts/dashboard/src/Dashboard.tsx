@@ -487,8 +487,6 @@ export default function Dashboard() {
       setTrades(Array.isArray(t?.trades) ? t.trades : []);
       setStats(Array.isArray(s) ? s : []);
       setLastRefresh(new Date());
-      // Синхронизация закрытых позиций
-      syncClosedTrades().catch(() => {});
     } catch {
       // API not available yet
     } finally {
@@ -642,9 +640,6 @@ export default function Dashboard() {
             await load();
           }} className="">
             <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
-          </Button>
-          }} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
-            <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
             if (confirm('Delete all trades and restart bots?')) {

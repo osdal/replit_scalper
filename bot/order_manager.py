@@ -405,3 +405,28 @@ class OrderManager:
             symbol=self.cfg.symbol,
             leverage=self.cfg.leverage,
         )
+
+    async def get_realized_pnl(
+        self, symbol: str, entry_time_ms: int, exit_time_ms: int,
+    ) -> Optional[float]:
+        """
+        Получает реальный суммарный realized PnL с биржи за период сделки.
+        Используется для обновления PnL в БД после закрытия позиции.
+        Returns None если не удалось получить данные.
+        """
+        try:
+            trades = await self.client.futures_user_trades(
+                symbol=symbol,
+                startTime=entry_time_ms,
+                endTime=exit_time_ms + 60000,
+            )
+            if not trades:
+                return None
+            total_pnl = 0.0
+            for t in trades:
+                realized = t.get("realizedPnl", "0")
+                total_pnl += float(realized)
+            return total_pnl if total_pnl != 0.0 else None
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not fetch realized PnL from Binance: {e}")
+            return None
