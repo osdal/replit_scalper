@@ -52,6 +52,20 @@ async def _sync_position_on_start(
             log.warning(f"[SYNC] Could not verify position on exchange: {e}")
 
         pos = tracker.position
+        # Проверяем не dust ли позиция (notional < $1)
+        if pos and cfg.mode == "live":
+            try:
+                real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                if real_qty > 0:
+                    notional = real_qty * pos.entry_price
+                    if notional < 1.0:
+                        log.warning(f"[SYNC] Dust position detected (qty={real_qty}, notional=${notional:.4f}), closing")
+                        await order_mgr.close_dust(pos.direction)
+                        tracker.position = None
+                        tracker._clear_state()
+                        return
+            except Exception:
+                pass
         await _replace_tp_sl(order_mgr, pos, log)
         return
 

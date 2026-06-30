@@ -378,8 +378,31 @@ class OrderManager:
             return True
 
     async def close_dust(self, direction: str) -> bool:
-        """Закрывает пылевую позицию (очень маленький объём) маркет-ордером."""
+        """Закрывает пылевую позицию (notional < $1) маркет-ордером."""
         if self.cfg.mode != "live":
+            return False
+        try:
+            real_qty = await self._get_real_position_qty(direction)
+            if real_qty <= 0:
+                return False
+            # Получаем текущую цену для расчёта notional
+            ticker = await self.client.futures_symbol_ticker(symbol=self.cfg.symbol)
+            price = float(ticker.get("price", 0))
+            notional = real_qty * price
+            if notional > 1.0:
+                return False
+            side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+            await self.client.futures_create_order(
+                symbol=self.cfg.symbol,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=real_qty,
+                reduceOnly=True,
+            )
+            self.log.info(f"[LIVE] Dust closed | {direction} qty={real_qty} notional=${notional:.4f}")
+            return True
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not close dust: {e}")
             return False
         try:
             real_qty = await self._get_real_position_qty(direction)
