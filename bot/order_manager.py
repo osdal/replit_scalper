@@ -436,6 +436,12 @@ class OrderManager:
         Получает реальный суммарный realized PnL с биржи за период сделки.
         Используется для обновления PnL в БД после закрытия позиции.
         Returns None если не удалось получить данные.
+
+        ВАЖНО: Binance считает Realized PNL (то, что видно в интерфейсе)
+        как sum(realizedPnl) МИНУС sum(commission) по каждой сделке —
+        мы это подтвердили эмпирически ранее в проекте (см. binance-sync.ts
+        groupPositions). Без вычитания комиссии этот метод систематически
+        переоценивает PnL на сумму уплаченных комиссий за все исполнения.
         """
         try:
             trades = await self.client.futures_user_trades(
@@ -447,8 +453,11 @@ class OrderManager:
                 return None
             total_pnl = 0.0
             for t in trades:
-                realized = t.get("realizedPnl", "0")
-                total_pnl += float(realized)
+                realized = float(t.get("realizedPnl", "0") or 0)
+                commission = float(t.get("commission", "0") or 0)
+                commission_asset = t.get("commissionAsset", "")
+                commission_usd = commission if commission_asset == "USDT" else 0.0
+                total_pnl += realized - commission_usd
             return total_pnl if total_pnl != 0.0 else None
         except Exception as e:
             self.log.warning(f"[LIVE] Could not fetch realized PnL from Binance: {e}")
