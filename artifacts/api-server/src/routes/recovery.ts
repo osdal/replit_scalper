@@ -220,4 +220,14 @@ router.get("/chains", async (_req, res) => {
   }
 });
 
+// DELETE /recovery/chains — удалить все цепочки recovery (очистка БД)
+router.delete("/chains", async (_req, res) => {
+  try {
+    const result = await db.delete(recoveryChainsTable).returning();
+    res.json({ deleted: result.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 export default router;

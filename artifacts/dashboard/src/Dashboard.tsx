@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, syncClosedTrades, refreshBots } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, clearRecoveryChains } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -642,21 +642,14 @@ export default function Dashboard() {
             <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
-            if (confirm('Delete all trades and restart bots?')) {
+            if (confirm('Delete ALL trades and recovery chains? This cannot be undone.')) {
               const r = await clearTrades();
-              // Перезапускаем ботов
-              const bots = await fetchBots();
-              for (const bot of bots) {
-                if (bot.is_running) {
-                  await stopBot(bot.symbol);
-                  await startBot(bot.symbol);
-                }
-              }
-              alert(`Deleted: ${r.deleted} trades. Bots restarted. Page will reload...`);
+              const rc = await clearRecoveryChains();
+              alert(`Deleted: ${r.deleted} trades, ${rc.deleted} recovery chains. Restart bots manually.`);
               window.location.reload();
             }
           }} className="border-red-700 text-red-300 hover:bg-red-900">
-            🗑 Clear DB
+            � Clear DB
           </Button>
         </div>
       </div>
