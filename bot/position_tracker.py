@@ -451,6 +451,24 @@ class PositionTracker:
         except Exception as e:
             self.log.warning(f"[PNL_SYNC] Failed to sync PnL: {e}")
 
+    async def sync_unrealized_pnl(self) -> None:
+        """
+        Синхронизирует нереализованный PnL с биржи для открытой позиции.
+        Вызывается периодически для обновления PnL в дашборде.
+        """
+        if not self.order_mgr or not self.position or self.position.closed:
+            return
+        try:
+            pos_info = await self.order_mgr.get_position_info()
+            if pos_info is None:
+                return
+            real_pnl = pos_info.get("unrealized_pnl", 0)
+            if abs(real_pnl) > 0.0001 and self._trade_id:
+                await self.reporter.patch_trade(self._trade_id, {"pnl": round(real_pnl, 4)})
+                self.log.debug(f"[PNL_SYNC] Updated unrealized Pnl to {real_pnl:.4f}")
+        except Exception as e:
+            self.log.warning(f"[PNL_SYNC] Failed to sync unrealized PnL: {e}")
+
     @staticmethod
     def _calc_pnl(direction: str, entry: float, exit_price: float, qty: float) -> float:
         if direction == "LONG":
