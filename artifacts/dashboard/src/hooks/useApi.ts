@@ -79,3 +79,8 @@ export async function refreshBots(): Promise<{ success: boolean; message: string
   const r = await fetch(`${API}/bots/refresh`, { method: "POST" });
   return r.json();
 }
+
+export async function clearRecoveryChains(): Promise<{ deleted: number }> {
+  const r = await fetch(`${API}/recovery/chains`, { method: "DELETE" });
+  return r.json();
+}
