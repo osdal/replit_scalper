@@ -115,15 +115,6 @@ router.post("/", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.patch("/:id", async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const [trade] = await db.update(tradesTable).set(req.body).where(eq(tradesTable.id, id)).returning();
-    if (!trade) return res.status(404).json({ error: "Trade not found" });
-    res.json(trade);
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
-
 // POST /trades/sync-closed — синхронизировать закрытые позиции с биржей
 router.post("/sync-closed", async (_req, res) => {
   try {

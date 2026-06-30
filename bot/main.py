@@ -173,7 +173,7 @@ async def main():
     _setup_signal_handlers(log)
 
     events = get_events_logger(cfg.symbol)
-    print(f"[DEBUG] events logger: {events.name} handlers={len(events.handlers)}", flush=True)
+    log.debug(f"events logger: {events.name} handlers={len(events.handlers)}")
 
     try:
         if cfg.mode == "backtest":
@@ -232,7 +232,7 @@ async def _run_live_or_paper(
 
             current_price = float(candle["close"])
             candle_count[0] += 1
-            print(f"[DEBUG] on_candle #{candle_count[0]} price={current_price}", flush=True)
+            log.debug(f"on_candle #{candle_count[0]} price={current_price}")
 
             await reporter.report_heartbeat(current_price)
             if tracker.has_open_position():
@@ -264,7 +264,10 @@ async def _run_live_or_paper(
                 if pos and candle_count[0] % 12 == 0 and cfg.mode == "live":
                     try:
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                        if real_qty < pos.remaining_qty * 0.5:
+                        if real_qty < 0:
+                            # API error — skip sync, don't treat as closed
+                            events.debug(f"POSITION_SYNC | API error (qty={real_qty}), skipping")
+                        elif real_qty < pos.remaining_qty * 0.5:
                             events.warning(
                                 f"POSITION_SYNC | tracker_qty={pos.remaining_qty} "
                                 f"exchange_qty={real_qty:.6f} — position closed externally"

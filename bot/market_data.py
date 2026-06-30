@@ -4,11 +4,7 @@ import logging
 from typing import Callable, Dict, Optional
 
 import pandas as pd
-import websockets
 from binance import AsyncClient
-
-FUTURES_WS_URL = "wss://fstream.binance.com/ws"
-FUTURES_WS_MULTI_URL = "wss://fstream.binance.com/stream"
 
 
 async def get_historical_klines(
@@ -164,77 +160,4 @@ async def start_kline_polling(
             pass
 
 
-async def start_kline_socket(
-    client: AsyncClient,
-    symbol: str,
-    interval: str,
-    on_candle_close: Callable,
-    logger: Optional[logging.Logger] = None,
-    reconnect_delay: int = 5,
-    shutdown_event: Optional[asyncio.Event] = None,
-) -> None:
-    """Single-stream WebSocket.
-    
-    shutdown_event: если передан, соединение закрывается когда событие установлено.
-    """
-    stream = f"{symbol.lower()}@kline_{interval}"
-    url = f"{FUTURES_WS_URL}/{stream}"
 
-    while True:
-        # Проверяем shutdown_event перед каждым переподключением
-        if shutdown_event and shutdown_event.is_set():
-            if logger:
-                logger.info("Shutdown event received, stopping WebSocket")
-            break
-        
-        try:
-            if logger:
-                logger.info(f"WebSocket connecting | {url}")
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                if logger:
-                    logger.info(f"WebSocket connected | {interval}")
-                async for raw in ws:
-                    # Проверяем shutdown перед обработкой каждого сообщения
-                    if shutdown_event and shutdown_event.is_set():
-                        if logger:
-                            logger.info("Shutdown event received, closing WebSocket")
-                        return
-                    
-                    msg = json.loads(raw)
-                    kline = msg.get("k", {})
-                    if not kline.get("x"):
-                        continue
-                    if logger:
-                        logger.info(f"WS candle closed | {interval}")
-                    candle = _kline_to_series(kline)
-                    try:
-                        result = on_candle_close(candle)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception as e:
-                        if logger:
-                            logger.error(f"WS handler error ({interval}): {e}", exc_info=True)
-
-        except (websockets.ConnectionClosed, websockets.WebSocketException) as e:
-            if logger:
-                logger.warning(
-                    f"WebSocket disconnected ({interval}): {e} — reconnecting in {reconnect_delay}s"
-                )
-        except Exception as e:
-            if logger:
-                logger.error(
-                    f"WebSocket error ({interval}): {e} — reconnecting in {reconnect_delay}s"
-                )
-
-        # Используем wait_for для проверки shutdown_event во время переподключения
-        try:
-            await asyncio.wait_for(
-                shutdown_event.wait() if shutdown_event else asyncio.sleep(reconnect_delay),
-                timeout=reconnect_delay
-            )
-            if shutdown_event and shutdown_event.is_set():
-                if logger:
-                    logger.info("Shutdown event received during reconnect delay, stopping")
-                break
-        except asyncio.TimeoutError:
-            pass
