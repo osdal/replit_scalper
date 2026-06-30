@@ -96,7 +96,18 @@ async def _sync_position_on_start(
             total_qty=qty,
             remaining_qty=qty,
         )
-        tracker._save_state()
+
+        # Создаём запись в БД чтобы _trade_id был установлен
+        mock_signal = Signal(
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=round(sl_price, 4),
+            tp1_price=round(tp1_price, 4),
+            tp2_price=round(tp2_price, 4),
+            ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
+        )
+        await tracker._report_open(mock_signal, qty)
+        tracker._save_state()  # Сохраняем ПОСЛЕ _report_open чтобы trade_id записался
 
         log.info(
             f"[SYNC] Restored from exchange | {direction} {cfg.symbol} "
