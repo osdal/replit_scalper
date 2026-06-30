@@ -64,10 +64,12 @@ def calc_recovery_quantity(
         return 0.0
     raw_qty = target_profit / tp1_distance
     # Если max_pct не задан — возвращаем сырой размер без ограничений
-    if max_pct is None or max_pct <= 0:
+    if max_pct is None or max_pct <= 0 or entry_price <= 0:
         return raw_qty
     # Ограничиваем максимальный размер позиции в % от депозита
-    max_qty = balance * max_pct / 100
+    # max_pct = процент от баланса в USDT, конвертируем в qty монет
+    max_notional = balance * max_pct / 100  # максимальный нотиональ в USDT
+    max_qty = max_notional / entry_price   # конвертируем в количество монет
     return min(raw_qty, max_qty)
 
 
