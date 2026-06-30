@@ -222,6 +222,9 @@ async def _run_live_or_paper(
             log.info("[SYNC] Cleaned up orphaned orders (no open position)")
         except Exception as e:
             log.warning(f"[SYNC] Could not clean up orders: {e}")
+        # Закрываем пылевые позиции
+        for direction in ("LONG", "SHORT"):
+            await order_mgr.close_dust(direction)
 
     await reporter.report_heartbeat(0)
 
