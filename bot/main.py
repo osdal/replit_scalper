@@ -214,6 +214,15 @@ async def _run_live_or_paper(
     handler   = SignalHandler(cfg, log)
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
+
+    # Если позиции нет — отменяем все висящие условные ордера (мусор от предыдущих сессий)
+    if cfg.mode == "live" and not tracker.has_open_position():
+        try:
+            await order_mgr.cancel_all_tp_sl("LONG")  # отменяет ВСЕ ордера символа
+            log.info("[SYNC] Cleaned up orphaned orders (no open position)")
+        except Exception as e:
+            log.warning(f"[SYNC] Could not clean up orders: {e}")
+
     await reporter.report_heartbeat(0)
 
     df_buffer: pd.DataFrame = await get_recent_klines(
@@ -302,6 +311,8 @@ async def _run_live_or_paper(
                                     f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
                                 )
                                 pnl = await tracker.apply_hit_async(hit_type, current_price)
+                                # Отменяем оставшиеся ордера на бирже
+                                await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
                                     await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                                 elif pnl < 0:
@@ -340,6 +351,8 @@ async def _run_live_or_paper(
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
                         pnl = await tracker.apply_hit_async(hit, current_price)
                         events.info(f"TP2_APPLY | pnl={pnl}")
+                        # Отменяем оставшиеся ордера (SL если остался)
+                        await order_mgr.cancel_all_tp_sl(pos.direction)
                         if pos.is_recovery:
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                     else:
@@ -347,6 +360,8 @@ async def _run_live_or_paper(
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
                         pnl = await tracker.apply_hit_async(hit, current_price)
                         events.info(f"SL_APPLY | pnl={pnl}")
+                        # Отменяем оставшиеся ордера (TP1/TP2 если остались)
+                        await order_mgr.cancel_all_tp_sl(pos.direction)
                         if pos.is_recovery:
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                         elif pnl < 0:
