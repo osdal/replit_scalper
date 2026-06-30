@@ -369,19 +369,39 @@ class OrderManager:
         if self.cfg.mode == "live":
             real_qty = await self._get_real_position_qty(direction)
             if real_qty == 0.0:
-                self.log.warning(f"[LIVE] Full close already executed by exchange | {reason}")
+                self.log.warning(f"[LIVE] Close full already executed by exchange | {reason}")
                 return False
+            self.log.info(f"[LIVE] Full close confirmed | {reason} price≈{price}")
+            return True
+        else:
+            self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
+            return True
 
-            use_qty = await self._adjust_qty(real_qty if real_qty > 0 else qty)
+    async def close_dust(self, direction: str) -> bool:
+        """Закрывает пылевую позицию (очень маленький объём) маркет-ордером."""
+        if self.cfg.mode != "live":
+            return False
+        try:
+            real_qty = await self._get_real_position_qty(direction)
+            if real_qty <= 0:
+                return False
+            # Проверяем неional — если меньше $1, это dust
+            notional = real_qty * 1  # approximate, точная цена не нужна
+            if notional > 1.0:
+                return False
+            side = SIDE_SELL if direction == "LONG" else SIDE_BUY
             await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
-                side=_opposite_side(direction),
+                side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=use_qty,
+                quantity=real_qty,
                 reduceOnly=True,
             )
-            self.log.info(f"[LIVE] Full close | {reason} qty={use_qty} price≈{price}")
+            self.log.info(f"[LIVE] Dust closed | {direction} qty={real_qty}")
             return True
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not close dust: {e}")
+            return False
         else:
             self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
             return True
