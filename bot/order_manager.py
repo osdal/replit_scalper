@@ -28,8 +28,9 @@ def calc_quantity(
     risk_pct: float,
     sl_pct: float,
     entry_price: float,
-    leverage: int,
+    leverage: int = 1,
 ) -> float:
+    """Рассчитывает размер позиции по формуле риска. leverage не влияет на qty (только на маржу)."""
     risk_amount = balance * risk_pct / 100
     sl_distance_pct = sl_pct / 100
     quantity = risk_amount / (entry_price * sl_distance_pct)

@@ -61,6 +61,7 @@ __pycache__/
 # Bot runtime data — generated locally, never committed
 bot/logs/
 bot/state_*.json
+bot/recovery_config.yaml
 data/
 
 # Local scratch files

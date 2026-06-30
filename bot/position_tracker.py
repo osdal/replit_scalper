@@ -1,5 +1,6 @@
 import json
 import os
+import datetime
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 import logging
@@ -411,7 +412,16 @@ class PositionTracker:
         trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
         tp1_hit_before = p.tp1_hit if p else False
-        entry_time_ms = int(p.entry_timestamp.timestamp() * 1000) if p and p.entry_timestamp else 0
+        # entry_timestamp может быть строкой из JSON или datetime объектом
+        entry_time_ms = 0
+        if p and p.entry_timestamp:
+            try:
+                if isinstance(p.entry_timestamp, str):
+                    entry_time_ms = int(datetime.datetime.fromisoformat(p.entry_timestamp).timestamp() * 1000)
+                else:
+                    entry_time_ms = int(p.entry_timestamp.timestamp() * 1000)
+            except (ValueError, AttributeError):
+                entry_time_ms = 0
         accumulated_pnl_before = p.realized_pnl if p else 0.0
         last_event_pnl, exit_reason_override = self.apply_hit(hit, close_price)
         total_trade_pnl = accumulated_pnl_before + last_event_pnl

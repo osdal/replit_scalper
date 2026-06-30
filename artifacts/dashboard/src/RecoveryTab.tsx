@@ -4,7 +4,7 @@ import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { RefreshCw, Link2, AlertTriangle, CheckCircle2 } from "lucide-react";
 
-const API = "http://localhost:5000/api";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 interface RecoveryChain {
   id: number;

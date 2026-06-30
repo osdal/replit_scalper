@@ -210,9 +210,13 @@ router.post("/:symbol/stop", async (req, res) => {
     // Сначала пробуем через Map (запущен через дашборд)
     const proc = botProcesses.get(symbol);
     if (proc) {
-      // Используем SIGKILL для форсированного завершения, если SIGTERM не сработает
       if (!proc.killed) {
-        proc.kill("SIGKILL");
+        // SIGTERM first — give Python a chance to save state and close connections
+        proc.kill("SIGTERM");
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        if (!proc.killed) {
+          proc.kill("SIGKILL");
+        }
       }
       botProcesses.delete(symbol);
     }
@@ -291,10 +295,20 @@ async function reloadConfigsFromYaml(): Promise<void> {
 
 async function stopAllBots(): Promise<void> {
   const symbols = Array.from(botProcesses.keys());
+  // SIGTERM first
+  for (const symbol of symbols) {
+    const proc = botProcesses.get(symbol);
+    if (proc && !proc.killed) {
+      proc.kill("SIGTERM");
+    }
+    botProcesses.delete(symbol);
+  }
+  // Wait for SIGTERM to take effect
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  // Force kill any survivors and clean up state files
   for (const symbol of symbols) {
     const proc = botProcesses.get(symbol);
     if (proc && !proc.killed) proc.kill("SIGKILL");
-    botProcesses.delete(symbol);
     const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
     try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
   }

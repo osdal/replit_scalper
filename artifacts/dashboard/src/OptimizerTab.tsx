@@ -5,7 +5,7 @@ import { Badge } from "./components/ui/badge";
 import { Play, Square, RefreshCw, TrendingUp, ArrowRight } from "lucide-react";
 import { fetchBots } from "./hooks/useApi";
 
-const API = "http://localhost:5000/api";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 interface BotConfig {
   symbol: string;
