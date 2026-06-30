@@ -254,6 +254,9 @@ async def _run_live_or_paper(
             if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
                 log.info(f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} htf_trend={htf_trend_now}")
+                # Синхронизируем unrealized PnL с биржей для открытых позиций
+                if cfg.mode == "live" and tracker.has_open_position():
+                    await tracker.sync_unrealized_pnl()
 
             if tracker.has_open_position():
                 # Проверяем реальный объём позиции на бирже (раз в 12 свечей ~ 1 минута)

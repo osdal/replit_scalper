@@ -137,6 +137,27 @@ class OrderManager:
             self.log.warning(f"[LIVE] Could not fetch position qty: {e}")
             return -1.0
 
+    async def get_position_info(self) -> dict | None:
+        """
+        Возвращает информацию о текущей позиции на Бинансе.
+        Returns: {qty, entry_price, unrealized_pnl, direction} or None
+        """
+        try:
+            positions = await self.client.futures_position_information(symbol=self.cfg.symbol)
+            for p in positions:
+                amt = float(p.get("positionAmt", 0))
+                if abs(amt) > 0:
+                    return {
+                        "qty": abs(amt),
+                        "entry_price": float(p.get("entryPrice", 0)),
+                        "unrealized_pnl": float(p.get("unrealizedProfit", 0)),
+                        "direction": "LONG" if amt > 0 else "SHORT",
+                    }
+            return None
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not fetch position info: {e}")
+            return None
+
     async def _get_fill_price(self, order: dict, fallback: float) -> float:
         avg = float(order.get("avgPrice", 0))
         if avg > 0:
