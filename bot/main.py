@@ -265,24 +265,43 @@ async def _run_live_or_paper(
                     try:
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
                         if real_qty < pos.remaining_qty * 0.5:
-                            # Биржа закрыла позицию (или большую часть) без нашего участия
-                            events.warning(f"POSITION_SYNC | tracker_qty={pos.remaining_qty} exchange_qty={real_qty:.6f} — position closed externally")
-                            # Определяем PnL по текущей цене
-                            est_pnl = (current_price - pos.entry_price) * real_qty
-                            # Если позиция полностью закрыта
+                            events.warning(
+                                f"POSITION_SYNC | tracker_qty={pos.remaining_qty} "
+                                f"exchange_qty={real_qty:.6f} — position closed externally"
+                            )
                             if real_qty < 0.001:
-                                hit_type = "TP2" if current_price > pos.entry_price else "SL"
-                                events.warning(f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}")
-                                await reporter.patch_trade(tracker._trade_id, {
-                                    "exit_price": current_price,
-                                    "pnl": round(est_pnl, 4),
-                                    "exit_reason": hit_type,
-                                    "is_open": False,
-                                    "exit_time": __import__("datetime").datetime.utcnow().isoformat(),
-                                })
-                                tracker.force_close(f"exchange_sync_{hit_type}", current_price)
-                                await recovery.report(pnl=est_pnl, chain_id=pos.recovery_chain_id if pos.is_recovery else None)
-                                return
+                                # Полностью закрыта на бирже без нашего участия.
+                                # Определяем причину направление-зависимо (для SHORT
+                                # прибыль — это падение цены, не рост) и применяем
+                                # через уже проверенный apply_hit_async путь, чтобы
+                                # получить правильный знак PnL, учёт предыдущего
+                                # частичного TP1 и корректную синхронизацию с биржей —
+                                # вместо пересчёта PnL заново здесь.
+                                price_moved_favorably = (
+                                    current_price > pos.entry_price if pos.direction == "LONG"
+                                    else current_price < pos.entry_price
+                                )
+                                hit_type = "TP2" if price_moved_favorably else "SL"
+                                events.warning(
+                                    f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
+                                )
+                                pnl = await tracker.apply_hit_async(hit_type, current_price)
+                                if pos.is_recovery:
+                                    await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                                elif pnl < 0:
+                                    await recovery.report(pnl=pnl)
+                            else:
+                                # Закрыта частично (между 0% и 50% от того, что бот
+                                # считал открытым) — скорректируем remaining_qty в
+                                # трекере, не закрывая сделку, и продолжим обычное
+                                # наблюдение на следующих свечах.
+                                events.warning(
+                                    f"POSITION_SYNC | Partial external close — "
+                                    f"adjusting tracked qty {pos.remaining_qty} -> {real_qty:.6f}"
+                                )
+                                pos.remaining_qty = real_qty
+                                tracker._save_state()
+                            return
                     except Exception as e:
                         events.warning(f"POSITION_SYNC | Error: {e}")
 

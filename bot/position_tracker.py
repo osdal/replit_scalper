@@ -346,8 +346,6 @@ class PositionTracker:
                 f"{exit_reason} hit (SL level) | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
                 f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
             )
-            # Сохраняем время закрытия для запроса реального PnL с биржи
-            close_time_ms = int(close_price and close_price or 0)
             self.position = None
             self._clear_state()
             return pnl, exit_reason
