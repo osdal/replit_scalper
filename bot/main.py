@@ -98,6 +98,7 @@ async def _sync_position_on_start(
         )
 
         # Создаём запись в БД чтобы _trade_id был установлен
+        import datetime
         mock_signal = Signal(
             direction=direction,
             entry_price=entry_price,
@@ -105,6 +106,7 @@ async def _sync_position_on_start(
             tp1_price=round(tp1_price, 4),
             tp2_price=round(tp2_price, 4),
             ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
+            timestamp=datetime.datetime.utcnow(),
         )
         await tracker._report_open(mock_signal, qty)
         tracker._save_state()  # Сохраняем ПОСЛЕ _report_open чтобы trade_id записался
