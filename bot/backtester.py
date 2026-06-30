@@ -137,7 +137,8 @@ async def run_backtest_on_df(
             hit = tracker.check(current_price)
             if hit:
                 pos = tracker.position
-                pnl = tracker.apply_hit(hit, current_price)
+                pnl_result = tracker.apply_hit(hit, current_price)
+                pnl = pnl_result[0] if isinstance(pnl_result, tuple) else pnl_result
                 balance += pnl
                 stats.trades.append(
                     TradeResult(
