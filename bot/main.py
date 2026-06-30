@@ -256,6 +256,33 @@ async def _run_live_or_paper(
                 log.info(f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} htf_trend={htf_trend_now}")
 
             if tracker.has_open_position():
+                # Проверяем реальный объём позиции на бирже (раз в 12 свечей ~ 1 минута)
+                pos = tracker.position
+                if pos and candle_count[0] % 12 == 0 and cfg.mode == "live":
+                    try:
+                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                        if real_qty < pos.remaining_qty * 0.5:
+                            # Биржа закрыла позицию (или большую часть) без нашего участия
+                            events.warning(f"POSITION_SYNC | tracker_qty={pos.remaining_qty} exchange_qty={real_qty:.6f} — position closed externally")
+                            # Определяем PnL по текущей цене
+                            est_pnl = (current_price - pos.entry_price) * real_qty
+                            # Если позиция полностью закрыта
+                            if real_qty < 0.001:
+                                hit_type = "TP2" if current_price > pos.entry_price else "SL"
+                                events.warning(f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}")
+                                await reporter.patch_trade(tracker._trade_id, {
+                                    "exit_price": current_price,
+                                    "pnl": round(est_pnl, 4),
+                                    "exit_reason": hit_type,
+                                    "is_open": False,
+                                    "exit_time": __import__("datetime").datetime.utcnow().isoformat(),
+                                })
+                                tracker.force_close(f"exchange_sync_{hit_type}", current_price)
+                                await recovery.report(pnl=est_pnl, chain_id=pos.recovery_chain_id if pos.is_recovery else None)
+                                return
+                    except Exception as e:
+                        events.warning(f"POSITION_SYNC | Error: {e}")
+
                 hit = tracker.check(current_price)
                 if hit:
                     pos = tracker.position
