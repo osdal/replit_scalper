@@ -250,10 +250,6 @@ router.post("/:symbol/stop", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-export default router;
-
-// ── Refresh: stop all bots, clear state, reload config ──────────────────────────
-
 async function reloadConfigsFromYaml(): Promise<void> {
   const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
   for (const file of configs) {
@@ -323,12 +319,4 @@ async function stopAllBots(): Promise<void> {
   await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
 }
 
-router.post("/refresh", async (_req, res) => {
-  try {
-    await stopAllBots();
-    await reloadConfigsFromYaml();
-    res.json({ success: true, message: "All bots stopped, configs reloaded from YAML. Ready to restart with new parameters." });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
+export default router;

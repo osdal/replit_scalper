@@ -229,14 +229,12 @@ async def _run_live_or_paper(
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
 
-    # Если позиции нет — отменяем все висящие условные ордера (мусор от предыдущих сессий)
-    if cfg.mode == "live" and not tracker.has_open_position():
+    if cfg.mode == "live":
         try:
-            await order_mgr.cancel_all_tp_sl("LONG")  # отменяет ВСЕ ордера символа
-            log.info("[SYNC] Cleaned up orphaned orders (no open position)")
+            await order_mgr.cancel_all_tp_sl("LONG")
+            log.info("[SYNC] Cleaned up all orders (refresh)")
         except Exception as e:
             log.warning(f"[SYNC] Could not clean up orders: {e}")
-        # Закрываем пылевые позиции
         for direction in ("LONG", "SHORT"):
             await order_mgr.close_dust(direction)
 
