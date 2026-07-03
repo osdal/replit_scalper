@@ -5,12 +5,18 @@ import backtestRouter  from "./backtest";
 import optimizerRouter  from "./optimizer";
 import binanceSyncRouter from "./binance-sync";
 import recoveryRouter     from "./recovery";
+import refreshRouter      from "./refresh";
 
 const router = Router();
 
 router.get("/healthz", (_req, res) => res.json({ status: "ok" }));
 router.use("/bots",      botsRouter);
 router.use("/trades",    tradesRouter);
+router.use("/backtest",  backtestRouter);
+router.use("/optimizer",     optimizerRouter);
+router.use("/binance-sync", binanceSyncRouter);
+router.use("/recovery",     recoveryRouter);
+router.use("/refresh",     refreshRouter);
 router.use("/backtest",  backtestRouter);
 router.use("/optimizer",     optimizerRouter);
 router.use("/binance-sync", binanceSyncRouter);
