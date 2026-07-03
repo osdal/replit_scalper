@@ -23,8 +23,53 @@ from recovery_client import RecoveryClient, readRecoveryConfig
 load_dotenv()
 
 HEARTBEAT_CANDLES = 3
+LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
 
-shutdown_event: Optional[asyncio.Event] = None
+
+def _lock_file(symbol: str) -> str:
+    return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
+
+
+def _acquire_lock(symbol: str) -> bool:
+    lock_path = _lock_file(symbol)
+    if os.path.exists(lock_path):
+        try:
+            with open(lock_path, "r") as f:
+                pid = int(f.read().strip())
+            # Проверяем, мертав ли процесс
+            if pid > 0:
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if f",{pid}," in result.stdout or f" {pid} " in result.stdout:
+                        return False
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Lock-файл битый или процесс мертв - удаляем
+        try:
+            os.remove(lock_path)
+        except:
+            pass
+    # Создаём lock
+    try:
+        with open(lock_path, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        return False
+
+
+def _release_lock(symbol: str) -> None:
+    lock_path = _lock_file(symbol)
+    try:
+        os.remove(lock_path)
+    except:
+        pass
 
 
 async def _sync_position_on_start(
@@ -181,6 +226,10 @@ async def main():
     if cfg.htf_enabled:
         log.info(f"HTF filter | {cfg.htf_timeframe} EMA{cfg.htf_ema_fast}/{cfg.htf_ema_slow}")
 
+    if not _acquire_lock(cfg.symbol):
+        log.error(f"Another bot instance already running for {cfg.symbol} — exiting")
+        sys.exit(1)
+
     api_key    = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
 
@@ -210,6 +259,7 @@ async def main():
         await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events)
 
     finally:
+        _release_lock(cfg.symbol)
         await reporter.report_stopped()
         await reporter.close()
         await recovery.close()

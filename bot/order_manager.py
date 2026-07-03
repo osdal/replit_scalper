@@ -211,24 +211,20 @@ class OrderManager:
             self.log.warning(f"[LIVE] cancel regular orders error: {e}")
 
         try:
-            algo_orders = await self.client._request_futures_api(
-                "get", "openOrders/algo", signed=True,
-                data={"symbol": self.cfg.symbol}
-            )
-            orders = algo_orders.get("orders", []) if isinstance(algo_orders, dict) else []
-            for order in orders:
+            algo_orders = await self.client.futures_get_open_algo_orders(symbol=self.cfg.symbol)
+            for order in algo_orders:
                 algo_id = order.get("algoId") or order.get("orderId")
                 if algo_id:
                     try:
-                        await self.client._request_futures_api(
-                            "delete", "order/algo", signed=True,
-                            data={"symbol": self.cfg.symbol, "algoId": algo_id}
+                        await self.client.futures_cancel_algo_order(
+                            symbol=self.cfg.symbol,
+                            algoId=algo_id
                         )
                         self.log.info(f"[LIVE] Algo order cancelled | algoId={algo_id}")
                     except Exception as ce:
                         self.log.warning(f"[LIVE] Could not cancel algo order {algo_id}: {ce}")
         except Exception as e:
-            self.log.debug(f"[LIVE] cancel algo orders (no algo orders or endpoint N/A): {e}")
+            self.log.debug(f"[LIVE] cancel algo orders: {e}")
 
         await asyncio.sleep(1.0)
 
@@ -404,30 +400,6 @@ class OrderManager:
         except Exception as e:
             self.log.warning(f"[LIVE] Could not close dust: {e}")
             return False
-        try:
-            real_qty = await self._get_real_position_qty(direction)
-            if real_qty <= 0:
-                return False
-            # Проверяем неional — если меньше $1, это dust
-            notional = real_qty * 1  # approximate, точная цена не нужна
-            if notional > 1.0:
-                return False
-            side = SIDE_SELL if direction == "LONG" else SIDE_BUY
-            await self.client.futures_create_order(
-                symbol=self.cfg.symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=real_qty,
-                reduceOnly=True,
-            )
-            self.log.info(f"[LIVE] Dust closed | {direction} qty={real_qty}")
-            return True
-        except Exception as e:
-            self.log.warning(f"[LIVE] Could not close dust: {e}")
-            return False
-        else:
-            self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
-            return True
 
     async def move_sl_to_breakeven(
         self, direction: str, entry_price: float,
