@@ -69,7 +69,6 @@ tree.txt
 commands.txt
 *.diff
 *.vsix
-start-all.ps1
 start_bot.bat
 start_dashboard.bat
 patch_dashboard_*.js
