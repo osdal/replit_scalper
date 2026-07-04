@@ -55,6 +55,20 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
+// DELETE /trades/:id — удалить конкретную сделку
+router.delete("/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const result = await db.delete(tradesTable).where(eq(tradesTable.id, id)).returning();
+    if (result.length === 0) {
+      return res.status(404).json({ error: "Trade not found" });
+    }
+    res.json({ deleted: 1, id });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 router.get("/stats", async (_req, res) => {
   try {
     const stats = await db.run(sql`

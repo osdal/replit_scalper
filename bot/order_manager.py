@@ -226,6 +226,30 @@ class OrderManager:
         except Exception as e:
             self.log.debug(f"[LIVE] cancel algo orders: {e}")
 
+        # AFTER canceling ALL orders, we MUST recreate all necessary protective orders (SL, TP1, TP2)
+        # when a position exists to prevent leaving positions unprotected.
+        try:
+            pos_info = await self.get_position_info()
+            if pos_info and pos_info.get("qty", 0) > 0:
+                self.log.warning(f"[LIVE] Pos has orders cancelled — recreating SL/TPs if needed")
+                direction = pos_info.get("direction", "LONG")
+                entry_price = pos_info.get("entry_price", 0)
+                sl_price = pos_info.get("sl_price", entry_price * 0.99 if direction == "LONG" else entry_price * 1.01)
+                tp1_price = pos_info.get("tp1_price", entry_price * 1.01 if direction == "LONG" else entry_price * 0.99)
+                tp2_price = pos_info.get("tp2_price", entry_price * 1.02 if direction == "LONG" else entry_price * 0.98)
+                total_qty = pos_info.get("qty", 0.001)
+
+                if all(p > 0 for p in [sl_price, tp1_price, tp2_price]):
+                    await self._place_all_orders(
+                        direction=direction,
+                        total_qty=total_qty,
+                        sl_price=sl_price,
+                        tp1_price=tp1_price,
+                        tp2_price=tp2_price,
+                    )
+        except Exception as e:
+            self.log.error(f"[LIVE] Failed to recreate SL/TPs after cancel_all_tp_sl: {e}")
+
         await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------ #
