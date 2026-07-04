@@ -449,15 +449,14 @@ class OrderManager:
         self, symbol: str, entry_time_ms: int, exit_time_ms: int,
     ) -> Optional[float]:
         """
-        Получает реальный суммарный realized PnL с биржи за период сделки.
+        Получает реальный суммарный PnL с биржи за период сделки с учётом комиссий.
         Используется для обновления PnL в БД после закрытия позиции.
         Returns None если не удалось получить данные.
 
-        ВАЖНО: Binance считает Realized PNL (то, что видно в интерфейсе)
-        как sum(realizedPnl) МИНУС sum(commission) по каждой сделке —
-        мы это подтвердили эмпирически ранее в проекте (см. binance-sync.ts
-        groupPositions). Без вычитания комиссии этот метод систематически
-        переоценивает PnL на сумму уплаченных комиссий за все исполнения.
+        ВАЖНО: Binance не показывает чистый PnL в интерфейсе.
+        Нужно брать realizedPnl из userTrades и вычесть обе комиссии:
+        - commission при входе (entry_fee)
+        - commission при выходе (exit_fee)
         """
         try:
             trades = await self.client.futures_user_trades(
@@ -468,13 +467,18 @@ class OrderManager:
             if not trades:
                 return None
             total_pnl = 0.0
+            entry_commission = 0.0
             for t in trades:
                 realized = float(t.get("realizedPnl", "0") or 0)
                 commission = float(t.get("commission", "0") or 0)
                 commission_asset = t.get("commissionAsset", "")
                 commission_usd = commission if commission_asset == "USDT" else 0.0
+                side = t.get("side", "")
+                if side == "BUY":
+                    entry_commission += commission_usd
                 total_pnl += realized - commission_usd
-            return total_pnl if total_pnl != 0.0 else None
+            total_pnl -= entry_commission
+            return total_pnl if abs(total_pnl) > 0.0001 else None
         except Exception as e:
             self.log.warning(f"[LIVE] Could not fetch realized PnL from Binance: {e}")
             return None
