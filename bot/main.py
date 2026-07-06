@@ -188,6 +188,7 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
         await order_mgr.cancel_all_tp_sl(pos.direction)
         import asyncio as _asyncio
         await _asyncio.sleep(1.5)
+        log.info(f"[SYNC] Placing orders | sl_price={pos.sl_price} tp1_price={pos.tp1_price} tp2_price={pos.tp2_price} remaining_qty={pos.remaining_qty}")
         await order_mgr._place_all_orders(
             direction=pos.direction,
             total_qty=pos.remaining_qty,
@@ -278,15 +279,6 @@ async def _run_live_or_paper(
     handler   = SignalHandler(cfg, log)
 
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
-
-    if cfg.mode == "live":
-        try:
-            await order_mgr.cancel_all_tp_sl("LONG")
-            log.info("[SYNC] Cleaned up all orders (refresh)")
-        except Exception as e:
-            log.warning(f"[SYNC] Could not clean up orders: {e}")
-        for direction in ("LONG", "SHORT"):
-            await order_mgr.close_dust(direction)
 
     await reporter.report_heartbeat(0)
 
