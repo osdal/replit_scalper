@@ -36,3 +36,10 @@
 2026-07-07 07:50:12 [LIVE TRXUSDT] WARNING SL hit (SL level) | price=0.33011 qty=754.000000 pnl=-2.5108 total_pnl=-2.5108 | entry_ema_fast=0.3273 entry_ema_slow=0.3274 entry_volume=1855703.0 entry_volume_ma=727724.75
 2026-07-07 07:50:14 [LIVE TRXUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'TRXUSDT', 'pnl': -2.51082}
 2026-07-07 07:50:14 [LIVE TRXUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 13}
+2026-07-07 12:10:15 [LIVE TRXUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=TRXUSDT
+2026-07-07 12:10:17 [LIVE TRXUSDT] ERROR [RECOVERY] claim error: Cannot connect to host localhost:5000 ssl:default [Удаленный компьютер отклонил это сетевое подключение]
+2026-07-07 12:10:19 [LIVE TRXUSDT] INFO [LIVE] Market order placed | LONG TRXUSDT qty=648.0 entry≈0.33002
+2026-07-07 12:10:19 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 12:10:20 [LIVE TRXUSDT] INFO Position opened | LONG | entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 | indicators: ema_fast=0.3295 ema_slow=0.3295 volume=849705.0 volume_ma=432132.65
+2026-07-07 12:39:46 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 12:39:51 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0

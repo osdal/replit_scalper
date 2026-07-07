@@ -9,11 +9,13 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-config({ path: path.resolve(__dirname, "../../../.env") });
+// Resolve paths relative to project root
+const projectRoot = path.resolve(__dirname, "../..");
+config({ path: path.resolve(projectRoot, ".env") });
 
 const dbPath = process.env.DATABASE_PATH 
-  ? path.resolve(process.env.DATABASE_PATH)
-  : path.resolve("./data/bot.db");
+  ? path.resolve(projectRoot, process.env.DATABASE_PATH)
+  : path.resolve(projectRoot, "data/bot.db");
 const dir = path.dirname(dbPath);
 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
