@@ -79,111 +79,123 @@ async def _sync_position_on_start(
     if cfg.mode != "live":
         return
 
-    if tracker.load_state():
-        try:
-            positions = await client.futures_position_information(symbol=cfg.symbol)
-            exchange_has_position = any(
-                abs(float(p.get("positionAmt", 0))) > 0 for p in positions
-            )
-            if not exchange_has_position:
-                log.warning(
-                    f"[SYNC] State file has position but exchange shows none — "
-                    f"clearing state file"
-                )
-                tracker.position = None
-                tracker._clear_state()
-                return
-        except Exception as e:
-            log.warning(f"[SYNC] Could not verify position on exchange: {e}")
-
-        pos = tracker.position
-        # Проверяем не dust ли позиция (notional < $1)
-        if pos and cfg.mode == "live":
-            try:
-                real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                if real_qty > 0:
-                    notional = real_qty * pos.entry_price
-                    if notional < 1.0:
-                        log.warning(f"[SYNC] Dust position detected (qty={real_qty}, notional=${notional:.4f}), closing")
-                        await order_mgr.close_dust(pos.direction)
-                        tracker.position = None
-                        tracker._clear_state()
-                        return
-            except Exception:
-                pass
-        await _replace_tp_sl(order_mgr, pos, log)
-        return
-
     try:
         positions = await client.futures_position_information(symbol=cfg.symbol)
     except Exception as e:
         log.error(f"[SYNC] Failed to fetch positions: {e}")
         return
 
+    exchange_qty = 0.0
     for p in positions:
         amt = float(p.get("positionAmt", 0))
-        if amt == 0:
-            continue
+        if abs(amt) > 0:
+            exchange_qty = abs(amt)
 
-        direction = "LONG" if amt > 0 else "SHORT"
-        qty = abs(amt)
-        entry_price = float(p.get("entryPrice", 0))
-
-        if entry_price == 0:
-            log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
-            continue
-
-        sl_dist  = entry_price * cfg.sl_pct  / 100
-        tp1_dist = entry_price * cfg.tp1_pct / 100
-        tp2_dist = entry_price * cfg.tp2_pct / 100
-
-        if direction == "LONG":
-            sl_price  = entry_price - sl_dist
-            tp1_price = entry_price + tp1_dist
-            tp2_price = entry_price + tp2_dist
-        else:
-            sl_price  = entry_price + sl_dist
-            tp1_price = entry_price - tp1_dist
-            tp2_price = entry_price - tp2_dist
-
-        tracker.position = Position(
-            direction=direction,
-            entry_price=entry_price,
-            sl_price=round(sl_price, 4),
-            tp1_price=round(tp1_price, 4),
-            tp2_price=round(tp2_price, 4),
-            total_qty=qty,
-            remaining_qty=qty,
-        )
-
-        # Создаём запись в БД чтобы _trade_id был установлен
-        import datetime
-        mock_signal = Signal(
-            direction=direction,
-            entry_price=entry_price,
-            sl_price=round(sl_price, 4),
-            tp1_price=round(tp1_price, 4),
-            tp2_price=round(tp2_price, 4),
-            ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
-            timestamp=datetime.datetime.utcnow(),
-        )
-        await tracker._report_open(mock_signal, qty)
-        tracker._save_state()  # Сохраняем ПОСЛЕ _report_open чтобы trade_id записался
-
-        log.info(
-            f"[SYNC] Restored from exchange | {direction} {cfg.symbol} "
-            f"qty={qty} entry={entry_price} "
-            f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f} "
-            f"(levels recalculated from config)"
-        )
-
-        await _replace_tp_sl(order_mgr, tracker.position, log)
+    if exchange_qty < 0.000001:
+        if tracker.load_state():
+            log.warning(f"[SYNC] Exchange shows no position but state has open position — clearing state")
+            tracker.position = None
+            tracker._clear_state()
+        log.info(f"[SYNC] No open position found for {cfg.symbol}")
         return
 
-    log.info(f"[SYNC] No open position found for {cfg.symbol}")
+    if tracker.load_state():
+        pos = tracker.position
+        if pos:
+            try:
+                real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                if real_qty < 0.000001:
+                    log.warning(f"[SYNC] Exchange shows no position but state has open position — position closed externally (TP/SL), clearing state")
+                    tracker.position = None
+                    tracker._clear_state()
+                    return
+                if real_qty < pos.remaining_qty * 0.5:
+                    log.warning(
+                        f"[SYNC] Partial external close detected. "
+                        f"Tracker qty={pos.remaining_qty:.6f} vs Exchange qty={real_qty:.6f}. "
+                        f"Adjusting state and setting tp1_hit=True."
+                    )
+                    pos.remaining_qty = real_qty
+                    pos.tp1_hit = True
+                    pos.sl_price = pos.entry_price
+                    tracker._save_state()
+                    await _replace_tp_sl(order_mgr, pos, log)
+                    return
+                notional = real_qty * pos.entry_price
+                if notional < 1.0:
+                    log.warning(f"[SYNC] Dust position detected (qty={real_qty}, notional=${notional:.4f}), closing")
+                    await order_mgr.close_dust(pos.direction)
+                    tracker.position = None
+                    tracker._clear_state()
+                    return
+            except Exception as e:
+                log.warning(f"[SYNC] Could not verify position on exchange: {e}")
+        await _replace_tp_sl(order_mgr, pos, log)
+        return
+
+    entry_price = 0.0
+    direction = "LONG"
+    for p in positions:
+        amt = float(p.get("positionAmt", 0))
+        if abs(amt) > 0:
+            direction = "LONG" if amt > 0 else "SHORT"
+            entry_price = float(p.get("entryPrice", 0))
+            break
+
+    if entry_price == 0:
+        log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
+        return
+
+    sl_dist  = entry_price * cfg.sl_pct  / 100
+    tp1_dist = entry_price * cfg.tp1_pct / 100
+    tp2_dist = entry_price * cfg.tp2_pct / 100
+
+    if direction == "LONG":
+        sl_price  = entry_price - sl_dist
+        tp1_price = entry_price + tp1_dist
+        tp2_price = entry_price + tp2_dist
+    else:
+        sl_price  = entry_price + sl_dist
+        tp1_price = entry_price - tp1_dist
+        tp2_price = entry_price - tp2_dist
+
+    tracker.position = Position(
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=round(sl_price, 4),
+        tp1_price=round(tp1_price, 4),
+        tp2_price=round(tp2_price, 4),
+        total_qty=exchange_qty,
+        remaining_qty=exchange_qty,
+    )
+
+    import datetime
+    mock_signal = Signal(
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=round(sl_price, 4),
+        tp1_price=round(tp1_price, 4),
+        tp2_price=round(tp2_price, 4),
+        ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
+        timestamp=datetime.datetime.utcnow(),
+    )
+    await tracker._report_open(mock_signal, exchange_qty)
+    tracker._save_state()
+
+    log.info(
+        f"[SYNC] Restored from exchange | {direction} {cfg.symbol} "
+        f"qty={exchange_qty} entry={entry_price} "
+        f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f} "
+        f"(levels recalculated from config)"
+    )
+
+    await _replace_tp_sl(order_mgr, tracker.position, log)
 
 
 async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
+    if not pos or pos.remaining_qty < 0.000001:
+        log.warning(f"[SYNC] No position to replace TP/SL (remaining_qty={pos.remaining_qty if pos else 0})")
+        return
     try:
         await order_mgr.cancel_all_tp_sl(pos.direction)
         import asyncio as _asyncio
