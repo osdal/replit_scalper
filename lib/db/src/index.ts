@@ -9,8 +9,8 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Resolve paths relative to project root
-const projectRoot = path.resolve(__dirname, "../..");
+// Resolve paths relative to project root (3 levels: src -> db -> lib -> root)
+const projectRoot = path.resolve(__dirname, "../../..");
 config({ path: path.resolve(projectRoot, ".env") });
 
 const dbPath = process.env.DATABASE_PATH 
