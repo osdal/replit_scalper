@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, clearRecoveryChains } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -635,7 +635,7 @@ export default function Dashboard() {
               "exchange orders (SL/TP), but won't be tracked by the bot " +
               "again until you manually restart each one."
             )) return;
-            const r = await refreshBots();
+            const r = await stopAllBots();
             alert(r.message || "All bots stopped");
             await load();
           }} className="">

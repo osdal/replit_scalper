@@ -52,16 +52,23 @@ function updateYamlConfig(symbol: string, params: Record<string, unknown>): Prom
 async function findBotPid(symbol: string): Promise<number | null> {
   const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
   try {
-    // Windows
-    const { stdout } = await execAsync(
-      `wmic process where "name='python.exe'" get processid,commandline /format:csv`
-    );
-    for (const line of stdout.split("\n")) {
-      if (line.includes(configFile)) {
-        const parts = line.trim().split(",");
-        const pid = parseInt(parts[parts.length - 1]);
-        if (!isNaN(pid) && pid > 0) return pid;
+    if (process.platform === "win32") {
+      // Windows 11+ doesn't have wmic, use Get-CimInstance
+      const { stdout } = await execAsync(
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
+      );
+      const processes = JSON.parse(stdout);
+      for (const proc of processes) {
+        if (proc.CommandLine && proc.CommandLine.includes(configFile)) {
+          const pid = parseInt(proc.ProcessId);
+          if (!isNaN(pid) && pid > 0) return pid;
+        }
       }
+    } else {
+      // Linux/Mac fallback
+      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
+      const pid = parseInt(stdout.trim());
+      if (!isNaN(pid)) return pid;
     }
   } catch {
     try {
@@ -150,6 +157,35 @@ router.patch("/:symbol", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+router.post("/refresh", async (_req, res) => {
+  try {
+    await reloadConfigsFromYaml();
+    for (const symbol of Array.from(botProcesses.keys())) {
+      const proc = botProcesses.get(symbol);
+      if (proc?.killed) botProcesses.delete(symbol);
+    }
+    const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+    for (const file of configs) {
+      const symbol = (file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT");
+      const pid = await findBotPid(symbol);
+      await db.update(botsTable).set({
+        is_running: !!pid,
+        last_heartbeat: pid ? new Date().toISOString() : null,
+      }).where(eq(botsTable.symbol, symbol));
+    }
+    const bots = await db.select().from(botsTable);
+    res.json({ refreshed: bots.length, bots: bots.map(b => ({ symbol: b.symbol, is_running: b.is_running })) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+router.post("/stop-all", async (_req, res) => {
+  try {
+    await stopAllBots();
+    const bots = await db.select().from(botsTable);
+    res.json({ success: true, message: "All bots stopped", bots: bots.map(b => ({ symbol: b.symbol, is_running: b.is_running })) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 router.post("/:symbol/start", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
@@ -166,7 +202,8 @@ router.post("/:symbol/start", async (req, res) => {
     }
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-    const proc = spawn("python", ["main.py", configFile], {
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
       stdio: ["ignore", "pipe", "pipe"], // pipe stdout/stderr чтобы видеть логи
@@ -203,6 +240,30 @@ router.post("/:symbol/start", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+router.post("/stop-all", async (_req, res) => {
+  try {
+    const stoppedBots: string[] = [];
+    for (const [symbol, proc] of botProcesses) {
+      if (!proc.killed) {
+        proc.kill();
+        stoppedBots.push(symbol);
+      }
+    }
+    botProcesses.clear();
+    
+    // Clear lock files
+    const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith("bot.lock."));
+    for (const lockFile of lockFiles) {
+      fs.unlinkSync(path.join(BOT_DIR, lockFile));
+    }
+    
+    // Also kill any Python processes running bots
+    execAsync("taskkill /IM python.exe /F 2>nul || true", { stdio: "ignore" });
+    
+    res.json({ success: true, message: `Stopped ${stoppedBots.length} bots`, bots: stoppedBots });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 router.post("/:symbol/stop", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
@@ -211,11 +272,20 @@ router.post("/:symbol/stop", async (req, res) => {
     const proc = botProcesses.get(symbol);
     if (proc) {
       if (!proc.killed) {
-        // SIGTERM first — give Python a chance to save state and close connections
-        proc.kill("SIGTERM");
+        // Windows: use kill() without signal (TerminateProcess)
+        // Linux/Mac: SIGTERM then SIGKILL
+        if (process.platform === "win32") {
+          proc.kill();
+        } else {
+          proc.kill("SIGTERM");
+        }
         await new Promise(resolve => setTimeout(resolve, 3000));
         if (!proc.killed) {
-          proc.kill("SIGKILL");
+          if (process.platform === "win32") {
+            proc.kill();
+          } else {
+            proc.kill("SIGKILL");
+          }
         }
       }
       botProcesses.delete(symbol);
@@ -234,8 +304,8 @@ router.post("/:symbol/stop", async (req, res) => {
     // Удаляем файл состояния позиции
     const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
     try {
-      if (require("fs").existsSync(stateFile)) {
-        require("fs").unlinkSync(stateFile);
+      if (fs.existsSync(stateFile)) {
+        fs.unlinkSync(stateFile);
         console.log(`[STOP] Deleted state file: ${stateFile}`);
       }
     } catch (e) {
@@ -250,7 +320,7 @@ router.post("/:symbol/stop", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-async function reloadConfigsFromYaml(): Promise<void> {
+export async function reloadConfigsFromYaml(): Promise<void> {
   const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
   for (const file of configs) {
     const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
@@ -291,11 +361,15 @@ async function reloadConfigsFromYaml(): Promise<void> {
 
 async function stopAllBots(): Promise<void> {
   const symbols = Array.from(botProcesses.keys());
-  // SIGTERM first
+  // SIGTERM first (Windows: use kill() without signal)
   for (const symbol of symbols) {
     const proc = botProcesses.get(symbol);
     if (proc && !proc.killed) {
-      proc.kill("SIGTERM");
+      if (process.platform === "win32") {
+        proc.kill();
+      } else {
+        proc.kill("SIGTERM");
+      }
     }
     botProcesses.delete(symbol);
   }
@@ -304,7 +378,13 @@ async function stopAllBots(): Promise<void> {
   // Force kill any survivors and clean up state files
   for (const symbol of symbols) {
     const proc = botProcesses.get(symbol);
-    if (proc && !proc.killed) proc.kill("SIGKILL");
+    if (proc && !proc.killed) {
+      if (process.platform === "win32") {
+        proc.kill();
+      } else {
+        proc.kill("SIGKILL");
+      }
+    }
     const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
     try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
   }

@@ -42,18 +42,14 @@ Start-Sleep -Seconds 2
 Write-Host "      OK - http://localhost:5173"
 Write-Host ""
 
-# 4. Start Bots
+# 4. Start Bots (auto-detect all config files)
 Write-Host "[4/5] Starting bots..."
-$botConfigs = @(
-    "bot/config_btc.yaml",
-    "bot/config_eth.yaml",
-    "bot/config_bnb.yaml",
-    "bot/config_sol.yaml",
-    "bot/config_xrp.yaml",
-    "bot/config_trx.yaml",
-    "bot/config_doge.yaml",
-    "bot/config_ont.yaml"
-)
+$botConfigs = Get-ChildItem -Path "$scriptDir\bot" -Filter "config_*.yaml" | ForEach-Object { "bot\$($_.Name)" }
+foreach ($config in $botConfigs) {
+    $botName = ($config -split '/')[1] -replace 'config_|.yaml', ''
+    Write-Host "      Starting $botName Bot..."
+    Start-Process -FilePath "python" -ArgumentList "bot/main.py $config" -WindowStyle Hidden -WorkingDirectory $scriptDir
+}
 foreach ($config in $botConfigs) {
     $botName = ($config -split '/')[1] -replace 'config_|.yaml', ''
     Write-Host "      Starting $botName Bot..."

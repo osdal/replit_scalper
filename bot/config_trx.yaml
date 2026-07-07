@@ -1,7 +1,7 @@
 symbol: TRXUSDT
 timeframe: 5m
-leverage: 30
-risk_pct: 1.0
+leverage: 50
+risk_pct: 3.0
 sl_pct: 1
 tp1_pct: 0.35
 tp1_close_pct: 74

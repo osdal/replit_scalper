@@ -1,0 +1,91 @@
+2026-06-30 10:05:12 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-06-30 10:05:12 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-06-30 10:05:15 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.14 entry≈553.44
+2026-06-30 10:05:15 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=560.64 qty=0.14
+2026-06-30 10:05:16 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=553.44 SL=560.6448 TP1=550.6828 TP2=544.0414 qty=0.14 | indicators: ema_fast=553.5693 ema_slow=553.576 volume=744.51 volume_ma=653.28
+2026-06-30 12:49:46 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=553.44 SL=560.6448 TP1=550.6828 TP2=544.0414 qty=0.14 tp1_hit=False
+2026-06-30 12:49:50 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=560.64 qty=0.14
+2026-06-30 12:50:03 [LIVE BNBUSDT] INFO TP1 hit | price=549.89 closed_qty=0.056000 remaining_qty=0.084000 pnl=0.1988 | SL moved to breakeven: 560.6448 → 553.44 | entry_ema_fast=553.5693 entry_ema_slow=553.576 entry_volume=744.51 entry_volume_ma=653.28
+2026-06-30 12:50:05 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.44 qty=0.08
+2026-06-30 12:50:05 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=553.44
+2026-06-30 12:56:48 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=553.44 SL=553.44 TP1=550.6828 TP2=544.0414 qty=0.08400000000000002 tp1_hit=True
+2026-06-30 12:56:52 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.44 qty=0.08
+2026-06-30 13:11:58 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=553.44 SL=553.44 TP1=550.6828 TP2=544.0414 qty=0.08400000000000002 tp1_hit=True
+2026-06-30 13:12:03 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.44 qty=0.08
+2026-06-30 13:16:24 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=553.44 SL=553.44 TP1=550.6828 TP2=544.0414 qty=0.08400000000000002 tp1_hit=True
+2026-06-30 13:16:28 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.44 qty=0.08
+2026-06-30 13:19:01 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=553.44 SL=553.44 TP1=550.6828 TP2=544.0414 qty=0.08400000000000002 tp1_hit=True
+2026-06-30 13:19:06 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.44 qty=0.08
+2026-06-30 14:15:13 [LIVE BNBUSDT] INFO TP2 hit | price=549.94 qty=0.084000 pnl=0.2940 total_pnl=0.4928 | entry_ema_fast=553.5693 entry_ema_slow=553.576 entry_volume=744.51 entry_volume_ma=653.28
+2026-06-30 17:50:10 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-06-30 17:50:10 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-06-30 17:50:11 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.14 entry≈546.83
+2026-06-30 17:50:11 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.82 qty=0.14
+2026-06-30 17:50:12 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=546.83 SL=553.8172 TP1=543.9764 TP2=537.4159 qty=0.14 | indicators: ema_fast=548.3651 ema_slow=548.5997 volume=3749.53 volume_ma=3213.07
+2026-06-30 18:49:14 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=546.83 SL=553.8172 TP1=543.9764 TP2=537.4159 qty=0.14 tp1_hit=False
+2026-06-30 18:49:20 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=553.82 qty=0.14
+2026-06-30 19:45:06 [LIVE BNBUSDT] INFO TP2 hit | price=546.01 qty=0.140000 pnl=0.1148 total_pnl=0.1148 | entry_ema_fast=548.3651 entry_ema_slow=548.5997 entry_volume=3749.53 entry_volume_ma=3213.07
+2026-07-03 11:30:02 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-03 11:30:02 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-03 11:30:04 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.1 entry≈562.4
+2026-07-03 11:30:04 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=555.24 qty=0.1
+2026-07-03 11:30:05 [LIVE BNBUSDT] INFO Position opened | LONG | entry=562.4 SL=555.2368 TP1=565.3628 TP2=572.1134 qty=0.1 | indicators: ema_fast=562.2628 ema_slow=562.2276 volume=785.95 volume_ma=619.52
+2026-07-03 11:30:12 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-03 11:30:12 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-03 11:30:13 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.1 entry≈562.42
+2026-07-03 11:30:14 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=555.24 qty=0.1
+2026-07-03 11:30:14 [LIVE BNBUSDT] INFO Position opened | LONG | entry=562.42 SL=555.2368 TP1=565.3628 TP2=572.1134 qty=0.1 | indicators: ema_fast=562.2703 ema_slow=562.2501 volume=785.95 volume_ma=603.99
+2026-07-03 12:27:06 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=562.42 SL=555.2368 TP1=565.3628 TP2=572.1134 qty=0.1 tp1_hit=False
+2026-07-03 12:27:11 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=555.24 qty=0.1
+2026-07-03 13:25:08 [LIVE BNBUSDT] INFO TP2 hit | price=563.6 qty=0.100000 pnl=0.1180 total_pnl=0.1180 | entry_ema_fast=562.2703 entry_ema_slow=562.2501 entry_volume=785.95 entry_volume_ma=603.99
+2026-07-03 13:25:17 [LIVE BNBUSDT] INFO TP2 hit | price=563.6 qty=0.100000 pnl=0.1180 total_pnl=0.1180 | entry_ema_fast=562.2703 entry_ema_slow=562.2501 entry_volume=785.95 entry_volume_ma=603.99
+2026-07-03 16:15:11 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-03 16:15:12 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-03 16:15:13 [LIVE BNBUSDT] ERROR [RECOVERY] claim error: Cannot connect to host localhost:5000 ssl:default [Удаленный компьютер отклонил это сетевое подключение]
+2026-07-03 16:15:14 [LIVE BNBUSDT] ERROR [RECOVERY] claim error: Cannot connect to host localhost:5000 ssl:default [Удаленный компьютер отклонил это сетевое подключение]
+2026-07-03 16:15:14 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.09 entry≈566.68
+2026-07-03 16:15:15 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=559.21 qty=0.09
+2026-07-03 16:15:15 [LIVE BNBUSDT] INFO Position opened | LONG | entry=566.68 SL=559.2145 TP1=569.4129 TP2=576.2119 qty=0.09 | indicators: ema_fast=565.9597 ema_slow=565.8582 volume=1911.6 volume_ma=1627.28
+2026-07-03 16:15:16 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.09 entry≈566.68
+2026-07-03 16:15:16 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=559.21 qty=0.09
+2026-07-03 16:15:17 [LIVE BNBUSDT] INFO Position opened | LONG | entry=566.68 SL=559.2145 TP1=569.4129 TP2=576.2119 qty=0.09 | indicators: ema_fast=565.9597 ema_slow=565.8583 volume=1911.6 volume_ma=1627.28
+2026-07-03 18:24:02 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=566.68 SL=559.2145 TP1=569.4129 TP2=576.2119 qty=0.09 tp1_hit=False
+2026-07-04 02:05:11 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-04 02:05:11 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-04 02:05:13 [LIVE BNBUSDT] INFO [LIVE] Market order placed | LONG BNBUSDT qty=0.09 entry≈573.79
+2026-07-04 02:05:13 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=566.33 qty=0.09
+2026-07-04 02:05:14 [LIVE BNBUSDT] INFO Position opened | LONG | entry=573.79 SL=566.3307 TP1=576.659 TP2=583.5444 qty=0.09 | indicators: ema_fast=573.5328 ema_slow=573.4724 volume=1585.07 volume_ma=885.11
+2026-07-04 15:15:57 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=573.79 SL=566.3307 TP1=576.659 TP2=583.5444 qty=0.09 tp1_hit=False
+2026-07-04 15:16:02 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=566.33 qty=0.09
+2026-07-04 16:05:55 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=573.79 SL=566.3307 TP1=576.659 TP2=583.5444 qty=0.09 tp1_hit=False
+2026-07-04 16:05:57 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=568.05 qty=0.06
+2026-07-04 16:06:00 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=566.33 qty=0.09
+2026-07-04 16:06:02 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=568.05 qty=0.06
+2026-07-04 16:12:11 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=573.79 SL=566.3307 TP1=576.659 TP2=583.5444 qty=0.09 tp1_hit=False
+2026-07-04 16:12:13 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=568.05 qty=0.06
+2026-07-04 16:12:17 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=566.33 qty=0.09
+2026-07-04 16:12:19 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=568.05 qty=0.06
+2026-07-06 13:20:37 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=573.79 SL=566.3307 TP1=576.659 TP2=583.5444 qty=0.09 tp1_hit=False
+2026-07-06 13:20:41 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=568.05 qty=0.01
+2026-07-06 13:20:44 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=566.33 qty=0.09
+2026-07-06 13:25:16 [LIVE BNBUSDT] INFO TP1 hit | price=579.9 closed_qty=0.036000 remaining_qty=0.054000 pnl=0.2200 | SL moved to breakeven: 566.3307 → 573.79 | entry_ema_fast=573.5328 entry_ema_slow=573.4724 entry_volume=1585.07 entry_volume_ma=885.11
+2026-07-06 13:25:18 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=573.79 qty=0.05
+2026-07-06 13:25:18 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=573.79
+2026-07-06 13:30:16 [LIVE BNBUSDT] INFO [STATE] Restored from file | LONG entry=573.79 SL=573.79 TP1=576.659 TP2=583.5444 qty=0.054 tp1_hit=True
+2026-07-06 14:20:15 [LIVE BNBUSDT] INFO TP2 hit | price=580.39 qty=0.054000 pnl=0.3564 total_pnl=0.5764 | entry_ema_fast=573.5328 entry_ema_slow=573.4724 entry_volume=1585.07 entry_volume_ma=885.11
+2026-07-06 15:00:03 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-06 15:00:03 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': 9, 'debtAmount': 0.015610000000006341, 'bonusPct': 20, 'enabled': True}
+2026-07-06 15:00:03 [LIVE BNBUSDT] INFO [RECOVERY] Claimed chain #9 | debt=0.0156 bonus=20% max_pct=50.0% recovery_qty=0.003411
+2026-07-06 15:00:10 [LIVE BNBUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BNBUSDT
+2026-07-06 15:00:10 [LIVE BNBUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-06 15:00:11 [LIVE BNBUSDT] INFO [LIVE] Market order placed | SHORT BNBUSDT qty=0.1 entry≈578.16
+2026-07-06 15:00:11 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=585.64 qty=0.1
+2026-07-06 15:00:12 [LIVE BNBUSDT] INFO Position opened | SHORT | entry=578.16 SL=585.6356 TP1=575.2294 TP2=568.292 qty=0.1 | indicators: ema_fast=579.8793 ema_slow=580.1994 volume=6179.59 volume_ma=1262.07
+2026-07-06 15:01:38 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=578.16 SL=585.6356 TP1=575.2294 TP2=568.292 qty=0.1 tp1_hit=False
+2026-07-06 15:01:42 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=585.64 qty=0.1
+2026-07-06 15:05:06 [LIVE BNBUSDT] INFO TP1 hit | price=572.84 closed_qty=0.050000 remaining_qty=0.050000 pnl=0.2660 | SL moved to breakeven: 585.6356 → 578.16 | entry_ema_fast=579.8793 entry_ema_slow=580.1994 entry_volume=6179.59 entry_volume_ma=1262.07
+2026-07-06 15:05:07 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=578.16 qty=0.05
+2026-07-06 15:05:07 [LIVE BNBUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=578.16
+2026-07-06 15:39:23 [LIVE BNBUSDT] INFO [STATE] Restored from file | SHORT entry=578.16 SL=578.16 TP1=575.2294 TP2=568.292 qty=0.05 tp1_hit=True
+2026-07-06 15:39:28 [LIVE BNBUSDT] INFO [LIVE] Stop-loss placed | stopPrice=578.16 qty=0.05
+2026-07-06 17:35:05 [LIVE BNBUSDT] INFO TP2 hit | price=577.19 qty=0.050000 pnl=0.0485 total_pnl=0.3145 | entry_ema_fast=579.8793 entry_ema_slow=580.1994 entry_volume=6179.59 entry_volume_ma=1262.07
