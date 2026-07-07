@@ -11,7 +11,8 @@
     "@libsql/client": "^0.14.0",
     "drizzle-orm": "catalog:",
     "drizzle-zod": "^0.8.3",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/node": "catalog:",
