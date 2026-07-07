@@ -10,13 +10,15 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-config({ path: path.resolve(__dirname, "../../.env") });
+config({ path: path.resolve(__dirname, "../../../.env") });
 
-// Resolve BOT_DIR relative to project root
-const projectRoot = path.resolve(__dirname, "../../..");
+// Use absolute paths from .env for reliability
+const projectRoot = path.resolve(__dirname, "../../../");
 const BOT_DIR = process.env.BOT_DIR 
-  ? path.resolve(projectRoot, process.env.BOT_DIR)
-  : path.resolve(projectRoot, "bot");
+  ? (process.env.BOT_DIR.match(/^[A-Za-z]:/) 
+      ? process.env.BOT_DIR
+      : path.join(projectRoot, process.env.BOT_DIR))
+  : path.join(projectRoot, "bot");
 
 // Создаём таблицы
 await db.run(sql`CREATE TABLE IF NOT EXISTS bots (

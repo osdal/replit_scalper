@@ -43,3 +43,13 @@
 2026-07-07 12:10:20 [LIVE TRXUSDT] INFO Position opened | LONG | entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 | indicators: ema_fast=0.3295 ema_slow=0.3295 volume=849705.0 volume_ma=432132.65
 2026-07-07 12:39:46 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
 2026-07-07 12:39:51 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 12:43:49 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 12:43:54 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 12:48:09 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 12:48:14 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 12:52:16 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 12:52:21 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 12:57:02 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 12:57:07 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
+2026-07-07 13:06:13 [LIVE TRXUSDT] INFO [STATE] Restored from file | LONG entry=0.33002 SL=0.3267 TP1=0.3311 TP2=0.3381 qty=648.0 tp1_hit=False
+2026-07-07 13:06:19 [LIVE TRXUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.3267 qty=648.0
