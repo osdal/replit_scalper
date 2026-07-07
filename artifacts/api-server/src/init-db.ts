@@ -4,8 +4,19 @@ import { sql, eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
+import { config } from "dotenv";
+import { fileURLToPath } from "url";
 
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+config({ path: path.resolve(__dirname, "../../.env") });
+
+// Resolve BOT_DIR relative to project root
+const projectRoot = path.resolve(__dirname, "../../..");
+const BOT_DIR = process.env.BOT_DIR 
+  ? path.resolve(projectRoot, process.env.BOT_DIR)
+  : path.resolve(projectRoot, "bot");
 
 // Создаём таблицы
 await db.run(sql`CREATE TABLE IF NOT EXISTS bots (

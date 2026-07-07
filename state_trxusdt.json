@@ -1,0 +1,19 @@
+{
+  "direction": "LONG",
+  "entry_price": 0.33002,
+  "sl_price": 0.3267,
+  "tp1_price": 0.3311,
+  "tp2_price": 0.3381,
+  "total_qty": 648.0,
+  "remaining_qty": 648.0,
+  "tp1_hit": false,
+  "realized_pnl": 0.0,
+  "entry_timestamp": "2026-07-07 09:05:00",
+  "entry_ema_fast": 0.3295,
+  "entry_ema_slow": 0.3295,
+  "entry_volume": 849705.0,
+  "entry_volume_ma": 432132.65,
+  "is_recovery": false,
+  "recovery_chain_id": null,
+  "trade_id": null
+}
