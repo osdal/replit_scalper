@@ -3,6 +3,9 @@ import { drizzle } from "drizzle-orm/libsql";
 import * as schema from "./schema";
 import path from "path";
 import fs from "fs";
+import { config } from "dotenv";
+
+config({ path: path.resolve(__dirname, "../../../../.env") });
 
 const dbPath = process.env.DATABASE_PATH 
   ? path.resolve(process.env.DATABASE_PATH)
