@@ -1,0 +1,62 @@
+2026-06-30 10:15:11 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-06-30 10:15:11 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-06-30 10:15:13 [LIVE XRPUSDT] INFO [LIVE] Market order placed | SHORT XRPUSDT qty=89.6 entry≈1.0471
+2026-06-30 10:15:13 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0584 qty=89.5
+2026-06-30 10:15:14 [LIVE XRPUSDT] INFO Position opened | SHORT | entry=1.0471 SL=1.0584 TP1=1.0448 TP2=1.0438 qty=89.6 | indicators: ema_fast=1.0484 ema_slow=1.0484 volume=1357502.5 volume_ma=551460.64
+2026-06-30 11:20:11 [LIVE XRPUSDT] INFO TP1 hit | price=1.0446 closed_qty=26.880000 remaining_qty=62.720000 pnl=0.0672 | SL moved to breakeven: 1.0584 → 1.0471 | entry_ema_fast=1.0484 entry_ema_slow=1.0484 entry_volume=1357502.5 entry_volume_ma=551460.64
+2026-06-30 11:20:12 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0471 qty=62.7
+2026-06-30 11:20:12 [LIVE XRPUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=1.0471
+2026-06-30 12:49:46 [LIVE XRPUSDT] INFO [STATE] Restored from file | SHORT entry=1.0471 SL=1.0471 TP1=1.0448 TP2=1.0438 qty=62.72 tp1_hit=True
+2026-06-30 12:49:50 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0471 qty=62.7
+2026-06-30 12:50:03 [LIVE XRPUSDT] INFO TP2 hit | price=1.0429 qty=62.720000 pnl=0.2634 total_pnl=0.3306 | entry_ema_fast=1.0484 entry_ema_slow=1.0484 entry_volume=1357502.5 entry_volume_ma=551460.64
+2026-06-30 12:57:56 [LIVE XRPUSDT] INFO [SYNC] Restored from exchange | SHORT XRPUSDT qty=0.3 entry=1.0471000000000001 SL=1.0586 TP1=1.0450 TP2=1.0440 (levels recalculated from config)
+2026-06-30 12:58:00 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0586 qty=0.2
+2026-06-30 13:00:09 [LIVE XRPUSDT] INFO TP1 hit | price=1.0434 closed_qty=0.090000 remaining_qty=0.210000 pnl=0.0003 | SL moved to breakeven: 1.0586 → 1.0471000000000001 | entry_ema_fast=0.0 entry_ema_slow=0.0 entry_volume=0.0 entry_volume_ma=0.0
+2026-06-30 13:00:11 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0471 qty=0.2
+2026-06-30 13:00:11 [LIVE XRPUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=1.0471000000000001
+2026-06-30 13:05:08 [LIVE XRPUSDT] INFO TP2 hit | price=1.0431 qty=0.210000 pnl=0.0008 total_pnl=0.0012 | entry_ema_fast=0.0 entry_ema_slow=0.0 entry_volume=0.0 entry_volume_ma=0.0
+2026-06-30 13:12:02 [LIVE XRPUSDT] INFO [SYNC] Restored from exchange | SHORT XRPUSDT qty=0.1 entry=1.0471000000000001 SL=1.0586 TP1=1.0450 TP2=1.0440 (levels recalculated from config)
+2026-06-30 13:12:05 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.0586 qty=0.1
+2026-06-30 13:15:07 [LIVE XRPUSDT] INFO TP1 hit | price=1.0423 closed_qty=0.030000 remaining_qty=0.070000 pnl=0.0001 | SL moved to breakeven: 1.0586 → 1.0471000000000001 | entry_ema_fast=0.0 entry_ema_slow=0.0 entry_volume=0.0 entry_volume_ma=0.0
+2026-06-30 13:16:28 [LIVE XRPUSDT] INFO [STATE] Restored from file | SHORT entry=1.0471000000000001 SL=1.0471000000000001 TP1=1.045 TP2=1.044 qty=0.07 tp1_hit=True
+2026-06-30 13:19:06 [LIVE XRPUSDT] INFO [STATE] Restored from file | SHORT entry=1.0471000000000001 SL=1.0471000000000001 TP1=1.045 TP2=1.044 qty=0.07 tp1_hit=True
+2026-07-04 02:20:10 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-07-04 02:20:10 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-04 02:20:11 [LIVE XRPUSDT] INFO [LIVE] Market order placed | LONG XRPUSDT qty=59.4 entry≈1.1321
+2026-07-04 02:20:12 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1191 qty=59.4
+2026-07-04 02:20:12 [LIVE XRPUSDT] INFO Position opened | LONG | entry=1.1321 SL=1.1191 TP1=1.1338 TP2=1.1349 qty=59.4 | indicators: ema_fast=1.1299 ema_slow=1.1298 volume=1491615.7 volume_ma=1025517.43
+2026-07-04 02:30:04 [LIVE XRPUSDT] INFO TP1 hit | price=1.1343 closed_qty=17.820000 remaining_qty=41.580000 pnl=0.0392 | SL moved to breakeven: 1.1191 → 1.1321 | entry_ema_fast=1.1299 entry_ema_slow=1.1298 entry_volume=1491615.7 entry_volume_ma=1025517.43
+2026-07-04 02:30:06 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1321 qty=41.5
+2026-07-04 02:30:06 [LIVE XRPUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=1.1321
+2026-07-04 02:40:08 [LIVE XRPUSDT] INFO TP2 hit | price=1.1352 qty=41.580000 pnl=0.1289 total_pnl=0.1681 | entry_ema_fast=1.1299 entry_ema_slow=1.1298 entry_volume=1491615.7 entry_volume_ma=1025517.43
+2026-07-04 11:10:03 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-07-04 11:10:03 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-04 11:10:04 [LIVE XRPUSDT] INFO [LIVE] Market order placed | LONG XRPUSDT qty=57.4 entry≈1.1434
+2026-07-04 11:10:04 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1307 qty=57.4
+2026-07-04 11:10:05 [LIVE XRPUSDT] INFO Position opened | LONG | entry=1.1434 SL=1.1307 TP1=1.1456 TP2=1.1467 qty=57.4 | indicators: ema_fast=1.1381 ema_slow=1.1379 volume=1842128.8 volume_ma=1098922.25
+2026-07-04 11:25:04 [LIVE XRPUSDT] INFO TP1 hit | price=1.148 closed_qty=17.220000 remaining_qty=40.180000 pnl=0.0792 | SL moved to breakeven: 1.1307 → 1.1434 | entry_ema_fast=1.1381 entry_ema_slow=1.1379 entry_volume=1842128.8 entry_volume_ma=1098922.25
+2026-07-04 11:25:05 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1434 qty=40.1
+2026-07-04 11:25:05 [LIVE XRPUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=1.1434
+2026-07-04 11:45:11 [LIVE XRPUSDT] WARNING TP1 hit (SL level) | price=1.142 qty=40.180000 pnl=-0.0563 total_pnl=0.0230 | entry_ema_fast=1.1381 entry_ema_slow=1.1379 entry_volume=1842128.8 entry_volume_ma=1098922.25
+2026-07-06 15:00:08 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-07-06 15:00:08 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-06 15:00:10 [LIVE XRPUSDT] INFO [LIVE] Market order placed | SHORT XRPUSDT qty=65.1 entry≈1.1337
+2026-07-06 15:00:10 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.147 qty=65.0
+2026-07-06 15:00:11 [LIVE XRPUSDT] INFO Position opened | SHORT | entry=1.1337 SL=1.147 TP1=1.1322 TP2=1.1311 qty=65.1 | indicators: ema_fast=1.1401 ema_slow=1.1408 volume=5655458.7 volume_ma=937242.73
+2026-07-06 15:01:38 [LIVE XRPUSDT] INFO [STATE] Restored from file | SHORT entry=1.1337 SL=1.147 TP1=1.1322 TP2=1.1311 qty=65.1 tp1_hit=False
+2026-07-07 00:10:15 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-07-07 00:10:15 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-07 00:10:17 [LIVE XRPUSDT] INFO [LIVE] Market order placed | LONG XRPUSDT qty=181.4 entry≈1.1619
+2026-07-07 00:10:17 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1449 qty=181.4
+2026-07-07 00:10:18 [LIVE XRPUSDT] INFO Position opened | LONG | entry=1.1619 SL=1.1449 TP1=1.1599 TP2=1.1611 qty=181.4 | indicators: ema_fast=1.1467 ema_slow=1.1448 volume=10478038.4 volume_ma=1971025.46
+2026-07-07 00:30:13 [LIVE XRPUSDT] WARNING SL hit (SL level) | price=1.1518 qty=181.400000 pnl=-1.8321 total_pnl=-1.8321 | entry_ema_fast=1.1467 entry_ema_slow=1.1448 entry_volume=10478038.4 entry_volume_ma=1971025.46
+2026-07-07 00:30:15 [LIVE XRPUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'XRPUSDT', 'pnl': -1.8321399999999997}
+2026-07-07 00:30:15 [LIVE XRPUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 11}
+2026-07-07 03:35:08 [LIVE XRPUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=XRPUSDT
+2026-07-07 03:35:08 [LIVE XRPUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-07 03:35:09 [LIVE XRPUSDT] INFO [LIVE] Market order placed | LONG XRPUSDT qty=182.3 entry≈1.1497
+2026-07-07 03:35:09 [LIVE XRPUSDT] INFO [LIVE] Stop-loss placed | stopPrice=1.1372 qty=182.3
+2026-07-07 03:35:10 [LIVE XRPUSDT] INFO Position opened | LONG | entry=1.1497 SL=1.1372 TP1=1.1521 TP2=1.1532 qty=182.3 | indicators: ema_fast=1.1474 ema_slow=1.1472 volume=1364567.7 volume_ma=855059.39
+2026-07-07 05:25:02 [LIVE XRPUSDT] WARNING SL hit (SL level) | price=1.1365 qty=182.300000 pnl=-2.4064 total_pnl=-2.4064 | entry_ema_fast=1.1474 entry_ema_slow=1.1472 entry_volume=1364567.7 entry_volume_ma=855059.39
+2026-07-07 05:25:04 [LIVE XRPUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'XRPUSDT', 'pnl': -2.406359999999978}
+2026-07-07 05:25:04 [LIVE XRPUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 12}

@@ -1,0 +1,20 @@
+2026-07-04 06:40:11 [LIVE BTCUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=BTCUSDT
+2026-07-04 06:40:12 [LIVE BTCUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-04 06:40:13 [LIVE BTCUSDT] INFO [LIVE] Market order placed | LONG BTCUSDT qty=0.007 entry≈62688.9
+2026-07-04 06:40:13 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62215.8 qty=0.007
+2026-07-04 06:40:14 [LIVE BTCUSDT] INFO Position opened | LONG | entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 | indicators: ema_fast=62536.1411 ema_slow=62534.1497 volume=585.92 volume_ma=200.55
+2026-07-04 15:15:57 [LIVE BTCUSDT] INFO [STATE] Restored from file | LONG entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 tp1_hit=False
+2026-07-04 15:16:02 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62215.8 qty=0.007
+2026-07-04 16:04:14 [LIVE BTCUSDT] INFO [STATE] Restored from file | LONG entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 tp1_hit=False
+2026-07-04 16:04:16 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-04 16:04:19 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62215.8 qty=0.007
+2026-07-04 16:04:21 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-04 16:05:55 [LIVE BTCUSDT] INFO [STATE] Restored from file | LONG entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 tp1_hit=False
+2026-07-04 16:05:57 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-04 16:06:00 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62215.8 qty=0.007
+2026-07-04 16:06:02 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-04 16:12:11 [LIVE BTCUSDT] INFO [STATE] Restored from file | LONG entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 tp1_hit=False
+2026-07-04 16:12:13 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-04 16:12:17 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62215.8 qty=0.007
+2026-07-04 16:12:19 [LIVE BTCUSDT] INFO [LIVE] Stop-loss placed | stopPrice=62062.0 qty=0.007
+2026-07-06 13:20:37 [LIVE BTCUSDT] INFO [STATE] Restored from file | LONG entry=62688.9 SL=62215.7558 TP1=63030.6724 TP2=63720.2174 qty=0.007 tp1_hit=False

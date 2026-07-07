@@ -7,6 +7,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { reloadConfigsFromYaml } from "./routes/bots";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -78,7 +79,7 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 // При старте сбрасываем статус ботов у которых нет реального процесса
-resetStaleRunningBots().then(() => {
+resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
   app.listen(port, (err) => {
     if (err) {
       logger.error({ err }, "Error listening on port");

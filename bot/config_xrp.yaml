@@ -1,7 +1,7 @@
 symbol: XRPUSDT
 timeframe: 5m
-leverage: 10
-risk_pct: 1
+leverage: 50
+risk_pct: 3
 sl_pct: 1.1
 tp1_pct: 0.2
 tp1_close_pct: 30

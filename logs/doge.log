@@ -1,0 +1,92 @@
+2026-06-30 06:35:03 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-06-30 06:35:03 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': 4, 'debtAmount': 0.502800000000002, 'bonusPct': 20, 'enabled': True}
+2026-06-30 06:35:04 [LIVE DOGEUSDT] INFO [RECOVERY] Claimed chain #4 | debt=0.5028 bonus=20% max_pct=50.0% recovery_qty=54.582633
+2026-06-30 08:05:10 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-06-30 08:05:10 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': 3, 'debtAmount': 5.41250000000003, 'bonusPct': 20, 'enabled': True}
+2026-06-30 08:05:11 [LIVE DOGEUSDT] INFO [RECOVERY] Claimed chain #3 | debt=5.4125 bonus=20% max_pct=50.0% recovery_qty=54.662878
+2026-06-30 08:44:35 [LIVE DOGEUSDT] INFO [SYNC] Restored from exchange | SHORT DOGEUSDT qty=1.0 entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 (levels recalculated from config)
+2026-06-30 08:44:39 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 08:52:42 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 08:52:46 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 12:49:48 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 12:49:53 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 12:56:52 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 12:56:57 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 13:12:03 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 13:12:07 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 13:16:28 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 13:16:33 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0731 qty=1.0
+2026-06-30 13:19:07 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07245 SL=0.0731 TP1=0.0722 TP2=0.0711 qty=1.0 tp1_hit=False
+2026-06-30 14:20:11 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-06-30 14:20:11 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-06-30 14:20:12 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | SHORT DOGEUSDT qty=1681.0 entry≈0.07223
+2026-06-30 14:20:13 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0729 qty=1681.0
+2026-06-30 14:20:13 [LIVE DOGEUSDT] INFO Position opened | SHORT | entry=0.07223 SL=0.0729 TP1=0.072 TP2=0.0709 qty=1681.0 | indicators: ema_fast=0.0724 ema_slow=0.0724 volume=17679480.0 volume_ma=6932474.9
+2026-06-30 14:55:07 [LIVE DOGEUSDT] INFO TP1 hit | price=0.07191 closed_qty=1008.600000 remaining_qty=672.400000 pnl=0.3228 | SL moved to breakeven: 0.0729 → 0.07223 | entry_ema_fast=0.0724 entry_ema_slow=0.0724 entry_volume=17679480.0 entry_volume_ma=6932474.9
+2026-06-30 14:55:09 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.07223 qty=672.0
+2026-06-30 14:55:09 [LIVE DOGEUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=0.07223
+2026-06-30 15:20:11 [LIVE DOGEUSDT] INFO TP2 hit | price=0.07055 qty=1.000000 pnl=0.0017 total_pnl=0.3244 | entry_ema_fast=0.0724 entry_ema_slow=0.0724 entry_volume=17679480.0 entry_volume_ma=6932474.9
+2026-06-30 17:09:30 [LIVE DOGEUSDT] INFO [SYNC] Restored from exchange | SHORT DOGEUSDT qty=1.0 entry=0.07223 SL=0.0728 TP1=0.0720 TP2=0.0709 (levels recalculated from config)
+2026-06-30 17:09:34 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0728 qty=1.0
+2026-06-30 17:10:15 [LIVE DOGEUSDT] INFO TP1 hit | price=0.07107 closed_qty=0.600000 remaining_qty=0.400000 pnl=0.0007 | SL moved to breakeven: 0.0728 → 0.07223 | entry_ema_fast=0.0 entry_ema_slow=0.0 entry_volume=0.0 entry_volume_ma=0.0
+2026-06-30 18:49:15 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07223 SL=0.07223 TP1=0.072 TP2=0.0709 qty=0.4 tp1_hit=True
+2026-07-03 11:45:09 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-03 11:45:09 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-03 11:45:11 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=1164.0 entry≈0.07546
+2026-07-03 11:45:11 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0749 qty=1164.0
+2026-07-03 11:45:12 [LIVE DOGEUSDT] INFO Position opened | LONG | entry=0.07546 SL=0.0749 TP1=0.0757 TP2=0.0769 qty=1164.0 | indicators: ema_fast=0.0752 ema_slow=0.0752 volume=39164951.0 volume_ma=12284249.45
+2026-07-03 11:45:12 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-03 11:45:12 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-03 11:45:14 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=1163.0 entry≈0.07545
+2026-07-03 11:45:14 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0749 qty=1163.0
+2026-07-03 11:45:15 [LIVE DOGEUSDT] INFO Position opened | LONG | entry=0.07545 SL=0.0749 TP1=0.0757 TP2=0.0769 qty=1163.0 | indicators: ema_fast=0.0752 ema_slow=0.0752 volume=39164951.0 volume_ma=12485266.3
+2026-07-03 11:55:18 [LIVE DOGEUSDT] WARNING SL hit (SL level) | price=0.07491 qty=1163.000000 pnl=-0.6280 total_pnl=-0.6280 | entry_ema_fast=0.0752 entry_ema_slow=0.0752 entry_volume=39164951.0 entry_volume_ma=12485266.3
+2026-07-03 11:55:19 [LIVE DOGEUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'DOGEUSDT', 'pnl': -0.6280199999999986}
+2026-07-03 11:55:19 [LIVE DOGEUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 5}
+2026-07-03 12:00:02 [LIVE DOGEUSDT] WARNING SL hit (SL level) | price=0.07487 qty=1164.000000 pnl=-0.6868 total_pnl=-0.6868 | entry_ema_fast=0.0752 entry_ema_slow=0.0752 entry_volume=39164951.0 entry_volume_ma=12284249.45
+2026-07-03 12:00:04 [LIVE DOGEUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'DOGEUSDT', 'pnl': -0.6867599999999923}
+2026-07-03 12:00:04 [LIVE DOGEUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 6}
+2026-07-03 13:15:11 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-03 13:15:13 [LIVE DOGEUSDT] ERROR [RECOVERY] claim error: Cannot connect to host localhost:5000 ssl:default [Удаленный компьютер отклонил это сетевое подключение]
+2026-07-03 13:15:14 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=1147.0 entry≈0.07512
+2026-07-03 13:15:15 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0745 qty=1147.0
+2026-07-03 13:15:15 [LIVE DOGEUSDT] INFO Position opened | LONG | entry=0.07512 SL=0.0745 TP1=0.0754 TP2=0.0765 qty=1147.0 | indicators: ema_fast=0.075 ema_slow=0.075 volume=16723673.0 volume_ma=11503578.4
+2026-07-03 13:15:17 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-03 13:15:20 [LIVE DOGEUSDT] ERROR [RECOVERY] claim error: Cannot connect to host localhost:5000 ssl:default [Удаленный компьютер отклонил это сетевое подключение]
+2026-07-03 13:15:21 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=1145.0 entry≈0.07512
+2026-07-03 13:15:21 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0745 qty=1145.0
+2026-07-03 13:15:22 [LIVE DOGEUSDT] INFO Position opened | LONG | entry=0.07512 SL=0.0745 TP1=0.0754 TP2=0.0765 qty=1145.0 | indicators: ema_fast=0.075 ema_slow=0.075 volume=16723673.0 volume_ma=11555465.4
+2026-07-03 13:27:20 [LIVE DOGEUSDT] INFO [STATE] Restored from file | LONG entry=0.07512 SL=0.0745 TP1=0.0754 TP2=0.0765 qty=1145.0 tp1_hit=False
+2026-07-03 13:27:25 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0745 qty=1145.0
+2026-07-03 13:45:06 [LIVE DOGEUSDT] INFO TP1 hit | price=0.07548 closed_qty=687.000000 remaining_qty=458.000000 pnl=0.2473 | SL moved to breakeven: 0.0745 → 0.07512 | entry_ema_fast=0.075 entry_ema_slow=0.075 entry_volume=16723673.0 entry_volume_ma=11555465.4
+2026-07-03 13:45:08 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.07512 qty=458.0
+2026-07-03 13:45:08 [LIVE DOGEUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=0.07512
+2026-07-03 13:45:08 [LIVE DOGEUSDT] INFO TP1 hit | price=0.07548 closed_qty=687.000000 remaining_qty=458.000000 pnl=0.2473 | SL moved to breakeven: 0.0745 → 0.07512 | entry_ema_fast=0.075 entry_ema_slow=0.075 entry_volume=16723673.0 entry_volume_ma=11555465.4
+2026-07-03 13:45:10 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.07512 qty=458.0
+2026-07-03 13:45:10 [LIVE DOGEUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=0.07512
+2026-07-03 13:45:12 [LIVE DOGEUSDT] INFO TP1 hit | price=0.07548 closed_qty=688.200000 remaining_qty=458.800000 pnl=0.2478 | SL moved to breakeven: 0.0745 → 0.07512 | entry_ema_fast=0.075 entry_ema_slow=0.075 entry_volume=16723673.0 entry_volume_ma=11503578.4
+2026-07-03 13:45:14 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.07512 qty=458.0
+2026-07-03 13:45:14 [LIVE DOGEUSDT] INFO [LIVE] SL moved to breakeven | stopPrice=0.07512
+2026-07-04 03:10:05 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-04 03:10:05 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-04 03:10:07 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=1121.0 entry≈0.07764
+2026-07-04 03:10:07 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.077 qty=1121.0
+2026-07-04 03:10:08 [LIVE DOGEUSDT] INFO Position opened | LONG | entry=0.07764 SL=0.077 TP1=0.0779 TP2=0.079 qty=1121.0 | indicators: ema_fast=0.0775 ema_slow=0.0775 volume=27379908.0 volume_ma=12642206.0
+2026-07-04 04:10:06 [LIVE DOGEUSDT] WARNING SL hit (SL level) | price=0.07694 qty=1121.000000 pnl=-0.7847 total_pnl=-0.7847 | entry_ema_fast=0.0775 entry_ema_slow=0.0775 entry_volume=27379908.0 entry_volume_ma=12642206.0
+2026-07-04 04:10:08 [LIVE DOGEUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'DOGEUSDT', 'pnl': -0.784700000000007}
+2026-07-04 04:10:08 [LIVE DOGEUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'new-chain', 'chainId': 7}
+2026-07-04 06:00:09 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-04 06:00:09 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': 8, 'debtAmount': 0.5247000000000012, 'bonusPct': 20, 'enabled': True}
+2026-07-04 06:00:09 [LIVE DOGEUSDT] INFO [RECOVERY] Claimed chain #8 | debt=0.5247 bonus=20% max_pct=50.0% recovery_qty=470.538063
+2026-07-04 06:00:11 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | LONG DOGEUSDT qty=470.0 entry≈0.077 [RECOVERY]
+2026-07-04 06:00:11 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0763 qty=470.0
+2026-07-04 06:00:11 [LIVE DOGEUSDT] INFO Position opened [RECOVERY] | LONG | entry=0.077 SL=0.0763 TP1=0.0772 TP2=0.0784 qty=470.0 | indicators: ema_fast=0.0769 ema_slow=0.0768 volume=19612896.0 volume_ma=13718528.5
+2026-07-04 06:40:11 [LIVE DOGEUSDT] INFO TP1 hit [RECOVERY] | price=0.0772 qty=470.000000 pnl=0.0940 total_pnl=0.0940 | entry_ema_fast=0.0769 entry_ema_slow=0.0768 entry_volume=19612896.0 entry_volume_ma=13718528.5
+2026-07-04 06:40:13 [LIVE DOGEUSDT] INFO [RECOVERY] report: POST http://localhost:5000/api/recovery/report payload={'symbol': 'DOGEUSDT', 'pnl': 0.09400000000000269, 'chainId': 8}
+2026-07-04 06:40:13 [LIVE DOGEUSDT] INFO [RECOVERY] report: success data={'success': True, 'action': 'closed'}
+2026-07-06 15:00:13 [LIVE DOGEUSDT] INFO [RECOVERY] claim: POST http://localhost:5000/api/recovery/claim symbol=DOGEUSDT
+2026-07-06 15:00:13 [LIVE DOGEUSDT] INFO [RECOVERY] claim: response status=200 data={'chainId': None, 'debtAmount': 0, 'enabled': True}
+2026-07-06 15:00:15 [LIVE DOGEUSDT] INFO [LIVE] Market order placed | SHORT DOGEUSDT qty=1245.0 entry≈0.07665
+2026-07-06 15:00:15 [LIVE DOGEUSDT] INFO [LIVE] Stop-loss placed | stopPrice=0.0773 qty=1245.0
+2026-07-06 15:00:20 [LIVE DOGEUSDT] INFO Position opened | SHORT | entry=0.07665 SL=0.0773 TP1=0.0765 TP2=0.0753 qty=1245.0 | indicators: ema_fast=0.0771 ema_slow=0.0771 volume=39952208.0 volume_ma=10667744.2
+2026-07-06 15:39:24 [LIVE DOGEUSDT] INFO [STATE] Restored from file | SHORT entry=0.07665 SL=0.0773 TP1=0.0765 TP2=0.0753 qty=1245.0 tp1_hit=False

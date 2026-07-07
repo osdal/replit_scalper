@@ -2,7 +2,7 @@ auto_mode: true
 backtest_end: '2026-06-08'
 backtest_start: '2026-05-01'
 ema_fast: 20
-ema_slow: 55
+ema_slow: 54
 htf_ema_fast: 9
 htf_ema_slow: 21
 htf_enabled: true
@@ -12,11 +12,11 @@ log_file: logs/bot.log
 mode: live
 paper_balance: 1000.0
 risk_pct: 5.0
-sl_pct: 0.75
+sl_pct: 0.6000000000000001
 symbol: BTCUSDT
 timeframe: 5m
-tp1_close_pct: 70
-tp1_pct: 0.55
-tp2_pct: 1.65
+tp1_close_pct: 30
+tp1_pct: 0.30000000000000004
+tp2_pct: 0.4
 volume_ma_period: 20
 volume_multiplier: 1.9
