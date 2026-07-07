@@ -4,8 +4,12 @@ import * as schema from "./schema";
 import path from "path";
 import fs from "fs";
 import { config } from "dotenv";
+import { fileURLToPath } from "url";
 
-config({ path: path.resolve(__dirname, "../../../../.env") });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+config({ path: path.resolve(__dirname, "../../../.env") });
 
 const dbPath = process.env.DATABASE_PATH 
   ? path.resolve(process.env.DATABASE_PATH)
