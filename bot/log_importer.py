@@ -27,26 +27,24 @@ RE_OPEN = re.compile(
 
 RE_TP1 = re.compile(
     RE_TIMESTAMP + r".*?" + RE_SYMBOL + r".*?TP1 hit \| price=([\d.]+) "
-    r"closed_qty=([\d.]+) remaining_qty=([\d.]+) pnl=([-\d.]+)"
+    r"closed_qty=([\d.]+) remaining_qty=([\d.]+) pnl=([\d.-]+)"
 )
 
 RE_TP2 = re.compile(
     RE_TIMESTAMP + r".*?" + RE_SYMBOL + r".*?TP2 hit \| price=([\d.]+) "
-    r"qty=([\d.]+) pnl=([-\d.]+) total_pnl=([-\d.]+)"
+    r"qty=([\d.]+) pnl=([\d.-]+) total_pnl=([\d.-]+)"
 )
 
 RE_SL = re.compile(
     RE_TIMESTAMP + r".*?" + RE_SYMBOL + r".*?SL hit.*?\| price=([\d.]+) "
-    r"qty=([\d.]+) pnl=([-\d.]+)"
+    r"qty=([\d.]+) pnl=([\d.-]+)"
 )
-
-RE_MODE_LINE = re.compile(RE_TIMESTAMP + r".*?" + RE_MODE + r".*?" + RE_SYMBOL)
 
 
 def parse_log(filepath: str) -> list[dict]:
     """Парсит один лог файл и возвращает список сделок."""
     trades = []
-    open_trades: dict[str, dict] = {}  # symbol -> trade
+    open_trades: dict[str, dict] = {}  # "symbol_entry_time" -> trade
 
     # Определяем mode из имени файла
     mode = "live" if "eth" in filepath.lower() else "paper"
@@ -59,18 +57,13 @@ def parse_log(filepath: str) -> list[dict]:
         return []
 
     for line in lines:
-        # Определяем mode из строки
-        m_mode = RE_MODE_LINE.search(line)
-        if m_mode:
-            mode = m_mode.group(2).lower()
-            symbol = m_mode.group(3)
-
         # Position opened
         m = RE_OPEN.search(line)
         if m:
             ts, symbol, direction, entry, sl, tp1, tp2, qty = m.group(1,2,3,4,5,6,7,8)
             ema_fast, ema_slow, volume, volume_ma = m.group(9,10,11,12)
-            open_trades[symbol] = {
+            key = f"{symbol}_{ts.replace(' ', 'T')}"
+            open_trades[key] = {
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": float(entry),
@@ -90,12 +83,15 @@ def parse_log(filepath: str) -> list[dict]:
             }
             continue
 
-        # TP1 hit
+        # TP1 hit - ищем по symbol, берём последнюю открытую позицию
         m = RE_TP1.search(line)
         if m:
             ts, symbol, price, closed_qty, remaining_qty, pnl = m.group(1,2,3,4,5,6)
-            if symbol in open_trades:
-                t = open_trades[symbol]
+            # Находим ВСЕ открытые позиции по symbol и берём последнюю (по времени)
+            matching_keys = [k for k in open_trades.keys() if k.startswith(f"{symbol}_")]
+            if matching_keys:
+                key = sorted(matching_keys)[-1]  # последняя по времени
+                t = open_trades[key]
                 t["tp1_hit"] = True
                 t["pnl"] = float(pnl)
                 t["qty"] = float(closed_qty)
@@ -108,30 +104,34 @@ def parse_log(filepath: str) -> list[dict]:
                 t["pnl"] = 0.0
             continue
 
-        # TP2 hit
+        # TP2 hit - ищем по symbol
         m = RE_TP2.search(line)
         if m:
             ts, symbol, price, qty, pnl, total_pnl = m.group(1,2,3,4,5,6)
-            if symbol in open_trades:
-                t = open_trades.pop(symbol)
+            matching_keys = [k for k in open_trades.keys() if k.startswith(f"{symbol}_")]
+            if matching_keys:
+                key = sorted(matching_keys)[-1]
+                t = open_trades.pop(key)
                 trades.append({**t, "exit_price": float(price), "exit_time": ts.replace(" ", "T"),
                                "exit_reason": "TP2", "is_open": False, "pnl": float(pnl),
                                "qty": float(qty)})
             continue
 
-        # SL hit
+        # SL hit - ищем по symbol
         m = RE_SL.search(line)
         if m:
             ts, symbol, price, qty, pnl = m.group(1,2,3,4,5)
-            if symbol in open_trades:
-                t = open_trades.pop(symbol)
+            matching_keys = [k for k in open_trades.keys() if k.startswith(f"{symbol}_")]
+            if matching_keys:
+                key = sorted(matching_keys)[-1]
+                t = open_trades.pop(key)
                 trades.append({**t, "exit_price": float(price), "exit_time": ts.replace(" ", "T"),
                                "exit_reason": "SL", "is_open": False, "pnl": float(pnl),
                                "qty": float(qty)})
             continue
 
     # Добавляем незакрытые позиции как открытые сделки
-    for symbol, t in open_trades.items():
+    for key, t in open_trades.items():
         trades.append(t)
 
     return trades

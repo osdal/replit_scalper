@@ -20,6 +20,13 @@ Write-Host ""
 
 # 1. Init database
 Write-Host "[1/5] Initializing database..."
+
+# Backup existing database
+if (Test-Path "$scriptDir\data\bot.db") {
+    Copy-Item -Path "$scriptDir\data\bot.db" -Destination "$scriptDir\data\bot.db.bak" -Force
+    Write-Host "      Backed up data/bot.db"
+}
+
 pnpm run init-db
 if ($LASTEXITCODE -ne 0) {
     Write-Error "[FAIL] init-db error!"
@@ -32,6 +39,21 @@ Write-Host ""
 Write-Host "[2/5] Starting API server..."
 Start-Process -FilePath "cmd" -ArgumentList "/c pnpm --filter @workspace/api-server run dev" -WindowStyle Hidden -WorkingDirectory $scriptDir
 Start-Sleep -Seconds 2
+
+# Smoke check API
+$apiOK = $false
+for ($i = 0; $i -lt 5; $i++) {
+    try {
+        Invoke-RestMethod "http://localhost:5000/api/bots" -ErrorAction Stop | Out-Null
+        $apiOK = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+}
+if (-not $apiOK) {
+    Write-Warning "      API health check failed"
+}
 Write-Host "      OK - http://localhost:5000"
 Write-Host ""
 
@@ -39,6 +61,21 @@ Write-Host ""
 Write-Host "[3/5] Starting Dashboard..."
 Start-Process -FilePath "cmd" -ArgumentList "/c pnpm --filter @workspace/dashboard run dev" -WindowStyle Hidden -WorkingDirectory $scriptDir
 Start-Sleep -Seconds 2
+
+# Smoke check Dashboard
+$dbOK = $false
+for ($i = 0; $i -lt 5; $i++) {
+    try {
+        Invoke-WebRequest "http://localhost:5173" -UseBasicParsing -ErrorAction Stop | Out-Null
+        $dbOK = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+}
+if (-not $dbOK) {
+    Write-Warning "      Dashboard health check failed"
+}
 Write-Host "      OK - http://localhost:5173"
 Write-Host ""
 
