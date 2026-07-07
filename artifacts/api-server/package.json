@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx --env-file=.env src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "init-db": "tsx --env-file=.env src/init-db.ts"
+    "init-db": "tsx src/init-db.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",
