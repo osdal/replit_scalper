@@ -10,7 +10,9 @@ import yaml from "js-yaml";
 const execAsync = promisify(exec);
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
+const BOT_DIR = process.env.BOT_DIR 
+  ? path.resolve(process.env.BOT_DIR.startsWith("./") ? path.resolve("../../" + process.env.BOT_DIR.substring(2)) : process.env.BOT_DIR)
+  : path.resolve("../../bot");
 
 /**
  * Обновляет config_<symbol>.yaml через отдельный Python-процесс.
