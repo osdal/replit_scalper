@@ -320,8 +320,8 @@ async def _run_live_or_paper(
             new_row = pd.DataFrame([candle]).set_index("open_time")
             df_buffer = pd.concat([df_buffer, new_row]).tail(500)
             df_buffer = calculate_indicators(df_buffer, cfg)
-
             current_price = float(candle["close"])
+            candle_time_ms = int(candle.name.timestamp() * 1000)
             candle_count[0] += 1
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
 
@@ -379,7 +379,7 @@ async def _run_live_or_paper(
                                 events.warning(
                                     f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
                                 )
-                                pnl = await tracker.apply_hit_async(hit_type, current_price)
+                                pnl = await tracker.apply_hit_async(hit_type, current_price, candle_time_ms)
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
@@ -407,7 +407,7 @@ async def _run_live_or_paper(
                     if hit == "TP1" and not pos.is_recovery:
                         # TP1: биржа закрыла часть, бот только обновляет стейт и переносит SL
                         events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
-                        pnl = await tracker.apply_hit_async(hit, current_price)
+                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         new_sl = tracker.position.sl_price if tracker.position else 'N/A'
                         events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
                         await order_mgr.move_sl_to_breakeven(
@@ -418,7 +418,7 @@ async def _run_live_or_paper(
                     elif hit == "TP2":
                         # TP2: биржа закрыла остаток, бот фиксирует результат
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
-                        pnl = await tracker.apply_hit_async(hit, current_price)
+                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"TP2_APPLY | pnl={pnl}")
                         # Отменяем оставшиеся ордера (SL если остался)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
@@ -427,7 +427,7 @@ async def _run_live_or_paper(
                     else:
                         # SL: биржа закрыла позицию
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
-                        pnl = await tracker.apply_hit_async(hit, current_price)
+                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"SL_APPLY | pnl={pnl}")
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
