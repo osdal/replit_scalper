@@ -171,10 +171,26 @@ class PositionTracker:
             return
         try:
             import datetime
+            # Try to get real PnL from Binance to match position history
+            real_pnl = None
+            if self.order_mgr and self.position and self.position.entry_timestamp:
+                try:
+                    if isinstance(self.position.entry_timestamp, str):
+                        entry_time_ms = int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
+                    else:
+                        entry_time_ms = int(self.position.entry_timestamp.timestamp() * 1000)
+                    if entry_time_ms > 0:
+                        exit_time_ms = int(__import__("time").time() * 1000)
+                        real_pnl = await self.order_mgr.get_realized_pnl(
+                            self.cfg.symbol, entry_time_ms, exit_time_ms,
+                        )
+                except Exception:
+                    pass
+            pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
             success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
-                "pnl":         pnl,
+                "pnl":         pnl_to_use,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -189,7 +205,7 @@ class PositionTracker:
                     "entry_price": p.entry_price if p else exit_price,
                     "exit_price":  exit_price,
                     "qty":         qty,
-                    "pnl":         pnl,
+                    "pnl":         pnl_to_use,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -207,10 +223,26 @@ class PositionTracker:
             return
         try:
             import datetime
+            # Try to get real PnL from Binance to match position history
+            real_pnl = None
+            if self.order_mgr and self.position and self.position.entry_timestamp:
+                try:
+                    if isinstance(self.position.entry_timestamp, str):
+                        entry_time_ms = int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
+                    else:
+                        entry_time_ms = int(self.position.entry_timestamp.timestamp() * 1000)
+                    if entry_time_ms > 0:
+                        exit_time_ms = int(__import__("time").time() * 1000)
+                        real_pnl = await self.order_mgr.get_realized_pnl(
+                            self.cfg.symbol, entry_time_ms, exit_time_ms,
+                        )
+                except Exception:
+                    pass
+            pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
             success = await self.reporter.patch_trade(trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
-                "pnl":         pnl,
+                "pnl":         pnl_to_use,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -225,7 +257,7 @@ class PositionTracker:
                     "entry_price": p.entry_price if p else exit_price,
                     "exit_price":  exit_price,
                     "qty":         qty,
-                    "pnl":         pnl,
+                    "pnl":         pnl_to_use,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -399,7 +431,7 @@ class PositionTracker:
 
         return 0.0, None
 
-    async def apply_hit_async(self, hit: str, close_price: float) -> float:
+    async def apply_hit_async(self, hit: str, close_price: float, candle_time_ms: int) -> float:
         """Применяет hit и репортит в БД."""
         p = self.position
         is_recovery_tp1_full_close = hit == "TP1" and p and p.is_recovery
@@ -428,7 +460,7 @@ class PositionTracker:
 
         if is_recovery_tp1_full_close:
             await self._report_close(close_price, remaining_before, total_trade_pnl, "TP1")
-            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before)
+            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
         elif hit == "TP1":
             # TP1 — частичное закрытие. В дашборде ничего не меняется,
             # но учёт PnL ведётся в трекере (realized_pnl), SL переносится в безубыток.
@@ -437,19 +469,21 @@ class PositionTracker:
             exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
             if trade_id_before:
                 await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, exit_reason)
-            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before)
+            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
 
         return total_trade_pnl
 
-    async def _sync_pnl_from_exchange(self, entry_time_ms: int, trade_id: Optional[int]) -> None:
+    async def _sync_pnl_from_exchange(self, entry_time_ms: int, trade_id: Optional[int], exit_time_ms: Optional[int] = None) -> None:
         """
         Синхронизирует реальный PnL с биржи для закрытой сделки.
         Запрашивает userTrades за период сделки и обновляет запись в БД.
+        Если exit_time_ms не передан, используется текущее время.
         """
         if not self.order_mgr or not trade_id or entry_time_ms <= 0:
             return
         try:
-            exit_time_ms = int(__import__("time").time() * 1000)
+            if exit_time_ms is None:
+                exit_time_ms = int(__import__("time").time() * 1000)
             real_pnl = await self.order_mgr.get_realized_pnl(
                 self.cfg.symbol, entry_time_ms, exit_time_ms,
             )
