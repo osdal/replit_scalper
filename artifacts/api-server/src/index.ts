@@ -43,14 +43,20 @@ async function resetStaleRunningBots(): Promise<void> {
     const bots = await db.select().from(botsTable);
     for (const bot of bots) {
       if (!bot.is_running) continue;
-      // Проверяем реально ли запущен процесс
       const configFile = `config_${bot.symbol.replace("USDT", "").toLowerCase()}.yaml`;
       let isAlive = false;
       try {
-        const { stdout } = await execAsync(
-          `wmic process where "name='python.exe'" get commandline /format:csv`
-        );
-        isAlive = stdout.includes(configFile);
+        if (process.platform === "win32") {
+          const { stdout } = await execAsync(
+            `wmic process where "name='python.exe'" get commandline /format:csv`
+          );
+          isAlive = stdout.includes(configFile);
+        } else {
+          const { stdout } = await execAsync(
+            `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
+          );
+          isAlive = stdout.includes(configFile);
+        }
       } catch {}
       if (!isAlive) {
         await db.update(botsTable)
