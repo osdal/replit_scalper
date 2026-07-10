@@ -349,9 +349,27 @@ router.post("/:symbol/stop", async (req, res) => {
 });
 
 export async function reloadConfigsFromYaml(): Promise<void> {
-  const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+  // Resolve BOT_DIR dynamically - check multiple possible locations
+  let resolvedBotDir = BOT_DIR;
+  const possiblePaths = [
+    BOT_DIR,
+    path.join(__dirname, "../../../bot"),
+    path.join(process.cwd(), "bot"),
+    path.join(path.dirname(__dirname), "bot"),
+    path.join(path.dirname(path.dirname(__dirname)), "bot"),
+  ];
+  for (const p of possiblePaths) {
+    try {
+      if (fs.existsSync(p) && fs.readdirSync(p).some((f: string) => /^config_\w+\.yaml$/.test(f))) {
+        resolvedBotDir = p;
+        break;
+      }
+    } catch {}
+  }
+  
+  const configs = fs.readdirSync(resolvedBotDir).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
   for (const file of configs) {
-    const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
+    const raw = yaml.load(fs.readFileSync(path.join(resolvedBotDir, file), "utf8")) as Record<string, unknown>;
     const symbol = (raw.symbol as string).toUpperCase();
     const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     const values = {
