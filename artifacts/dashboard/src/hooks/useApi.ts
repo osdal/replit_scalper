@@ -1,4 +1,11 @@
-const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+let API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+if (typeof window !== "undefined") {
+  const host = window.location.hostname;
+  if (host && host !== "localhost" && host !== "127.0.0.1") {
+    API = `http://${host}:5000/api`;
+  }
+}
 
 async function apiFetch(url: string, options?: RequestInit) {
   const r = await fetch(url, options);
