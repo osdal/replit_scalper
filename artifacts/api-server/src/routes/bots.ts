@@ -12,29 +12,18 @@ const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Resolve BOT_DIR - try multiple possible locations
+// Resolve BOT_DIR - bot is at project root level
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 let BOT_DIR: string;
 if (process.env.BOT_DIR) {
   const envBotDir = process.env.BOT_DIR;
   if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
     BOT_DIR = envBotDir;
   } else {
-    // Try project root + envBotDir, then cwd + envBotDir
-    const projectRoot = path.resolve(__dirname, "../../..");
-    const tryPath1 = path.join(projectRoot, envBotDir);
-    const tryPath2 = path.join(process.cwd(), envBotDir);
-    const tryPath3 = envBotDir; // as-is
-    BOT_DIR = [tryPath1, tryPath2, tryPath3].find(p => fs.existsSync(p)) || tryPath1;
+    BOT_DIR = path.join(PROJECT_ROOT, envBotDir);
   }
 } else {
-  // Try multiple possible locations for bot directory
-  const projectRoot = path.resolve(__dirname, "../../..");
-  const possiblePaths = [
-    path.join(projectRoot, "bot"),
-    path.join(process.cwd(), "bot"),
-    path.join(projectRoot, "artifacts", "api-server", "..", "bot"),
-  ];
-  BOT_DIR = possiblePaths.find(p => fs.existsSync(p)) || path.join(projectRoot, "bot");
+  BOT_DIR = path.join(PROJECT_ROOT, "bot");
 }
 
 const router = Router();
@@ -349,11 +338,11 @@ router.post("/:symbol/stop", async (req, res) => {
 });
 
 export async function reloadConfigsFromYaml(): Promise<void> {
-  // Resolve bot directory dynamically - check multiple possible locations
+  // Resolve bot directory - it's at project root level (../bot from artifacts)
+  const projectRoot = path.resolve(__dirname, "..", "..", "..");
   const possibleBotDirs = [
-    path.join(__dirname, "..", "..", "bot"),  // artifacts/api-server/src/routes -> bot
-    path.join(process.cwd(), "bot"),           // current working directory
-    path.join(path.dirname(__dirname), "bot"), // artifacts/api-server -> bot
+    path.join(projectRoot, "bot"),
+    path.join(process.cwd(), "bot"),
   ];
   
   let resolvedBotDir = possibleBotDirs.find(p => fs.existsSync(p) && fs.readdirSync(p).some(f => /^config_\w+\.yaml$/.test(f)));
