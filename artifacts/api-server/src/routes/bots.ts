@@ -19,19 +19,22 @@ if (process.env.BOT_DIR) {
   if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
     BOT_DIR = envBotDir;
   } else {
-    // Try project root + envBotDir, then just use envBotDir as relative to project root
-    const tryPath1 = path.join(path.resolve(__dirname, "../../.."), envBotDir);
-    const tryPath2 = path.resolve(__dirname, "../../../" + envBotDir);
-    BOT_DIR = fs.existsSync(tryPath1) ? tryPath1 : tryPath2;
+    // Try project root + envBotDir, then cwd + envBotDir
+    const projectRoot = path.resolve(__dirname, "../../..");
+    const tryPath1 = path.join(projectRoot, envBotDir);
+    const tryPath2 = path.join(process.cwd(), envBotDir);
+    const tryPath3 = envBotDir; // as-is
+    BOT_DIR = [tryPath1, tryPath2, tryPath3].find(p => fs.existsSync(p)) || tryPath1;
   }
 } else {
   // Try multiple possible locations for bot directory
+  const projectRoot = path.resolve(__dirname, "../../..");
   const possiblePaths = [
-    path.join(path.resolve(__dirname, "../../.."), "bot"),
-    path.resolve(__dirname, "../../../bot"),
+    path.join(projectRoot, "bot"),
     path.join(process.cwd(), "bot"),
+    path.join(projectRoot, "artifacts", "api-server", "..", "bot"),
   ];
-  BOT_DIR = possiblePaths.find(p => fs.existsSync(p)) || possiblePaths[0];
+  BOT_DIR = possiblePaths.find(p => fs.existsSync(p)) || path.join(projectRoot, "bot");
 }
 
 const router = Router();
