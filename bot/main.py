@@ -422,6 +422,10 @@ async def _run_live_or_paper(
                         events.info(f"TP2_APPLY | pnl={pnl}")
                         # Отменяем оставшиеся ордера (SL если остался)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
+                        # Проверяем, не осталась ли пылевая позиция
+                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                        if real_qty > 0 and real_qty < 0.001:
+                            await order_mgr.close_dust(pos.direction)
                         if pos.is_recovery:
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                     else:
@@ -430,12 +434,16 @@ async def _run_live_or_paper(
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"SL_APPLY | pnl={pnl}")
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
-                        await order_mgr.cancel_all_tp_sl(pos.direction)
+await order_mgr.cancel_all_tp_sl(pos.direction)
+                        # Проверяем, не осталась ли пылевая позиция
+                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                        if real_qty > 0 and real_qty < 0.001:
+                            await order_mgr.close_dust(pos.direction)
                         if pos.is_recovery:
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                         elif pnl < 0:
                             await recovery.report(pnl=pnl)
-                return
+                        return
 
             raw_signal = get_signal(df_buffer, cfg)
             if raw_signal is None:
