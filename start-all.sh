@@ -69,14 +69,14 @@ echo ""
 
 # 3. Start Dashboard in background
 echo "[3/5] Starting Dashboard..."
-nohup pnpm --filter @workspace/dashboard run dev > logs/dashboard.log 2>&1 &
+nohup pnpm --filter @workspace/dashboard run dev --host 0.0.0.0 --port 5173 > logs/dashboard.log 2>&1 &
 DASHBOARD_PID=$!
 echo "      Dashboard PID: $DASHBOARD_PID"
-sleep 2
+sleep 3
 
 # Smoke check Dashboard
 DASHBOARD_OK=false
-for i in {1..5}; do
+for i in {1..10}; do
     if curl -s "http://localhost:5173" > /dev/null 2>&1; then
         DASHBOARD_OK=true
         break
@@ -85,6 +85,7 @@ for i in {1..5}; do
 done
 if [ "$DASHBOARD_OK" = false ]; then
     echo "      WARNING: Dashboard health check failed"
+    echo "      Check logs/dashboard.log for details"
 fi
 echo "      OK - http://localhost:5173"
 echo ""
