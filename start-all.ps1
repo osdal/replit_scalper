@@ -37,8 +37,11 @@ Write-Host ""
 
 # 2. Start API server in background
 Write-Host "[2/5] Starting API server..."
+$env:BOT_DIR = "bot"
+$env:DATABASE_PATH = ".\data\bot.db"
+$env:PORT = "5000"
 Start-Process -FilePath "cmd" -ArgumentList "/c pnpm --filter @workspace/api-server run dev" -WindowStyle Hidden -WorkingDirectory $scriptDir
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
 
 # Smoke check API
 $apiOK = $false
@@ -81,18 +84,13 @@ Write-Host ""
 
 # 4. Start Bots (auto-detect all config files)
 Write-Host "[4/5] Starting bots..."
-$botConfigs = Get-ChildItem -Path "$scriptDir\bot" -Filter "config_*.yaml" | ForEach-Object { "bot\$($_.Name)" }
+$botConfigs = Get-ChildItem -Path "$scriptDir\bot" -Filter "config_*.yaml"
 foreach ($config in $botConfigs) {
-    $botName = ($config -split '/')[1] -replace 'config_|.yaml', ''
+    $botName = $config.BaseName -replace '^config_', ''
     Write-Host "      Starting $botName Bot..."
-    Start-Process -FilePath "python" -ArgumentList "bot/main.py $config" -WindowStyle Hidden -WorkingDirectory $scriptDir
+    Start-Process -FilePath "python" -ArgumentList "bot\main.py $($config.Name)" -WindowStyle Hidden -WorkingDirectory $scriptDir
 }
-foreach ($config in $botConfigs) {
-    $botName = ($config -split '/')[1] -replace 'config_|.yaml', ''
-    Write-Host "      Starting $botName Bot..."
-    Start-Process -FilePath "python" -ArgumentList "bot/main.py $config" -WindowStyle Hidden -WorkingDirectory $scriptDir
-}
-Write-Host "      OK - $($botConfigs.Length) bots started"
+Write-Host "      OK - $($botConfigs.Count) bots started"
 Write-Host ""
 
 # 5. Final status
