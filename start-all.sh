@@ -20,6 +20,10 @@ sleep 2
 echo "      OK"
 echo ""
 
+# Set environment variables for correct path resolution
+export BOT_DIR="$SCRIPT_DIR/bot"
+export DATABASE_PATH="$SCRIPT_DIR/data/bot.db"
+
 # 1. Init database
 echo "[1/5] Initializing database..."
 
