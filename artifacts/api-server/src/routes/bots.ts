@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Resolve BOT_DIR - bot is at project root level
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
 let BOT_DIR: string;
 if (process.env.BOT_DIR) {
   const envBotDir = process.env.BOT_DIR;
@@ -338,8 +338,8 @@ router.post("/:symbol/stop", async (req, res) => {
 });
 
 export async function reloadConfigsFromYaml(): Promise<void> {
-  // Resolve bot directory - it's at project root level (../bot from artifacts)
-  const projectRoot = path.resolve(__dirname, "..", "..", "..");
+  // Resolve bot directory - it's at project root level (../../../bot from artifacts/api-server/src/routes)
+  const projectRoot = path.resolve(__dirname, "..", "..", "..", "..");
   const possibleBotDirs = [
     path.join(projectRoot, "bot"),
     path.join(process.cwd(), "bot"),
