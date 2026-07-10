@@ -21,7 +21,7 @@ echo "      OK"
 echo ""
 
 # Set environment variables for correct path resolution
-export BOT_DIR="$SCRIPT_DIR/bot"
+export BOT_DIR="$SCRIPT_DIR"
 export DATABASE_PATH="$SCRIPT_DIR/data/bot.db"
 
 # 1. Init database
