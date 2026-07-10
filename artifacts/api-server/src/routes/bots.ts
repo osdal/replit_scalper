@@ -349,25 +349,20 @@ router.post("/:symbol/stop", async (req, res) => {
 });
 
 export async function reloadConfigsFromYaml(): Promise<void> {
-  // Resolve BOT_DIR dynamically - check multiple possible locations
-  let resolvedBotDir = BOT_DIR;
-  const possiblePaths = [
-    BOT_DIR,
-    path.join(__dirname, "../../../bot"),
-    path.join(process.cwd(), "bot"),
-    path.join(path.dirname(__dirname), "bot"),
-    path.join(path.dirname(path.dirname(__dirname)), "bot"),
+  // Resolve bot directory dynamically - check multiple possible locations
+  const possibleBotDirs = [
+    path.join(__dirname, "..", "..", "bot"),  // artifacts/api-server/src/routes -> bot
+    path.join(process.cwd(), "bot"),           // current working directory
+    path.join(path.dirname(__dirname), "bot"), // artifacts/api-server -> bot
   ];
-  for (const p of possiblePaths) {
-    try {
-      if (fs.existsSync(p) && fs.readdirSync(p).some((f: string) => /^config_\w+\.yaml$/.test(f))) {
-        resolvedBotDir = p;
-        break;
-      }
-    } catch {}
+  
+  let resolvedBotDir = possibleBotDirs.find(p => fs.existsSync(p) && fs.readdirSync(p).some(f => /^config_\w+\.yaml$/.test(f)));
+  if (!resolvedBotDir) {
+    throw new Error(`Bot directory not found. Tried: ${possibleBotDirs.join(", ")}`);
   }
   
   const configs = fs.readdirSync(resolvedBotDir).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+  
   for (const file of configs) {
     const raw = yaml.load(fs.readFileSync(path.join(resolvedBotDir, file), "utf8")) as Record<string, unknown>;
     const symbol = (raw.symbol as string).toUpperCase();
