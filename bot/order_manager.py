@@ -242,15 +242,20 @@ class OrderManager:
             real_qty = await self._get_real_position_qty(direction)
             use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001)
 
-        await self.client.futures_create_order(
-            symbol=self.cfg.symbol,
-            side=stop_side,
-            type=FUTURE_ORDER_TYPE_STOP_MARKET,
-            stopPrice=sl_price,
-            quantity=use_qty,
-            reduceOnly=True,
-        )
-        self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price} qty={use_qty}")
+        try:
+            result = await self.client.futures_create_order(
+                symbol=self.cfg.symbol,
+                side=stop_side,
+                type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                stopPrice=sl_price,
+                quantity=use_qty,
+                reduceOnly=True,
+                priceProtect=True,
+            )
+            self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price} qty={use_qty} algoId={result.get('algoId')}")
+        except Exception as e:
+            self.log.error(f"[LIVE] Failed to place SL: {e}")
+            raise
 
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
         side  = _opposite_side(direction)
