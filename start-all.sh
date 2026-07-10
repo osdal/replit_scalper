@@ -47,10 +47,10 @@ echo ""
 
 # 2. Start API server in background
 echo "[2/5] Starting API server..."
-nohup pnpm --filter @workspace/api-server run dev > logs/api-server.log 2>&1 &
+nohup env BOT_DIR="$BOT_DIR" DATABASE_PATH="$DATABASE_PATH" PORT=5000 pnpm --filter @workspace/api-server run dev > logs/api-server.log 2>&1 &
 API_PID=$!
 echo "      API PID: $API_PID"
-sleep 2
+sleep 3
 
 # Smoke check API
 API_OK=false
