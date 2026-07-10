@@ -11,14 +11,28 @@ import { fileURLToPath } from "url";
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, "../../..");
-const BOT_DIR = process.env.BOT_DIR 
-  ? (process.env.BOT_DIR.match(/^[A-Za-z]:/) 
-      ? process.env.BOT_DIR
-      : path.isAbsolute(process.env.BOT_DIR) 
-          ? process.env.BOT_DIR
-          : path.join(PROJECT_ROOT, process.env.BOT_DIR))
-  : path.join(PROJECT_ROOT, "bot");
+
+// Resolve BOT_DIR - try multiple possible locations
+let BOT_DIR: string;
+if (process.env.BOT_DIR) {
+  const envBotDir = process.env.BOT_DIR;
+  if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
+    BOT_DIR = envBotDir;
+  } else {
+    // Try project root + envBotDir, then just use envBotDir as relative to project root
+    const tryPath1 = path.join(path.resolve(__dirname, "../../.."), envBotDir);
+    const tryPath2 = path.resolve(__dirname, "../../../" + envBotDir);
+    BOT_DIR = fs.existsSync(tryPath1) ? tryPath1 : tryPath2;
+  }
+} else {
+  // Try multiple possible locations for bot directory
+  const possiblePaths = [
+    path.join(path.resolve(__dirname, "../../.."), "bot"),
+    path.resolve(__dirname, "../../../bot"),
+    path.join(process.cwd(), "bot"),
+  ];
+  BOT_DIR = possiblePaths.find(p => fs.existsSync(p)) || possiblePaths[0];
+}
 
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
