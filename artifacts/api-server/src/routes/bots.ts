@@ -11,13 +11,17 @@ import { fileURLToPath } from "url";
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const router = Router();
-const botProcesses: Map<string, ChildProcess> = new Map();
+const PROJECT_ROOT = path.resolve(__dirname, "../../..");
 const BOT_DIR = process.env.BOT_DIR 
   ? (process.env.BOT_DIR.match(/^[A-Za-z]:/) 
       ? process.env.BOT_DIR
-      : path.join(path.resolve(__dirname, "../../../"), process.env.BOT_DIR))
-  : path.resolve(__dirname, "../../../bot");
+      : path.isAbsolute(process.env.BOT_DIR) 
+          ? process.env.BOT_DIR
+          : path.join(PROJECT_ROOT, process.env.BOT_DIR))
+  : path.join(PROJECT_ROOT, "bot");
+
+const router = Router();
+const botProcesses: Map<string, ChildProcess> = new Map();
 
 /**
  * Обновляет config_<symbol>.yaml через отдельный Python-процесс.
