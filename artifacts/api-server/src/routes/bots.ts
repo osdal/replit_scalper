@@ -6,8 +6,11 @@ import { promisify } from "util";
 import path from "path";
 import fs from "fs";
 import yaml from "js-yaml";
+import { fileURLToPath } from "url";
 
 const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
 const BOT_DIR = process.env.BOT_DIR 
