@@ -219,11 +219,29 @@ router.post("/:symbol/start", async (req, res) => {
     }
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-    const pythonCmd = process.platform === 'win32' ? 'python.exe' : 'python3';
+    
+    // Find Python executable
+    let pythonCmd = 'python3';
+    if (process.platform === 'win32') {
+      pythonCmd = 'python.exe';
+      // Try 'python' as fallback (some Windows installations use 'python' instead of 'python.exe')
+      try {
+        spawn('python', ['--version'], { stdio: 'ignore' });
+        pythonCmd = 'python';
+      } catch {
+        try {
+          spawn('python.exe', ['--version'], { stdio: 'ignore' });
+        } catch {
+          return res.status(500).json({ error: "Python not found. Install Python and add to PATH." });
+        }
+      }
+    }
+    
     const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
-      stdio: ["ignore", "pipe", "pipe"], // pipe stdout/stderr чтобы видеть логи
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === 'win32', // Use shell on Windows for better PATH resolution
     });
     botProcesses.set(symbol, proc);
 
