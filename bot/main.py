@@ -441,13 +441,15 @@ async def _run_live_or_paper(
                             await order_mgr.close_dust(pos.direction)
                         if pos.is_recovery:
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                        elif pnl < 0:
+                            await recovery.report(pnl=pnl)
                     else:
                         # SL: биржа закрыла позицию
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"SL_APPLY | pnl={pnl}")
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
-await order_mgr.cancel_all_tp_sl(pos.direction)
+                        await order_mgr.cancel_all_tp_sl(pos.direction)
                         # Проверяем, не осталась ли пылевая позиция
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
                         if real_qty > 0 and real_qty < 0.001:
