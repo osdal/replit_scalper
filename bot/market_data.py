@@ -112,7 +112,7 @@ async def start_kline_polling(
                     symbol=symbol, interval=interval, limit=2
                 )
                 df = _klines_to_df(klines)
-                closed = df.iloc[-2]
+                closed = df.iloc[-1]
                 candle_time = closed.name
 
                 if last_seen.get(interval) is None or candle_time > last_seen[interval]:
