@@ -219,7 +219,7 @@ router.post("/:symbol/start", async (req, res) => {
     }
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const pythonCmd = process.platform === 'win32' ? 'python.exe' : 'python3';
     const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
@@ -275,7 +275,11 @@ router.post("/stop-all", async (_req, res) => {
     }
     
     // Also kill any Python processes running bots
-    execAsync("taskkill /IM python.exe /F 2>nul || true", { stdio: "ignore" });
+    if (process.platform === "win32") {
+      execAsync("taskkill /IM python.exe /F 2>nul || true", { stdio: "ignore" });
+    } else {
+      execAsync("pkill -f 'python.*main.py' 2>/dev/null || true", { stdio: "ignore" });
+    }
     
     res.json({ success: true, message: `Stopped ${stoppedBots.length} bots`, bots: stoppedBots });
   } catch (e) { res.status(500).json({ error: String(e) }); }
