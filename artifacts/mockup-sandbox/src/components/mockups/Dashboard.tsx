@@ -130,9 +130,9 @@ function BotCard({ bot, onToggle }: { bot: Bot; onToggle: () => void }) {
         {/* Price & heartbeat */}
         <div className="flex justify-between text-sm">
           <span className="text-zinc-400">Price</span>
-          <span className="font-mono font-semibold">
-            {bot.current_price ? `$${bot.current_price.toLocaleString()}` : "—"}
-          </span>
+<span className="font-mono font-semibold">
+             {bot.current_price != null ? `$${bot.current_price.toLocaleString()}` : "—"}
+           </span>
         </div>
         <div className="flex justify-between text-sm">
           <span className="text-zinc-400">Heartbeat</span>

@@ -130,6 +130,7 @@ async def start_kline_polling(
                         "close":  closed["close"],
                         "volume": closed["volume"],
                     })
+                    candle.name = candle_time
                     try:
                         result = callback(candle)
                         if asyncio.iscoroutine(result):
@@ -158,6 +159,3 @@ async def start_kline_polling(
         except asyncio.TimeoutError:
             # Timeout ожидается, просто продолжаем цикл
             pass
-
-
-

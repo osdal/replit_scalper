@@ -241,7 +241,8 @@ router.post("/:symbol/start", async (req, res) => {
       cwd: BOT_DIR,
       detached: false,
       stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === 'win32', // Use shell on Windows for better PATH resolution
+      shell: process.platform === 'win32',
+      env: process.env,
     });
     botProcesses.set(symbol, proc);
 
