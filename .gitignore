@@ -73,3 +73,4 @@ start_bot.bat
 start_dashboard.bat
 patch_dashboard_*.js
 .rooignore
+logs/*.log
