@@ -189,14 +189,22 @@ router.post("/:symbol/start", async (req, res) => {
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
-    // Проверяем не запущен ли уже (через Map или через поиск PID)
-    if (botProcesses.has(symbol)) {
-      return res.json({ success: false, message: "Bot already running (dashboard)" });
+    // Если бот уже запущен (через Map дашборда или найден по PID) —
+    // принудительно останавливаем СТАРЫЙ экземпляр, чтобы перезапуск
+    // гарантированно перечитал свежий config_<symbol>.yaml
+    const existing = botProcesses.get(symbol);
+    if (existing && !existing.killed) {
+      try { existing.kill("SIGKILL"); } catch {}
+      botProcesses.delete(symbol);
     }
     const existingPid = await findBotPid(symbol);
     if (existingPid) {
-      return res.json({ success: false, message: `Bot already running (PID ${existingPid}). Stop it first.` });
+      await killPid(existingPid);
     }
+    // Снимаем висящий lock-файл от убитого процесса (страховка)
+    try {
+      fs.unlinkSync(path.join(BOT_DIR, `bot.lock.${symbol.toLowerCase()}`));
+    } catch {}
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
     
