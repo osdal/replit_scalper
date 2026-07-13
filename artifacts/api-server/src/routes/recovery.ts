@@ -220,6 +220,20 @@ router.get("/chains", async (_req, res) => {
   }
 });
 
+// DELETE /recovery/chains/:id — удалить одну цепочку
+router.delete("/chains/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+    const result = await db.delete(recoveryChainsTable)
+      .where(eq(recoveryChainsTable.id, id))
+      .returning();
+    res.json({ deleted: result.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // DELETE /recovery/chains — удалить все цепочки recovery (очистка БД)
 router.delete("/chains", async (_req, res) => {
   try {
