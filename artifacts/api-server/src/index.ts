@@ -52,9 +52,9 @@ async function resetStaleRunningBots(): Promise<void> {
           );
           isAlive = stdout.includes(configFile);
         } else {
-          const { stdout } = await execAsync(
-            `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
-          );
+        const { stdout } = await execAsync(
+          `ps aux | grep "[p]ython.*main.py.*${configFile}" | grep -v grep`
+        );
           isAlive = stdout.includes(configFile);
         }
       } catch {}

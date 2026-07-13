@@ -69,32 +69,12 @@ function updateYamlConfig(symbol: string, params: Record<string, unknown>): Prom
 async function findBotPid(symbol: string): Promise<number | null> {
   const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
   try {
-    if (process.platform === "win32") {
-      // Windows 11+ doesn't have wmic, use Get-CimInstance
-      const { stdout } = await execAsync(
-        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
-      );
-      const processes = JSON.parse(stdout);
-      for (const proc of processes) {
-        if (proc.CommandLine && proc.CommandLine.includes(configFile)) {
-          const pid = parseInt(proc.ProcessId);
-          if (!isNaN(pid) && pid > 0) return pid;
-        }
-      }
-    } else {
-      // Linux/Mac fallback
-      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
-      const pid = parseInt(stdout.trim());
-      if (!isNaN(pid)) return pid;
+    const { stdout } = await execAsync(`pgrep -f "[p]ython.*main.py.*${configFile}"`);
+    for (const line of stdout.trim().split("\n")) {
+      const pid = parseInt(line.trim());
+      if (!isNaN(pid) && pid > 0) return pid;
     }
-  } catch {
-    try {
-      // Linux/Mac fallback
-      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
-      const pid = parseInt(stdout.trim());
-      if (!isNaN(pid)) return pid;
-    } catch {}
-  }
+  } catch {}
   return null;
 }
 
@@ -245,6 +225,11 @@ router.post("/:symbol/start", async (req, res) => {
       env: process.env,
     });
     botProcesses.set(symbol, proc);
+if (proc.killed) {
+   botProcesses.delete(symbol);
+   await db.update(botsTable).set({ is_running: false, updated_at: new Date().toISOString() }).where(eq(botsTable.symbol, symbol));
+   return res.status(500).json({ error: "Bot process terminated immediately" });
+}
 
     // Перенаправляем вывод бота в консоль API сервера
     const botTag = `[BOT ${symbol}]`;
