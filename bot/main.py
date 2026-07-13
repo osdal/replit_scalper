@@ -126,11 +126,18 @@ async def _sync_position_on_start(
                     log.warning(
                         f"[SYNC] Partial external close detected. "
                         f"Tracker qty={pos.remaining_qty:.6f} vs Exchange qty={real_qty:.6f}. "
-                        f"Adjusting state and setting tp1_hit=True."
+                        f"Adjusting state."
                     )
                     pos.remaining_qty = real_qty
-                    pos.tp1_hit = True
-                    pos.sl_price = pos.entry_price
+                    # Устанавливаем tp1_hit только если он ещё не был установлен
+                    # из state-файла (т.е. это новое частичное закрытие, а не
+                    # восстановление уже известного пост-TP1 состояния).
+                    # Не форсируем tp1_hit=True если частичное закрытие было
+                    # ручным или по SL — в этих случаях SL на безубыток
+                    # автоматически не применяется.
+                    if not pos.tp1_hit:
+                        pos.tp1_hit = True
+                        pos.sl_price = pos.entry_price
                     tracker._save_state()
                     await _replace_tp_sl(order_mgr, pos, log)
                     return
