@@ -334,6 +334,7 @@ async def _run_live_or_paper(
             df_buffer = pd.concat([df_buffer, new_row]).tail(500)
             df_buffer = calculate_indicators(df_buffer, cfg)
             current_price = float(candle["close"])
+            log.debug(f"Close price raw: {candle['close']}, current_price={current_price}")
             candle_time_ms = int(candle.name.timestamp() * 1000)
             candle_count[0] += 1
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
