@@ -126,18 +126,11 @@ async def _sync_position_on_start(
                     log.warning(
                         f"[SYNC] Partial external close detected. "
                         f"Tracker qty={pos.remaining_qty:.6f} vs Exchange qty={real_qty:.6f}. "
-                        f"Adjusting state."
+                        f"Adjusting state and setting tp1_hit=True."
                     )
                     pos.remaining_qty = real_qty
-                    # Устанавливаем tp1_hit только если он ещё не был установлен
-                    # из state-файла (т.е. это новое частичное закрытие, а не
-                    # восстановление уже известного пост-TP1 состояния).
-                    # Не форсируем tp1_hit=True если частичное закрытие было
-                    # ручным или по SL — в этих случаях SL на безубыток
-                    # автоматически не применяется.
-                    if not pos.tp1_hit:
-                        pos.tp1_hit = True
-                        pos.sl_price = pos.entry_price
+                    pos.tp1_hit = True
+                    pos.sl_price = pos.entry_price
                     tracker._save_state()
                     await _replace_tp_sl(order_mgr, pos, log)
                     return
@@ -341,6 +334,7 @@ async def _run_live_or_paper(
             df_buffer = pd.concat([df_buffer, new_row]).tail(500)
             df_buffer = calculate_indicators(df_buffer, cfg)
             current_price = float(candle["close"])
+            log.debug(f"Close price raw: {candle['close']}, current_price={current_price}")
             candle_time_ms = int(candle.name.timestamp() * 1000)
             candle_count[0] += 1
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
