@@ -70,32 +70,34 @@ async function findBotPid(symbol: string): Promise<number | null> {
   const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
   try {
     if (process.platform === "win32") {
-      // Windows: use Get-CimInstance (wmic removed in Windows 11)
-      // PowerShell ConvertTo-Json returns an object (not array) when only
-      // one process matches — wrap in array to handle both cases uniformly
+      // Windows 11+ doesn't have wmic, use Get-CimInstance
       const { stdout } = await execAsync(
-        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"`
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
       );
-      const raw = JSON.parse(stdout.trim());
-      const processes = Array.isArray(raw) ? raw : [raw];
+      const processes = JSON.parse(stdout);
       for (const proc of processes) {
-        const cmdline = proc?.CommandLine ?? "";
-        if (cmdline.includes(configFile)) {
-          const pid = parseInt(String(proc?.ProcessId ?? ""));
+        if (proc.CommandLine && proc.CommandLine.includes(configFile)) {
+          const pid = parseInt(proc.ProcessId);
           if (!isNaN(pid) && pid > 0) return pid;
         }
       }
     } else {
-      // Linux/Mac
+      // Linux/Mac fallback
       const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
       const pid = parseInt(stdout.trim());
       if (!isNaN(pid)) return pid;
     }
   } catch {
-    // pgrep returns exit code 1 when nothing found — not a real error
+    try {
+      // Linux/Mac fallback
+      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
+      const pid = parseInt(stdout.trim());
+      if (!isNaN(pid)) return pid;
+    } catch {}
   }
   return null;
 }
+
 // Убить процесс по PID
 async function killPid(pid: number): Promise<void> {
   try {
@@ -218,12 +220,22 @@ router.post("/:symbol/start", async (req, res) => {
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
     
-    // On Windows use 'python', on Linux/Mac use 'python3'.
-    // Note: spawn() never throws synchronously — errors appear in the
-    // child's 'error' event, so try/catch around spawn() can't detect
-    // "Python not found". We pick a sensible default per platform and
-    // let the proc's 'error' event handle the "not found" case below.
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    // Find Python executable
+    let pythonCmd = 'python3';
+    if (process.platform === 'win32') {
+      pythonCmd = 'python.exe';
+      // Try 'python' as fallback (some Windows installations use 'python' instead of 'python.exe')
+      try {
+        spawn('python', ['--version'], { stdio: 'ignore' });
+        pythonCmd = 'python';
+      } catch {
+        try {
+          spawn('python.exe', ['--version'], { stdio: 'ignore' });
+        } catch {
+          return res.status(500).json({ error: "Python not found. Install Python and add to PATH." });
+        }
+      }
+    }
     
     const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
