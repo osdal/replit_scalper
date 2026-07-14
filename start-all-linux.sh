@@ -13,9 +13,9 @@ echo ""
 
 # 0. Stop existing processes before starting new ones
 echo "[0/5] Stopping existing processes..."
-pkill -f "node.*api-server" 2>/dev/null
-pkill -f "node.*dashboard" 2>/dev/null
-pkill -f "python.*bot/main.py" 2>/dev/null
+pkill -f "[a]pi-server.*src/index.ts" 2>/dev/null
+pkill -f "[v]ite.*5174" 2>/dev/null
+pkill -f "[p]ython.*bot/main.py" 2>/dev/null
 sleep 2
 echo "      OK"
 echo ""
@@ -23,6 +23,7 @@ echo ""
 # Set environment variables for correct path resolution
 export BOT_DIR="bot"
 export DATABASE_PATH="./data/bot.db"
+export PYTHON_BIN="$(command -v python3 || command -v python)"
 
 # 1. Init database
 echo "[1/5] Initializing database..."
@@ -54,7 +55,7 @@ sleep 3
 
 # Smoke check API
 API_OK=false
-for i in {1..5}; do
+for i in {1..15}; do
     if curl -s "http://localhost:5001/api/bots" > /dev/null 2>&1; then
         API_OK=true
         break
@@ -76,7 +77,7 @@ sleep 3
 
 # Smoke check Dashboard
 DASHBOARD_OK=false
-for i in {1..10}; do
+for i in {1..40}; do
     if curl -s "http://localhost:5174" > /dev/null 2>&1; then
         DASHBOARD_OK=true
         break
@@ -97,7 +98,7 @@ for config in "$SCRIPT_DIR"/bot/config_*.yaml; do
     if [ -f "$config" ]; then
         BOT_NAME=$(basename "$config" | sed 's/config_//;s/.yaml$//')
         echo "      Starting $BOT_NAME Bot..."
-        nohup python bot/main.py "$config" > "logs/${BOT_NAME,,}.log" 2>&1 &
+        nohup "$PYTHON_BIN" bot/main.py "$config" > "logs/${BOT_NAME,,}.log" 2>&1 &
         BOT_COUNT=$((BOT_COUNT + 1))
     fi
 done
@@ -130,4 +131,4 @@ if [ "$NO_BROWSER" = false ]; then
 fi
 
 echo ""
-echo "To stop all: pkill -f 'api-server|dashboard|bot/main.py'"
+echo "To stop all: pkill -f '[p]ython.*bot/main.py'; pkill -f '[a]pi-server.*src/index.ts'; pkill -f '[v]ite.*5174'"

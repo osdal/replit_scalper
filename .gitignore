@@ -74,3 +74,10 @@ start_dashboard.bat
 patch_dashboard_*.js
 .rooignore
 logs/*.log
+
+venv/
+logs/
+*.log
+bot/bot.lock.*
+state_*.json
+.env

@@ -445,4 +445,25 @@ async function stopAllBots(): Promise<void> {
   await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
 }
 
+// Периодически синхронизирует is_running в БД с реально запущенными
+// процессами. Нужно, потому что боты могут запускаться не только через
+// API (например, напрямую скриптом start-all-linux.sh), и тогда API не
+// знает об их состоянии.
+export async function reconcileRunningBots(): Promise<void> {
+  try {
+    const bots = await db.select().from(botsTable);
+    for (const bot of bots) {
+      const pid = await findBotPid(bot.symbol);
+      const shouldRun = !!pid;
+      if (bot.is_running !== shouldRun) {
+        await db.update(botsTable)
+          .set({ is_running: shouldRun, updated_at: new Date().toISOString() })
+          .where(eq(botsTable.symbol, bot.symbol));
+      }
+    }
+  } catch (e) {
+    logger.warn({ err: e }, "reconcileRunningBots failed");
+  }
+}
+
 export default router;
