@@ -6,21 +6,46 @@ import { db, botsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
+import { fileURLToPath } from "url";
 
 const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const router = Router();
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+let BOT_DIR: string;
+if (process.env.BOT_DIR) {
+  const envBotDir = process.env.BOT_DIR;
+  if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
+    BOT_DIR = envBotDir;
+  } else {
+    BOT_DIR = path.join(PROJECT_ROOT, envBotDir);
+  }
+} else {
+  BOT_DIR = path.join(PROJECT_ROOT, "bot");
+}
 
 async function findBotPid(symbol: string): Promise<number | null> {
   const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
   try {
-    const { stdout } = await execAsync(
-      `wmic process where "name='python.exe'" get processid,commandline /format:csv`
-    );
-    for (const line of stdout.split("\n")) {
-      if (line.includes(configFile)) {
-        const parts = line.trim().split(",");
-        const pid = parseInt(parts[parts.length - 1]);
+    if (process.platform === "win32") {
+      const { stdout } = await execAsync(
+        `wmic process where "name='python.exe'" get processid,commandline /format:csv`
+      );
+      for (const line of stdout.split("\n")) {
+        if (line.includes(configFile)) {
+          const parts = line.trim().split(",");
+          const pid = parseInt(parts[parts.length - 1]);
+          if (!isNaN(pid) && pid > 0) return pid;
+        }
+      }
+    } else {
+      const { stdout } = await execAsync(
+        `pgrep -f "[p]ython.*main.py.*${configFile}"`
+      );
+      for (const line of stdout.trim().split("\n")) {
+        const pid = parseInt(line.trim());
         if (!isNaN(pid) && pid > 0) return pid;
       }
     }
@@ -37,6 +62,8 @@ async function stopAllBots(): Promise<void> {
       try {
         if (process.platform === "win32") {
           await execAsync(`taskkill /PID ${pid} /F`);
+        } else {
+          process.kill(pid, "SIGKILL");
         }
       } catch (e) {}
     }
@@ -90,6 +117,45 @@ router.post("/", async (_req, res) => {
     await stopAllBots();
     await reloadConfigsFromYaml();
     res.json({ success: true, message: "All bots stopped, configs reloaded from YAML. Ready to restart with new parameters." });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+router.post("/restart", async (_req, res) => {
+  try {
+    await stopAllBots();
+    await reloadConfigsFromYaml();
+    
+    res.json({ 
+      success: true, 
+      message: "System restart initiated. All services will restart with new configs." 
+    });
+    
+    setTimeout(() => {
+      try {
+        const SCRIPT_DIR = path.resolve(__dirname, "../../../../");
+        
+        if (process.platform === "win32") {
+          exec(`taskkill /F /IM python.exe 2>nul`);
+          exec(`taskkill /F /IM node.exe 2>nul`);
+        } else {
+          exec("pkill -f '[p]ython.*bot/main.py'");
+          exec("pkill -f '[a]pi-server.*src/index.ts'");
+          exec("pkill -f '[v]ite.*5174'");
+        }
+        
+        const child = spawn("bash", ["start-all-linux.sh"], {
+          cwd: SCRIPT_DIR,
+          detached: true,
+          stdio: "ignore"
+        });
+        child.unref();
+      } catch (e) {
+        console.error("Restart failed:", e);
+      }
+    }, 1000);
+    
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
