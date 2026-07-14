@@ -1,6 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
+import AuthScreen from "./components/AuthScreen";
+import { isSupabaseConfigured, supabase } from "./lib/supabaseClient";
+import { useRole } from "./lib/useRole";
 import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -14,7 +17,8 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
-  Play, Square, RefreshCw, Settings, Link2, Download, History,
+  Play, Square, RefreshCw, Settings, Link2, Download, History, Loader2,
+  MoreVertical, Link as LinkIcon, RotateCcw, Trash2, LogIn, LogOut,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -148,7 +152,7 @@ function heartbeatAge(ts: string | null): string {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void; isToggling: boolean }) {
+function BotCard({ bot, onToggle, isToggling, canControl }: { bot: Bot; onToggle: () => void; isToggling: boolean; canControl: boolean }) {
   const pos = bot.position;
   const isLong = pos?.direction === "LONG";
   const unrealizedPnl = pos && bot.current_price
@@ -173,7 +177,8 @@ function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void
           size="sm"
           variant={bot.is_running ? "destructive" : "default"}
           onClick={onToggle}
-          disabled={isToggling}
+          disabled={isToggling || !canControl}
+          title={canControl ? undefined : "Sign in to control bots"}
           className="h-7 px-3"
         >
           {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
@@ -433,6 +438,8 @@ export default function Dashboard() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
   const [loading, setLoading] = useState(true);
+  // ── RBAC: роль/сессия из общего контекста (useRole) ──
+  const { role, user, loading: authLoading, isAdmin, isGuest, can } = useRole();
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [optJobId, setOptJobId] = useState<string | null>(null);
   const [optJob, setOptJob] = useState<any | null>(null);
@@ -503,6 +510,74 @@ export default function Dashboard() {
   const [toggling, setToggling] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
+  // ── Header dropdown menu (actions) ──
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Позволяет вручную показать экран входа по кнопке "Sign In"
+  const [forceAuthScreen, setForceAuthScreen] = useState(false);
+
+  // При успешном входе автоматически закрываем экран авторизации
+  useEffect(() => {
+    if (user) setForceAuthScreen(false);
+  }, [user]);
+
+  // Закрываем выпадающее меню при клике вне его области
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEsc);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEsc);
+    };
+  }, [menuOpen]);
+
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+      // Состояние user/role обновит useRole через onAuthStateChange.
+    } catch {
+      alert("Sign out failed");
+    }
+  };
+
+  const handleStopAllReload = async () => {
+    if (!confirm(
+      "Stop ALL running bots, reload configs from YAML, and RESTART the whole system (API + Dashboard + Bots)?\n\n" +
+      "This will SIGKILL every bot process, restart the API server and dashboard, " +
+      "and delete local position state files. Open positions remain protected by " +
+      "exchange orders (SL/TP), but won't be tracked by the bot " +
+      "again until you manually restart each one."
+    )) return;
+    const r = await fetch("/api/refresh/restart", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || "Restart failed");
+      return;
+    }
+    alert(data.message || "System restarting...");
+    setTimeout(() => window.location.reload(), 5000);
+  };
+
+  const handleClearDB = async () => {
+    if (confirm('Delete ALL trades and recovery chains? This cannot be undone.')) {
+      const r = await clearTrades();
+      const rc = await clearRecoveryChains();
+      alert(`Deleted: ${r.deleted} trades, ${rc.deleted} recovery chains. Restart bots manually.`);
+      window.location.reload();
+    }
+  };
+
+
   const handleSync = async () => {
     setSyncing(true);
     try {
@@ -518,6 +593,7 @@ export default function Dashboard() {
 
   const handleToggle = async (bot: Bot) => {
     if (toggling) return;
+    if (!can("control_bots")) return; // защита от вызова гостем
     setToggling(bot.symbol);
     try {
       if (bot.is_running) {
@@ -609,48 +685,140 @@ export default function Dashboard() {
     setBtConfig({ ...btConfig, [key]: value });
   };
 
+  // ── Auth gate ──
+  // Спиннер пока проверяем сессию (только если Supabase включен)
+  if (authLoading && isSupabaseConfigured) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-white">
+        <Loader2 className="w-8 h-8 animate-spin text-zinc-400" />
+      </div>
+    );
+  }
+  // Экран входа показываем только когда пользователь явно нажал "Войти".
+  // Дашборд остаётся доступным для просмотра без авторизации.
+  if (forceAuthScreen && !user) {
+    return <AuthScreen onCancel={() => setForceAuthScreen(false)} />;
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold">Trading Bot Dashboard</h1>
-          <p className="text-zinc-400 text-sm mt-0.5">
-            Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
+          <p className="text-zinc-400 text-sm mt-0.5 flex items-center gap-2">
+            <span>Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}</span>
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide ${
+              isAdmin ? "bg-red-500/15 text-red-400"
+              : isGuest ? "bg-zinc-700/40 text-zinc-400"
+              : "bg-blue-500/15 text-blue-400"
+            }`}>
+              {role}
+            </span>
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
-            <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-            {syncing ? 'Syncing...' : 'Sync Binance'}
-          </Button>
-          <Button variant="outline" size="sm" onClick={load} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
-            <RefreshCw className="w-4 h-4 mr-2" />Refresh
-          </Button>
-          <Button variant="destructive" size="sm" onClick={async () => {
-            if (!confirm(
-              "Stop ALL running bots and reload their configs from YAML?\n\n" +
-              "This will SIGKILL every bot process and delete their local " +
-              "position state files. Open positions remain protected by " +
-              "exchange orders (SL/TP), but won't be tracked by the bot " +
-              "again until you manually restart each one."
-            )) return;
-            const r = await stopAllBots();
-            alert(r.message || "All bots stopped");
-            await load();
-          }} className="">
-            <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
-          </Button>
-          <Button variant="destructive" size="sm" onClick={async () => {
-            if (confirm('Delete ALL trades and recovery chains? This cannot be undone.')) {
-              const r = await clearTrades();
-              const rc = await clearRecoveryChains();
-              alert(`Deleted: ${r.deleted} trades, ${rc.deleted} recovery chains. Restart bots manually.`);
-              window.location.reload();
-            }
-          }} className="border-red-700 text-red-300 hover:bg-red-900">
-            � Clear DB
-          </Button>
+        <div className="flex items-center gap-2">
+          {/* Dropdown menu with service actions */}
+          <div className="relative" ref={menuRef}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            >
+              <MoreVertical className="w-4 h-4 mr-2" />
+              Menu
+            </Button>
+
+            {menuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 mt-2 w-64 rounded-lg border border-zinc-800 bg-zinc-900 shadow-xl z-50 py-1"
+              >
+                {/* Bot control actions — требуют роль user/superadmin */}
+                <button
+                  role="menuitem"
+                  onClick={() => { if (!can("control_bots")) return; setMenuOpen(false); handleSync(); }}
+                  disabled={syncing || !can("control_bots")}
+                  title={can("control_bots") ? undefined : "Sign in to control bots"}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <LinkIcon className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+                  {syncing ? "Syncing..." : "Sync Binance"}
+                </button>
+
+                <button
+                  role="menuitem"
+                  onClick={() => { if (!can("control_bots")) return; setMenuOpen(false); load(); }}
+                  disabled={!can("control_bots")}
+                  title={can("control_bots") ? undefined : "Sign in to control bots"}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Refresh
+                </button>
+
+                {/* Admin-only actions — видны только суперадмину */}
+                {can("admin_actions") && (
+                  <>
+                    <div className="my-1 h-px bg-zinc-800" />
+                    <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                      Admin
+                    </div>
+
+                    <button
+                      role="menuitem"
+                      onClick={() => { setMenuOpen(false); handleStopAllReload(); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-amber-400 hover:bg-zinc-800 transition-colors"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      Stop All &amp; Reload Configs
+                    </button>
+
+                    <button
+                      role="menuitem"
+                      onClick={() => { setMenuOpen(false); handleClearDB(); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-900/40 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Clear DB
+                    </button>
+                  </>
+                )}
+
+                {isGuest && (
+                  <div className="mt-1 border-t border-zinc-800 px-3 py-2 text-xs text-zinc-500">
+                    Sign in to control bots
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Dynamic Sign In / Sign Out button (only when Supabase is configured) */}
+          {isSupabaseConfigured && (
+            user ? (
+              <Button
+                size="sm"
+                onClick={handleSignOut}
+                className="border border-red-500 bg-transparent text-red-500 hover:bg-red-500 hover:text-white"
+              >
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign Out
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                onClick={() => setForceAuthScreen(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                <LogIn className="w-4 h-4 mr-2" />
+                Sign In
+              </Button>
+            )
+          )}
         </div>
       </div>
 
@@ -675,7 +843,7 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} />
+                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} canControl={can("control_bots")} />
                 ))}
               </div>
             )}

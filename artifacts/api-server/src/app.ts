@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { authContext } from "./lib/auth";
 
 const app: Express = express();
 
@@ -30,6 +31,9 @@ app.use(
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Определяем роль/личность для каждого запроса (req.auth).
+app.use(authContext);
 
 app.use("/api", router);
 

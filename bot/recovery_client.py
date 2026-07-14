@@ -15,6 +15,13 @@ except ImportError:
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
+# Server-to-server токен для RBAC на API сервере.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+
+def _auth_headers() -> dict:
+    return {"x-internal-token": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
+
 # ── Config path ───────────────────────────────────────────────────────────
 _CONFIG_PATH = os.getenv("RECOVERY_CONFIG_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_config.yaml"))
@@ -64,6 +71,7 @@ class RecoveryClient:
             async with session.post(
                 f"{API_URL}/recovery/claim",
                 json={"symbol": self.symbol},
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 data = await resp.json()
@@ -88,6 +96,7 @@ class RecoveryClient:
             async with session.post(
                 f"{API_URL}/recovery/report",
                 json=payload,
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
@@ -107,6 +116,7 @@ class RecoveryClient:
             async with session.post(
                 f"{API_URL}/recovery/release",
                 json={"symbol": self.symbol, "chainId": chain_id},
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:

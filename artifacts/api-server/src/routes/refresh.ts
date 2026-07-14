@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
+import { requireCapability } from "../lib/auth";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -112,7 +113,7 @@ async function reloadConfigsFromYaml(): Promise<void> {
   await db.update(botsTable).set({ is_running: false, position: null });
 }
 
-router.post("/", async (_req, res) => {
+router.post("/", requireCapability("admin_actions"), async (_req, res) => {
   try {
     await stopAllBots();
     await reloadConfigsFromYaml();
@@ -122,7 +123,7 @@ router.post("/", async (_req, res) => {
   }
 });
 
-router.post("/restart", async (_req, res) => {
+router.post("/restart", requireCapability("admin_actions"), async (_req, res) => {
   try {
     await stopAllBots();
     await reloadConfigsFromYaml();
@@ -161,7 +162,7 @@ router.post("/restart", async (_req, res) => {
   }
 });
 
-router.post("/cancel-orders/:symbol", async (req, res) => {
+router.post("/cancel-orders/:symbol", requireCapability("control_bots"), async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const api_key = process.env.BINANCE_API_KEY;
