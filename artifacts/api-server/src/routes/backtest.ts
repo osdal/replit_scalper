@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
+import { requireCapability } from "../lib/auth";
 
 const router = Router();
 const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
@@ -9,7 +10,7 @@ const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
 // Передаёт параметры бэктеста в Python-процесс через stdin как JSON —
 // никакой код не собирается строкой, поэтому нет риска инъекции через
 // поля symbol/config (которые приходят из тела запроса от клиента).
-router.post("/:symbol", async (req, res) => {
+router.post("/:symbol", requireCapability("control_bots"), async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const { start, end, config } = req.body;
 

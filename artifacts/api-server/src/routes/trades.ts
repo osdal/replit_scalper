@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { db, tradesTable, recoveryChainsTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
+import { requireCapability } from "../lib/auth";
 
 const router = Router();
 
 // DELETE /trades — удалить все сделки
-router.delete("/", async (_req, res) => {
+router.delete("/", requireCapability("admin_actions"), async (_req, res) => {
   try {
     const result = await db.delete(tradesTable).returning();
     res.json({ deleted: result.length });
@@ -13,7 +14,7 @@ router.delete("/", async (_req, res) => {
 });
 
 // DELETE /trades/clear-tp1 — удалить все TP1 записи (для миграции)
-router.delete("/clear-tp1", async (_req, res) => {
+router.delete("/clear-tp1", requireCapability("admin_actions"), async (_req, res) => {
   try {
     const result = await db.delete(tradesTable).where(eq(tradesTable.exit_reason, "TP1")).returning();
     res.json({ deleted: result.length });
@@ -34,7 +35,7 @@ router.get("/", async (req, res) => {
 });
 
 // PATCH /trades/:id — обновить сделку (закрытие, синхронизация PnL)
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", requireCapability("control_bots"), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const updates: Record<string, unknown> = {};
@@ -56,7 +57,7 @@ router.patch("/:id", async (req, res) => {
 });
 
 // DELETE /trades/:id — удалить конкретную сделку
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", requireCapability("admin_actions"), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const result = await db.delete(tradesTable).where(eq(tradesTable.id, id)).returning();
@@ -122,7 +123,7 @@ router.get("/export", async (_req, res) => {
   }
 });
 
-router.post("/", async (req, res) => {
+router.post("/", requireCapability("control_bots"), async (req, res) => {
   try {
     const [trade] = await db.insert(tradesTable).values(req.body).returning();
     res.status(201).json(trade);
@@ -130,7 +131,7 @@ router.post("/", async (req, res) => {
 });
 
 // POST /trades/sync-closed — синхронизировать закрытые позиции с биржей
-router.post("/sync-closed", async (_req, res) => {
+router.post("/sync-closed", requireCapability("control_bots"), async (_req, res) => {
   try {
     const API_KEY = process.env.BINANCE_API_KEY || "";
     const API_SECRET = process.env.BINANCE_API_SECRET || "";

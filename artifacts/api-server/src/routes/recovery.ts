@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+import { requireCapability } from "../lib/auth";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +44,7 @@ router.get("/config", (_req, res) => {
 });
 
 // PUT /recovery/config — изменить настройки recovery режима
-router.put("/config", (req, res) => {
+router.put("/config", requireCapability("control_bots"), (req, res) => {
   try {
     const { recovery_enabled, recovery_bonus_pct, recovery_max_pct } = req.body;
     const current = readRecoveryConfig();
@@ -71,7 +72,7 @@ router.put("/config", (req, res) => {
  * body: { symbol: string }
  * Возвращает: { chainId, debtAmount } или { chainId: null } если нет свободного долга.
  */
-router.post("/claim", async (req, res) => {
+router.post("/claim", requireCapability("control_bots"), async (req, res) => {
   try {
     const config = readRecoveryConfig();
     if (!config.recovery_enabled) {
@@ -134,7 +135,7 @@ router.post("/claim", async (req, res) => {
  *   - pnl < 0  → создаём новую цепочку free с debt_amount = abs(pnl)
  *   - pnl >= 0 → ничего не делаем
  */
-router.post("/report", async (req, res) => {
+router.post("/report", requireCapability("control_bots"), async (req, res) => {
   try {
     const { symbol, pnl, chainId } = req.body;
     if (pnl === undefined) return res.status(400).json({ error: "pnl is required" });
@@ -187,7 +188,7 @@ router.post("/report", async (req, res) => {
  * Вызывается ботом если не удалось открыть позицию-компенсатор.
  * body: { symbol, chainId }
  */
-router.post("/release", async (req, res) => {
+router.post("/release", requireCapability("control_bots"), async (req, res) => {
   try {
     const { symbol, chainId } = req.body;
     if (!chainId) return res.status(400).json({ error: "chainId is required" });
@@ -221,7 +222,7 @@ router.get("/chains", async (_req, res) => {
 });
 
 // DELETE /recovery/chains — удалить все цепочки recovery (очистка БД)
-router.delete("/chains", async (_req, res) => {
+router.delete("/chains", requireCapability("admin_actions"), async (_req, res) => {
   try {
     const result = await db.delete(recoveryChainsTable).returning();
     res.json({ deleted: result.length });

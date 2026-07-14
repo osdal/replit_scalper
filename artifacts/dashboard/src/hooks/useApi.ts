@@ -1,3 +1,5 @@
+import { supabase, isSupabaseConfigured } from "../lib/supabaseClient";
+
 let API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 if (typeof window !== "undefined") {
@@ -7,8 +9,28 @@ if (typeof window !== "undefined") {
   }
 }
 
-async function apiFetch(url: string, options?: RequestInit) {
-  const r = await fetch(url, options);
+/**
+ * Прикрепляет Supabase access token к каждому запросу, чтобы бэкенд мог
+ * проверить личность и роль пользователя (server-side RBAC). Гость (нет
+ * сессии) уходит без заголовка — сервер сам понизит его права.
+ */
+async function authHeaders(): Promise<Record<string, string>> {
+  if (!isSupabaseConfigured) return {};
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+async function apiFetch(url: string | URL, options: RequestInit = {}) {
+  const auth = await authHeaders();
+  const r = await fetch(url, {
+    ...options,
+    headers: { ...(options.headers ?? {}), ...auth },
+  });
   if (!r.ok) {
     const text = await r.text().catch(() => "Unknown error");
     throw new Error(`API ${r.status}: ${text}`);

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
+import { requireCapability } from "../lib/auth";
 
 const router = Router();
 const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
@@ -16,7 +17,7 @@ const runningJobs: Map<string, {
 }> = new Map();
 
 // POST /optimizer/run — запустить оптимизацию
-router.post("/run", (req, res) => {
+router.post("/run", requireCapability("control_bots"), (req, res) => {
   const { symbol, timeframe, start, end, trials = 100, config } = req.body;
 
   if (!symbol || !start || !end) {
@@ -115,7 +116,7 @@ router.get("/jobs/:jobId", (req, res) => {
 });
 
 // DELETE /optimizer/jobs/:jobId — остановить задачу
-router.delete("/jobs/:jobId", (req, res) => {
+router.delete("/jobs/:jobId", requireCapability("control_bots"), (req, res) => {
   const job = runningJobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Job not found" });
   job.process.kill("SIGTERM");

@@ -14,6 +14,14 @@ except ImportError:
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
+# Server-to-server токен для авторизации на API (RBAC). Если задан, боты
+# идентифицируются как доверенный сервис и обходят пользовательский вход.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+
+def _auth_headers() -> dict:
+    return {"x-internal-token": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
+
 
 class DbReporter:
     def __init__(self, symbol: str, logger: logging.Logger):
@@ -46,6 +54,7 @@ class DbReporter:
             async with session.post(
                 f"{API_URL}/trades",
                 json=trade,
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status in (200, 201):
@@ -66,6 +75,7 @@ class DbReporter:
             async with session.patch(
                 f"{API_URL}/trades/{trade_id}",
                 json=data,
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status >= 400:
@@ -84,6 +94,7 @@ class DbReporter:
             async with session.patch(
                 f"{API_URL}/bots/{self.symbol}",
                 json=data,
+                headers=_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status >= 400:

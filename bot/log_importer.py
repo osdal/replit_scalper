@@ -14,6 +14,13 @@ from typing import Optional
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
 
+# Server-to-server токен для RBAC на API сервере.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+
+def _auth_headers() -> dict:
+    return {"x-internal-token": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
+
 # Паттерны для парсинга лога
 RE_TIMESTAMP = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 RE_SYMBOL    = r"\[(?:LIVE|PAPER) (\w+USDT)\]"
@@ -157,7 +164,7 @@ def import_trades(trades: list[dict], existing: set[str]) -> int:
         if key in existing:
             continue
         try:
-            r = requests.post(f"{API_URL}/trades", json=trade, timeout=10)
+            r = requests.post(f"{API_URL}/trades", json=trade, headers=_auth_headers(), timeout=10)
             if r.status_code in (200, 201):
                 imported += 1
             else:

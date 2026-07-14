@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import yaml from "js-yaml";
 import { fileURLToPath } from "url";
+import { requireCapability } from "../lib/auth";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -107,7 +108,7 @@ router.get("/:symbol", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.put("/:symbol/config", async (req, res) => {
+router.put("/:symbol/config", requireCapability("control_bots"), async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const configUpdates = { ...req.body };
@@ -139,7 +140,7 @@ router.put("/:symbol/config", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.patch("/:symbol", async (req, res) => {
+router.patch("/:symbol", requireCapability("control_bots"), async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const body = { ...req.body };
@@ -154,7 +155,7 @@ router.patch("/:symbol", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/refresh", async (_req, res) => {
+router.post("/refresh", requireCapability("control_bots"), async (_req, res) => {
   try {
     await reloadConfigsFromYaml();
     for (const symbol of Array.from(botProcesses.keys())) {
@@ -175,7 +176,7 @@ router.post("/refresh", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/stop-all", async (_req, res) => {
+router.post("/stop-all", requireCapability("admin_actions"), async (_req, res) => {
   try {
     await stopAllBots();
     const bots = await db.select().from(botsTable);
@@ -183,7 +184,7 @@ router.post("/stop-all", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/:symbol/start", async (req, res) => {
+router.post("/:symbol/start", requireCapability("control_bots"), async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
@@ -269,7 +270,7 @@ if (proc.killed) {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/stop-all", async (_req, res) => {
+router.post("/stop-all", requireCapability("admin_actions"), async (_req, res) => {
   try {
     const stoppedBots: string[] = [];
     for (const [symbol, proc] of botProcesses) {
@@ -297,7 +298,7 @@ router.post("/stop-all", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/:symbol/stop", async (req, res) => {
+router.post("/:symbol/stop", requireCapability("control_bots"), async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
 
@@ -443,6 +444,27 @@ async function stopAllBots(): Promise<void> {
     }
   }
   await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
+}
+
+// Периодически синхронизирует is_running в БД с реально запущенными
+// процессами. Нужно, потому что боты могут запускаться не только через
+// API (например, напрямую скриптом start-all-linux.sh), и тогда API не
+// знает об их состоянии.
+export async function reconcileRunningBots(): Promise<void> {
+  try {
+    const bots = await db.select().from(botsTable);
+    for (const bot of bots) {
+      const pid = await findBotPid(bot.symbol);
+      const shouldRun = !!pid;
+      if (bot.is_running !== shouldRun) {
+        await db.update(botsTable)
+          .set({ is_running: shouldRun, updated_at: new Date().toISOString() })
+          .where(eq(botsTable.symbol, bot.symbol));
+      }
+    }
+  } catch (e) {
+    logger.warn({ err: e }, "reconcileRunningBots failed");
+  }
 }
 
 export default router;

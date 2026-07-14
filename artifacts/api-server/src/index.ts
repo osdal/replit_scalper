@@ -7,7 +7,8 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { reloadConfigsFromYaml } from "./routes/bots";
+import { reloadConfigsFromYaml, reconcileRunningBots } from "./routes/bots";
+import refreshRouter from "./routes/refresh";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -92,5 +93,9 @@ resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
       process.exit(1);
     }
     logger.info({ port }, "Server listening");
+    // Раз в 10с синхронизируем is_running в БД с реальными процессами,
+    // чтобы дашборд корректно показывал статус даже для ботов,
+    // запущенных напрямую (не через API).
+    setInterval(() => { reconcileRunningBots().catch(() => {}); }, 10000);
   });
 });

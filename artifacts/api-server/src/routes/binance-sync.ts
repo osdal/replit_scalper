@@ -6,6 +6,7 @@ import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
+import { requireCapability } from "../lib/auth";
 
 const router = Router();
 
@@ -35,7 +36,7 @@ async function binanceGet(path: string, params: Record<string, string | number> 
 }
 
 // POST /binance-sync
-router.post("/", async (_req, res) => {
+router.post("/", requireCapability("control_bots"), async (_req, res) => {
   try {
     if (!API_KEY || !API_SECRET) {
       return res.status(400).json({ error: "BINANCE_API_KEY and BINANCE_API_SECRET not configured" });
