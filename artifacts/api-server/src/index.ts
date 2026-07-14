@@ -48,9 +48,15 @@ async function resetStaleRunningBots(): Promise<void> {
       try {
         if (process.platform === "win32") {
           const { stdout } = await execAsync(
-            `wmic process where "name='python.exe'" get commandline /format:csv`
+            `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
           );
-          isAlive = stdout.includes(configFile);
+          try {
+            const processes = JSON.parse(stdout);
+            const procList = Array.isArray(processes) ? processes : [processes];
+            isAlive = procList.some((p: any) => p.CommandLine?.includes(configFile));
+          } catch {
+            isAlive = false;
+          }
         } else {
           const { stdout } = await execAsync(
             `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
