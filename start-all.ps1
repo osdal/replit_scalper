@@ -14,7 +14,18 @@ Write-Host ""
 Write-Host "[0/5] Stopping existing processes..."
 Stop-Process -Name node -ErrorAction SilentlyContinue -Force
 Stop-Process -Name python -ErrorAction SilentlyContinue -Force
-Start-Sleep -Seconds 2
+# Принудительно освобождаем порт 5000 (старый API может не отпустить
+# сокет сразу после Stop-Process), иначе новый сервер упадёт с EADDRINUSE
+$portPid = (Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue).OwningProcess
+if ($portPid) {
+    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+}
+# Ждём реального освобождения порта, а не фиксированные 2 секунды
+$waited = 0
+while ((Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue) -and $waited -lt 10) {
+    Start-Sleep -Seconds 1
+    $waited++
+}
 Write-Host "      OK"
 Write-Host ""
 
