@@ -1,77 +1,7 @@
-# See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
-
-# compiled output
-dist
-tmp
-out-tsc
-*.tsbuildinfo
-.expo
-.expo-shared
-
-# dependencies
-node_modules
-
-# IDEs and editors
-/.idea
-.project
-.classpath
-.c9/
-*.launch
-.settings/
-*.sublime-workspace
-
-# IDE - VSCode
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-
-# misc
-/.sass-cache
-/connect.lock
-/coverage
-/libpeerconnection.log
-npm-debug.log
-yarn-error.log
-testem.log
-/typings
-
-# System Files
-.DS_Store
-Thumbs.db
-
-.cursor/rules/nx-rules.mdc
-.github/instructions/nx.instructions.md
-
-# Replit
-.cache/
-.local/
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-
-# Secrets — never commit API keys
-.env
-.env.*
-!.env.example
-
 # Bot runtime data — generated locally, never committed
 bot/logs/
 bot/state_*.json
 bot/recovery_config.yaml
 bot/bot.lock.*
+bot/config_*.yaml
 data/
-
-# Local scratch files
-tree.txt
-commands.txt
-*.diff
-*.vsix
-start_bot.bat
-start_dashboard.bat
-patch_dashboard_*.js
-.rooignore
-logs/*.log
