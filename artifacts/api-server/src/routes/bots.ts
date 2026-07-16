@@ -195,14 +195,6 @@ router.post("/refresh", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/stop-all", async (_req, res) => {
-  try {
-    await stopAllBots();
-    const bots = await db.select().from(botsTable);
-    res.json({ success: true, message: "All bots stopped", bots: bots.map(b => ({ symbol: b.symbol, is_running: b.is_running })) });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
-
 router.post("/:symbol/start", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();

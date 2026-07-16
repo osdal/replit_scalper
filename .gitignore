@@ -5,3 +5,4 @@ bot/recovery_config.yaml
 bot/bot.lock.*
 bot/config_*.yaml
 data/
+.env

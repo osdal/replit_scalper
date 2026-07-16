@@ -79,8 +79,8 @@ export async function updateRecoveryConfig(config: { recovery_enabled: boolean; 
   });
 }
 
-export async function refreshBots(): Promise<{ success: boolean; message: string; refreshed: number; bots: { symbol: string; is_running: boolean }[] }> {
-  return apiFetch(`${API}/bots/refresh`, { method: "POST" });
+export async function refreshBots(): Promise<{ success: boolean; message: string }> {
+  return apiFetch(`${API}/refresh`, { method: "POST" });
 }
 
 export async function stopAllBots(): Promise<{ success: boolean; message: string; bots: { symbol: string; is_running: boolean }[] }> {
