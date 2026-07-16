@@ -6,23 +6,40 @@ import { db, botsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
 
 const execAsync = promisify(exec);
 const router = Router();
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+let BOT_DIR: string;
+if (process.env.BOT_DIR) {
+  BOT_DIR = path.isAbsolute(process.env.BOT_DIR)
+    ? process.env.BOT_DIR
+    : path.join(PROJECT_ROOT, process.env.BOT_DIR);
+} else {
+  BOT_DIR = path.join(PROJECT_ROOT, "bot");
+}
 
 async function findBotPid(symbol: string): Promise<number | null> {
   const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
   try {
     const { stdout } = await execAsync(
-      `wmic process where "name='python.exe'" get processid,commandline /format:csv`
+      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
     );
-    for (const line of stdout.split("\n")) {
-      if (line.includes(configFile)) {
-        const parts = line.trim().split(",");
-        const pid = parseInt(parts[parts.length - 1]);
-        if (!isNaN(pid) && pid > 0) return pid;
+    try {
+      const processes = JSON.parse(stdout);
+      const procList = Array.isArray(processes) ? processes : [processes];
+      for (const p of procList) {
+        if (p.CommandLine?.includes(configFile)) {
+          const pid = parseInt(p.ProcessId);
+          if (!isNaN(pid) && pid > 0) return pid;
+        }
       }
+    } catch {
+      return null;
     }
   } catch {}
   return null;
