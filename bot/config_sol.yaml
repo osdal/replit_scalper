@@ -7,7 +7,7 @@ htf_ema_fast: 9
 htf_ema_slow: 21
 htf_enabled: true
 htf_timeframe: 1h
-leverage: 50
+leverage: 100
 log_file: logs/sol.log
 mode: live
 paper_balance: 1000.0
