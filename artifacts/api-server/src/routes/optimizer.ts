@@ -2,9 +2,26 @@ import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Resolve BOT_DIR так же, как в bots.ts — от корня проекта
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+let BOT_DIR: string;
+if (process.env.BOT_DIR) {
+  const envBotDir = process.env.BOT_DIR;
+  if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
+    BOT_DIR = envBotDir;
+  } else {
+    BOT_DIR = path.join(PROJECT_ROOT, envBotDir);
+  }
+} else {
+  BOT_DIR = path.join(PROJECT_ROOT, "bot");
+}
 
 const router = Router();
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
 
 // Хранит активные задачи оптимизации
 const runningJobs: Map<string, {
@@ -36,7 +53,11 @@ router.post("/run", (req, res) => {
   ];
   if (timeframe) args.push("--timeframe", timeframe);
 
-  const proc = spawn("python", args, { cwd: BOT_DIR });
+  const proc = spawn("python", args, {
+    cwd: BOT_DIR,
+    env: process.env,
+    shell: process.platform === "win32",
+  });
 
   const job = {
     process: proc,
