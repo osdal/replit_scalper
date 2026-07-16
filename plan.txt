@@ -1,0 +1,10 @@
+[ WordPress: mysite.com ] ---> Привлекает трафик, ведет на...
+      |
+      v
+[ React Dashboard: app.mysite.com ] ---> Вход в 1 клик через Telegram Widget
+      |
+      +---> [ Backend: Node.js / Python ] 
+                  |
+                  +---> Запускает изолированных ботов для юзеров
+                  |
+                  +---> Шлет сигналы о сделках в [ Публичный TG-Канал ]
