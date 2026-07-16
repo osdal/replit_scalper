@@ -62,6 +62,8 @@ __pycache__/
 bot/logs/
 bot/state_*.json
 bot/recovery_config.yaml
+bot/bot.lock.*
+bot/config_*.yaml
 data/
 
 # Local scratch files
