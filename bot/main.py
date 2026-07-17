@@ -497,6 +497,8 @@ async def _run_live_or_paper(
                     risk_pct=cfg.risk_pct,
                     sl_pct=cfg.sl_pct,
                     max_pct=max_pct if max_pct > 0 else None,
+                    logger=log,
+                    symbol=cfg.symbol,
                 )
                 log.info(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
