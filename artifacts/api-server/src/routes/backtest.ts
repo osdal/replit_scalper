@@ -1,9 +1,16 @@
 import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+const BOT_DIR = process.env.BOT_DIR
+  ? (path.isAbsolute(process.env.BOT_DIR) ? process.env.BOT_DIR : path.join(PROJECT_ROOT, process.env.BOT_DIR))
+  : path.join(PROJECT_ROOT, "bot");
 
 const router = Router();
-const BOT_DIR = process.env.BOT_DIR || path.resolve("../../bot");
 
 // POST /backtest/:symbol
 // Передаёт параметры бэктеста в Python-процесс через stdin как JSON —
