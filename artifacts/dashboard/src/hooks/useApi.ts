@@ -79,6 +79,15 @@ export async function updateRecoveryConfig(config: { recovery_enabled: boolean; 
   });
 }
 
+export async function healthz(): Promise<boolean> {
+  try {
+    const r = await fetch(`${API.replace("/api", "")}/healthz`, { method: "GET" });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function refreshBots(): Promise<{ success: boolean; message: string }> {
   return apiFetch(`${API}/refresh`, { method: "POST" });
 }

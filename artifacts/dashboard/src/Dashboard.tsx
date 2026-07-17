@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -502,6 +502,13 @@ export default function Dashboard() {
 
   const [toggling, setToggling] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [apiUp, setApiUp] = useState(true);
+
+  useEffect(() => {
+    healthz().then(setApiUp);
+    const id = setInterval(() => healthz().then(setApiUp), 5000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -613,12 +620,13 @@ export default function Dashboard() {
     <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold">Trading Bot Dashboard</h1>
-          <p className="text-zinc-400 text-sm mt-0.5">
-            Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
-          </p>
-        </div>
+<div>
+           <h1 className="text-2xl font-bold">Trading Bot Dashboard</h1>
+           <p className="text-zinc-400 text-sm mt-0.5">
+             Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
+             <span className={`ml-2 inline-block w-2 h-2 rounded-full ${apiUp ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={apiUp ? "API connected" : "API disconnected"} />
+           </p>
+         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
