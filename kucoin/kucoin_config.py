@@ -30,7 +30,7 @@ class KuCoinConfig:
     api_secret: str = ""
     api_passphrase: str = ""
 
-def load_kucoin_config(path: str = "kucoin/config.yaml") -> KuCoinConfig:
+def load_kucoin_config(path: str = "config/kucoin/config.yaml") -> KuCoinConfig:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     valid_fields = {f.name for f in dataclasses.fields(KuCoinConfig)}

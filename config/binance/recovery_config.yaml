@@ -1,0 +1,6 @@
+# Общий конфиг режима компенсации убытков (recovery mode)
+# Применяется ко всем ботам одновременно через API сервер
+
+recovery_enabled: true
+recovery_bonus_pct: 50
+recovery_max_pct: 50

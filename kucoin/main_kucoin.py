@@ -4,6 +4,12 @@ import os
 import signal
 import sys
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load KuCoin env
+env_path = os.path.join(os.path.dirname(__file__), "config", "kucoin", ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
 
 from kucoin_config import load_kucoin_config, KuCoinConfig
 from kucoin_client import get_client, get_balance, get_price, place_order, place_tp_order
