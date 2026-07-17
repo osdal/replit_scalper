@@ -46,32 +46,54 @@ def calc_recovery_quantity(
     risk_pct: float,
     sl_pct: float,
     max_pct: Optional[float] = None,
+    logger: Optional[logging.Logger] = None,
+    symbol: str = "UNKNOWN",
 ) -> float:
     """
     Рассчитывает размер позиции-компенсатора так, чтобы прибыль
-    при полном закрытии на TP1 (100% позиции) покрыла debt_amount + бонус.
+    при полном закрытии на TP1 покрыла debt_amount + бонус.
 
-    target_profit = debt_amount * (1 + bonus_pct/100)
-    tp1_distance   = entry_price * tp1_pct / 100
-    qty            = target_profit / tp1_distance
-
-    max_pct (опционально) ограничивает размер позиции в процентах от депозита.
-    Например, max_pct=50 означает что позиция не может превышать 50% от balance.
-    Если None или 0 — ограничения нет.
+    Формула: TargetProfit = debt_amount * (1 + bonus_pct/100)
+    Qty = TargetProfit / (entry_price * tp1_pct / 100 * (1 - fee_rate))
+    fee_rate = 0.0004 (0.02% * 2 для taker fee в обе стороны)
     """
+    fee_rate = 0.0004  # 0.02% * 2 для вход/выход
+
+    # 1. Рассчитываем целевой профит (накопленный убыток + бонус)
     target_profit = debt_amount * (1 + bonus_pct / 100)
-    tp1_distance = entry_price * tp1_pct / 100
+
+    # 2. Расстояние до TP1 в долларах (с учётом комиссии)
+    tp1_distance = entry_price * tp1_pct / 100 * (1 - fee_rate)
     if tp1_distance <= 0:
         return 0.0
+
+    # 3. Сырой размер позиции
     raw_qty = target_profit / tp1_distance
-    # Если max_pct не задан — возвращаем сырой размер без ограничений
-    if max_pct is None or max_pct <= 0 or entry_price <= 0:
-        return raw_qty
-    # Ограничиваем максимальный размер позиции в % от депозита
-    # max_pct = процент от баланса в USDT, конвертируем в qty монет
-    max_notional = balance * max_pct / 100  # максимальный нотиональ в USDT
-    max_qty = max_notional / entry_price   # конвертируем в количество монет
-    return min(raw_qty, max_qty)
+
+    # 4. Логируем детали расчета
+    if logger:
+        logger.info(
+            f"[RECOVERY_CALC] symbol={symbol} "
+            f"debt={debt_amount:.4f} bonus={bonus_pct}% "
+            f"target_profit={target_profit:.4f} "
+            f"entry={entry_price:.4f} tp1_pct={tp1_pct}% "
+            f"tp1_distance_before_fee={entry_price * tp1_pct / 100:.4f} "
+            f"tp1_distance_after_fee={tp1_distance:.4f} "
+            f"raw_qty={raw_qty:.6f}"
+        )
+
+    # 5. Ограничиваем максимальный размер позиции в % от депозита
+    if max_pct is not None and max_pct > 0 and entry_price > 0:
+        max_notional = balance * max_pct / 100
+        max_qty = max_notional / entry_price
+        result_qty = min(raw_qty, max_qty)
+        if logger:
+            logger.info(f"[RECOVERY_CALC] max_pct={max_pct}% max_qty={max_qty:.6f} result={result_qty:.6f}")
+        return result_qty
+
+    if logger:
+        logger.info(f"[RECOVERY_CALC] No max limit applied, qty={raw_qty:.6f}")
+    return raw_qty
 
 
 def _round_step(value: float, step: float) -> float:
@@ -326,6 +348,13 @@ class OrderManager:
 
         tp1_close_pct = 100 if recovery_qty is not None else self.cfg.tp1_close_pct
 
+        if recovery_qty is not None:
+            self.log.info(
+                f"[RECOVERY] Order params | raw_qty={raw_qty:.6f} adjusted_qty={qty:.6f} "
+                f"entry_price={signal.entry_price:.4f} tp1_price={signal.tp1_price:.4f} "
+                f"stepSize={self._step_size} tickSize={self._tick_size}"
+            )
+
         if self.cfg.mode == "live":
             await self._set_leverage()
             order = await self.client.futures_create_order(
@@ -341,8 +370,17 @@ class OrderManager:
                 f"{' [RECOVERY]' if recovery_qty is not None else ''}"
             )
             if recovery_qty is not None:
-                await self._place_sl(signal.direction, signal.sl_price, qty=qty)
-                await self._place_tp_limit(signal.direction, signal.tp1_price, qty)
+                # Recalculate TP1 based on actual fill price for recovery
+                tp1_price = entry_price * (1 + self.cfg.tp1_pct / 100) if signal.direction == "LONG" else entry_price * (1 - self.cfg.tp1_pct / 100)
+                adjusted_tp1 = await self._adjust_price(tp1_price)
+                self.log.info(
+                    f"[RECOVERY] TP1 price | raw={signal.tp1_price:.4f} recalculated={tp1_price:.4f} "
+                    f"adjusted={adjusted_tp1:.4f} tickSize={self._tick_size} "
+                    f"expected_profit={qty * (adjusted_tp1 - entry_price):.4f} USDT"
+                )
+                adjusted_sl = await self._adjust_price(signal.sl_price)
+                await self._place_sl(signal.direction, adjusted_sl, qty=qty)
+                await self._place_tp_limit(signal.direction, adjusted_tp1, qty)
             else:
                 await self._place_all_orders(
                     direction=signal.direction,
