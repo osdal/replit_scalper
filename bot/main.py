@@ -22,6 +22,12 @@ from recovery_client import RecoveryClient, readRecoveryConfig
 
 load_dotenv()
 
+# Exchange-specific env loading
+EXCHANGE_BASE = os.getenv("EXCHANGE_BASE", "binance")  # "binance" or "kucoin"
+exchange_env = os.path.join(os.path.dirname(__file__), "..", "config", EXCHANGE_BASE, ".env")
+if os.path.exists(exchange_env):
+    load_dotenv(exchange_env, override=True)
+
 HEARTBEAT_CANDLES = 3
 LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
 
