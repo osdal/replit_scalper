@@ -1,19 +1,99 @@
-# Bot runtime data — generated locally, never committed
-bot/logs/
-bot/state_*.json
-bot/recovery_config.yaml
-bot/bot.lock.*
-bot/config_*.yaml
-data/
+# ==========================================
+# 1. Секреты и Переменные Окружения
+# ==========================================
 .env
-kucoin/.env
-node_modules/
-.vscode/
-.DS_Store
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Разрешаем только шаблон
+!.env.example
+
+# ==========================================
+# 2. Файлы Состояния Бота, Кэш и Логи
+# ==========================================
+state_*.json
+state.json
+*.db
+*.sqlite3
+*.log
+
+# ==========================================
+# 3. Временные Патчи и Служебные Дампы
+# ==========================================
+patch_dashboard_*.js
+apply_config_patch.diff
+# commands.txt
+# plan.txt
+structure.txt
+
+# ==========================================
+# 4. Временные Расширения, AI-Службы и IDE
+# ==========================================
 .kilo/
-.lib/
-logs/
-static/
-dist/
-venv/
+.roo/
+*.vsix
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+
+# Конфигурации IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# ==========================================
+# 5. Python (Сборка, Виртуальные Окружения, Кэш)
+# ==========================================
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Виртуальные окружения
+venv/
+env/
+ENV/
+.venv/
+
+# Инструменты управления (uv, pytest, mypy, ruff)
+.uv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+
+# ==========================================
+# 6. Node.js & Пакетные Менеджеры
+# ==========================================
+node_modules/
+.npm/
+.pnpm-store/
+pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# 7. MetaTrader / MQL (если есть скомпилированные файлы)
+# ==========================================
+*.ex4
+*.ex5
+
+# Lock-файлы ботов
+*.lock
+*.lock.*
+
+# Все CSV отчёты и оптимизации
+*.csv
