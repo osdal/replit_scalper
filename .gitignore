@@ -1,5 +1,26 @@
 # ==========================================
-# 1. Секреты и Переменные Окружения
+# 1. Системные файлы Linux & IDE
+# ==========================================
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.tmp
+*.bak
+*.log
+
+# VS Code / JetBrains / AI
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.kilo/
+.roo/
+*.vsix
+
+# ==========================================
+# 2. Секреты и Переменные Окружения
 # ==========================================
 .env
 .env.local
@@ -7,93 +28,59 @@
 *.pem
 *.key
 
-# Разрешаем только шаблон
+# Исключение для шаблона
 !.env.example
 
 # ==========================================
-# 2. Файлы Состояния Бота, Кэш и Логи
-# ==========================================
-state_*.json
-state.json
-*.db
-*.sqlite3
-*.log
-
-# ==========================================
-# 3. Временные Патчи и Служебные Дампы
-# ==========================================
-patch_dashboard_*.js
-apply_config_patch.diff
-# commands.txt
-# plan.txt
-structure.txt
-
-# ==========================================
-# 4. Временные Расширения, AI-Службы и IDE
-# ==========================================
-.kilo/
-.roo/
-*.vsix
-.DS_Store
-Thumbs.db
-*.tmp
-*.bak
-
-# Конфигурации IDE
-.idea/
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-
-# ==========================================
-# 5. Python (Сборка, Виртуальные Окружения, Кэш)
+# 3. Python (Кэш, Окружения, Сборка)
 # ==========================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 
 # Виртуальные окружения
+.venv/
 venv/
 env/
-ENV/
-.venv/
 
-# Инструменты управления (uv, pytest, mypy, ruff)
+# Инструменты и кэш (uv, pytest, ruff, mypy)
 .uv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
 *.egg-info/
 
 # ==========================================
-# 6. Node.js & Пакетные Менеджеры
+# 4. Node.js & Пакетные менеджеры
 # ==========================================
 node_modules/
 .npm/
 .pnpm-store/
-pnpm-debug.log*
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*
+pnpm-debug.log*
 
 # ==========================================
-# 7. MetaTrader / MQL (если есть скомпилированные файлы)
+# 5. Данные, Логи, Замки (Lock-файлы) и Дампы
 # ==========================================
-*.ex4
-*.ex5
+# Логи и CSV-отчёты
+*.csv
+logs/
 
-# Lock-файлы ботов
+# Состояния и базы данных
+state_*.json
+state.json
+*.db
+*.sqlite3
+
+# Lock-файлы локальных процессов ботов
 *.lock
 *.lock.*
 
-# Все CSV отчёты и оптимизации
-*.csv
+# Временные скрипты и дампы
+patch_*.js
+apply_config_patch.diff
+structure.txt
