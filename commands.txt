@@ -1,0 +1,222 @@
+олная цепочка:
+
+Replit (auto-commit) → [вручную] → GitHub → [git pull] → локальная машина
+
+Когда хочешь обновить локалку:
+
+В Replit Shell:
+git push github main
+
+На локальной машине:
+git pull
+
+Когда хочешь отправить изменения с локалки на Replit:
+
+На локальной машине:
+git add .
+git commit -m "описание изменений"
+git push
+
+В Replit Shell:
+git pull github main
+
+Шаг с git push github main в Replit Shell — единственное что нужно делать вручную. Всё остальное (git pull на локалке) — стандартный git.
+
+
+
+Запуск поиска параметров бота
+Из папки bot/:
+
+cd C:\DATA\bots\replit_scalper\bot
+
+Базовый запуск (параметры из config.yaml):
+
+python optimizer.py
+
+С указанием пары, периода и таймфрейма:
+
+python optimizer.py --symbol BTCUSDT --timeframe 5m --start 2024-01-01 --end 2024-04-01
+
+Больше триалов = точнее результат:
+
+python optimizer.py --symbol BTCUSDT --timeframe 5m --start 2024-01-01 --end 2024-04-01 --trials 300
+
+Все опции:
+
+python optimizer.py --help
+
+Опция	По умолчанию	Описание
+--symbol	из config.yaml	Торговая пара
+--timeframe	из config.yaml	Таймфрейм (1m, 5m, 15m…)
+--start	из config.yaml	Начало периода
+--end	из config.yaml	Конец периода
+--trials	100	Количество попыток
+
+
+несколько конфиг-файлов + несколько терминалов.
+
+Шаг 1. Создай отдельный конфиг для каждой пары:
+
+config_btc.yaml:
+
+symbol: BTCUSDT
+log_file: logs/btc.log
+# остальные параметры...
+
+config_eth.yaml:
+
+symbol: ETHUSDT
+log_file: logs/eth.log
+# остальные параметры...
+
+Шаг 2. Запускай каждый в своём окне терминала:
+
+# Терминал 1
+python main.py config_btc.yaml
+# Терминал 2
+python main.py config_eth.yaml
+
+Это работает уже сейчас — main.py принимает путь к конфигу как аргумент.
+
+
+1. Запустить API сервер (консоль 1):
+powershell      
+cd C:\DATA\bots\replit_scalper\artifacts\api-server
+pnpm run dev
+2. Запустить дашборд (консоль 2):
+powershell
+cd C:\DATA\bots\replit_scalper\artifacts\dashboard
+pnpm run dev
+3. Открыть браузер: http://localhost:3000
+4. Запустить ботов — через кнопку Start в дашборде на каждой карточке.
+
+Эти две консоли должны работать постоянно пока используешь дашборд. Боты запускаются и останавливаются через кнопки в браузере.
+
+# Обнови код
+git pull origin main
+
+# Перезапусти API сервер
+pnpm --filter @workspace/api-server run dev
+
+
+изменения в конфиге
+cd C:\DATA\bots\replit_scalper\artifacts\api-server
+pnpm run init-db
+
+запуск vite
+cd artifacts/dashboard && npx vite --host 0.0.0.0 --port 5173
+
+перезапуск vite
+cd artifacts/dashboard
+# Ctrl+C чтобы остановить
+npx vite --host 0.0.0.0 --port 5173
+
+# 1. Инициализация БД (один раз)
+pnpm run init-db
+
+# 2. API-сервер в фоне
+pnpm --filter @workspace/api-server run dev &
+
+# 3. Дашборд в фоне  
+pnpm --filter @workspace/dashboard run dev &
+Или просто запустите start-all.ps1 — он всё сделает автоматически и откроет браузер.
+
+Управление ботами: через дашборд http://localhost:5173 кнопками Start/Stop на карточках ботов.
+
+# Остановить текущие процессы
+Stop-Process -Name node -ErrorAction SilentlyContinue
+Stop-Process -Name python -ErrorAction SilentlyContinue
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 5000 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue
+taskkill /IM python.exe /F
+
+
+.\start-all.bat
+
+# Или из PowerShell
+.\start-all.ps1
+
+ssh root@107.189.17.214
+
+Реквизиты для входа	
+Имя хоста:	ubuntu-Amsterdam-0.5gb
+Имя пользователя:	корень
+Пароль:	7yN3YXQ5YHuf8L
+IPv6-адрес:	2602:fa59:5:58c::1
+Шлюз IPv6:	2602:fa59:5::1
+Маска подсети IPv6:	2602:fa59:5:58c::1/48
+
+cd /opt/trading-bot
+
+
+# Запустить dashboard в фоне
+cd /opt/trading-bot
+nohup pnpm --filter @workspace/dashboard run dev > /tmp/dashboard.log 2>&1 &
+
+# Проверить
+screen -dmS dashboard bash -c "cd /opt/trading-bot && pnpm --filter @workspace/dashboard run dev"
+curl http://localhost:5173
+
+http://107.189.17.214:5173 
+
+свободная память
+free -h
+
+на что тратися память
+ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 15
+
+отключить неиспользуемую службу multipathd
+sudo systemctl stop multipathd && sudo systemctl disable multipathd
+
+Инструкция по запуску на сервере Ubuntu:
+
+# 1. Скопировать скрипт в корень проекта (уже сделано)
+
+# 2. Сделать исполняемым
+chmod +x start-all.sh
+
+# 3. Установить зависимости (если ещё не установлены)
+pnpm install
+
+# 4. Запустить
+./start-all.sh
+
+на компьютере под линукс
+cd ~/replit_scalper_linux && bash start-all-linux.sh
+Если захочешь полностью остановить эту Linux-версию, ты уже знаешь команду:
+pkill -f 'api-server|dashboard|bot/main.py'
+botstart
+botstop
+
+# Или без открытия браузера:
+./start-all.sh --no-browser
+
+
+Компактный список (Хэш + Дата + Описание)
+git log --pretty=format:"%h - %cd : %s" --date=short
+
+Нужно изменить название самого последнего коммита (HEAD)
+git commit --amend -m "Новое правильное название коммита"
+
+Ты НЕ удалял ветку после слияния
+git checkout имя_ветки
+git merge main
+
+
+# 1. Перейти в папку проекта
+cd /home/user/replit_scalper
+
+# 2. Экспортировать KuCoin API ключи
+export KUCOIN_API_KEY="your_api_key_here"
+export KUCOIN_API_SECRET="your_api_secret_here"
+export KUCOIN_API_PASSPHRASE="your_passphrase_here"
+
+# 3. Запустить несколько ботов в фоне
+# Экспортировать ключи
+$env:KUCOIN_API_KEY = "your_key"
+$env:KUCOIN_API_SECRET = "your_secret"
+$env:KUCOIN_API_PASSPHRASE = "your_passphrase"
+
+# Запустить несколько ботов
+Start-Process python -ArgumentList "kucoin/main_kucoin.py BTCUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/btc.log"
+Start-Process python -ArgumentList "kucoin/main_kucoin.py ETHUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/eth.log"
+Start-Process python -ArgumentList "kucoin/main_kucoin.py SOLUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/sol.log"
