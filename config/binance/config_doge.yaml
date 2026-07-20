@@ -1,8 +1,8 @@
 auto_mode: true
 backtest_end: '2026-06-15'
 backtest_start: '2026-06-01'
-ema_fast: 20
-ema_slow: 41
+ema_fast: 15
+ema_slow: 22
 htf_ema_fast: 9
 htf_ema_slow: 21
 htf_enabled: true
@@ -12,11 +12,11 @@ log_file: logs/doge.log
 mode: live
 paper_balance: 1000.0
 risk_pct: 3.0
-sl_pct: 1.2
+sl_pct: 1.1500000000000001
 symbol: DOGEUSDT
 timeframe: 5m
-tp1_close_pct: 60
-tp1_pct: 0.5
+tp1_close_pct: 70
+tp1_pct: 0.8
 tp2_pct: 1
 volume_ma_period: 20
-volume_multiplier: 2
+volume_multiplier: 1.5
