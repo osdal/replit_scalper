@@ -1,8 +1,8 @@
 auto_mode: true
 backtest_end: '2026-06-08'
 backtest_start: '2026-05-01'
-ema_fast: 20
-ema_slow: 30
+ema_fast: 14
+ema_slow: 18
 htf_ema_fast: 9
 htf_ema_slow: 21
 htf_enabled: true
@@ -12,11 +12,11 @@ log_file: logs/sol.log
 mode: live
 paper_balance: 1000.0
 risk_pct: 5.0
-sl_pct: 1.5
+sl_pct: 0.35000000000000003
 symbol: SOLUSDT
 timeframe: 5m
-tp1_close_pct: 30
-tp1_pct: 0.35000000000000003
-tp2_pct: 0.75
+tp1_close_pct: 50
+tp1_pct: 1
+tp2_pct: 1.6
 volume_ma_period: 20
-volume_multiplier: 1.9
+volume_multiplier: 1.3
