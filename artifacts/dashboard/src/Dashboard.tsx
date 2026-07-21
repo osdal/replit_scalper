@@ -857,7 +857,29 @@ export default function Dashboard() {
 
           <Tabs defaultValue="chart">
 <TabsList className="bg-zinc-900 border border-zinc-800">
-              {(role !== 'guest') && (
+              {role === "superadmin" && (
+                <>
+                  <TabsTrigger value="chart" className="data-[state=active]:bg-zinc-700">
+                    <TrendingUp className="w-4 h-4 mr-1.5" />PnL Chart
+                  </TabsTrigger>
+                  <TabsTrigger value="trades" className="data-[state=active]:bg-zinc-700">
+                    <BarChart2 className="w-4 h-4 mr-1.5" />Trades
+                  </TabsTrigger>
+                  <TabsTrigger value="stats" className="data-[state=active]:bg-zinc-700">
+                    <Settings className="w-4 h-4 mr-1.5" />Stats
+                  </TabsTrigger>
+                  <TabsTrigger value="backtest" className="data-[state=active]:bg-zinc-700">
+                    <History className="w-4 h-4 mr-1.5" />Backtest
+                  </TabsTrigger>
+                  <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
+                    <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
+                  </TabsTrigger>
+                  <TabsTrigger value="recovery" className="data-[state=active]:bg-zinc-700">
+                    <Link2 className="w-4 h-4 mr-1.5" />Recovery
+                  </TabsTrigger>
+                </>
+              )}
+              {(role === "user" || role === "superadmin") && (
                 <TabsTrigger value="settings" className="data-[state=active]:bg-zinc-700">
                   <Settings className="w-4 h-4 mr-1.5" />Settings
                 </TabsTrigger>
