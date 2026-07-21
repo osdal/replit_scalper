@@ -99,7 +99,54 @@ bot/
 
 ---
 
-## 5. Работа с API Binance
+## 6. Управление доступом (RBAC)
+
+### Роли пользователей
+
+| Роль | Область ответственности | Разрешенные действия |
+|------|------------------------|---------------------|
+| **guest** | Неавторизованный пользователь | Просмотр публичных данных, вход в систему |
+| **user** | Обычный пользователь | Просмотр дашборда, изменение пароля, доступ к личным настройкам |
+| **superadmin** | Администратор | Полный доступ ко всем функциям, управление пользователями |
+
+### Ограничения интерфейса
+
+| Элемент UI | Доступные роли | Описание |
+|------------|---------------|----------|
+| Меню навигации (Settings) | user, superadmin | Единственный пункт меню – Settings, открывающий страницу настроек. |
+
+### Эндпоинты API с проверкой прав
+
+| Эндпоинт | Метод | Минимальная роль | Описание |
+|----------|-------|------------------|----------|
+| `/api/bots` | GET | user | Получение списка ботов пользователя |
+| `/api/bots/:symbol` | PUT | user | Обновление конфигурации бота |
+| `/api/bots/:symbol/start` | POST | superadmin | Запуск бота |
+| `/api/bots/:symbol/stop` | POST | superadmin | Остановка бота |
+| `/api/bots/stop-all` | POST | superadmin | Остановка всех ботов |
+| `/api/trades` | GET, POST | user | Управление сделками |
+| `/api/trades` | DELETE | superadmin | Удаление всех сделок |
+| `/api/trades/:id` | DELETE, PATCH | superadmin | Удаление/обновление сделки |
+| `/api/recovery/*` | GET, PUT | superadmin | Управление recovery-модом |
+| `/api/optimizer` | POST | superadmin | Запуск оптимизатора |
+| `/api/backtest` | POST | superadmin | Запуск бэктеста |
+
+### Механизм проверки прав
+
+1. **Backend (auth.ts)**: Middleware `authContext` проверяет JWT токен и роль из `public.profiles`.
+2. **Frontend**: Компонент использует хук `useRole()` для получения роли и проверки прав через `can(...)`.
+3. **UI-ограничения**: Элементы интерфейса скрываются или отключаются в зависимости от роли.
+
+### Рекомендации по безопасности
+
+- Все эндпоинты (кроме публичных) требуют валидный JWT
+- Операции супер-админа должны быть журналируемыми
+- Рекомендуется реализовать rate limiting для API
+- RLS (Row Level Security) должен быть настроен на уровне базы данных
+
+---
+
+## 7. Работа с API Binance
 
 ### 5.1 Binance Client (library)
 
@@ -285,7 +332,7 @@ bot/logs/bot.log
 | 4 | `bot/db_reporter.py:–` (shared_options) | Все запросы к API (trades, bots) генералируют `User-Agent: python-requests/2.32.0`. Для производительности может потребоваться rate limiting (например, max 10 req/s) и retry с exponential back-off. | **СРЕДНИЕ** |
 | 5 | `bot/log_importer.py:–` (file parsing) | Логирование данных реализовано (через внешние инструменты), однако требуется проверка различных форматов логов из tradingview. Импорт: возможные ошибки при обработке заголовков. | **СРЕДНИЕ** |
 | 6 | `artifacts/api-server/src/lib/auth.ts:–` (authContext) | Middleware checks decode of JWT + role fetch from public.profiles (service-role). **NO CURRENT RLS** in auth module; сделать проверку для guest/superadmin/restore отбой. | **СРЕДНИЕ** |
-| 7 | `artifacts/dashboard/src/Dashboard.tsx:–` (UI RBAC) | UI сейчас скрывает меню (и кнопки) на основе `role` + `can(...)`. Нет визуального indicate для гостя. | **СРЕДНИЕ** |
+| 7 | `artifacts/dashboard/src/Dashboard.tsx:–` (UI RBAC) | **РЕШЕНО**: UI скрывает меню и вкладки на основе `role`. Для user показывается только Settings, для superadmin — полный доступ. | **РЕШЕНО** |
 | 8 | `artifacts/dashboard/src/components/AuthScreen.tsx:–` (интеграция) | AuthScreen сейчас получает `onCancel`; нужна обработка `Sign Up` → authProvider, поддержка email/password + Google. | **СРЕДНИЕ** |
 | 9 | `bot/backtester.py:–` (backtest runner) | `backtest_runner.py` для запуска бота в backtest-режиме; требуется актуализировать config-файл, чтобы избежать runtime errors (недостающие поля). | **СРЕДНИЕ** |
 | 10| `bot/signal_handler.py:–` (сервис) | Отсутствие глибинговского сигнала / обслуживание входящих ордеров временно прекращено; требуется полностью реализовать процесс регистрации сигналов. | **ИЗОБИЛИТЕЛЬНАЯ** |
@@ -301,9 +348,9 @@ bot/logs/bot.log
 
 ---
 
-## 10. Зависимости
+## 11. Зависимости
 
-### 10.1 Python (бот)
+### 11.1 Python (бот)
 
 | Пакет | Версия | Назначение |
 |---------|-------|---------|
