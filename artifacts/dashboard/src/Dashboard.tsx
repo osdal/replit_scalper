@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
+import SettingsPage from "./pages/SettingsPage";
 import AuthScreen from "./components/AuthScreen";
 import { isSupabaseConfigured, supabase } from "./lib/supabaseClient";
 import { useRole } from "./lib/useRole";
@@ -152,39 +153,44 @@ function heartbeatAge(ts: string | null): string {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle, isToggling, canControl }: { bot: Bot; onToggle: () => void; isToggling: boolean; canControl: boolean }) {
-  const pos = bot.position;
-  const isLong = pos?.direction === "LONG";
-  const unrealizedPnl = pos && bot.current_price
-    ? isLong
-      ? (bot.current_price - pos.entry_price) * pos.remaining_qty
-      : (pos.entry_price - bot.current_price) * pos.remaining_qty
-    : null;
+function BotCard({ bot, onToggle, isToggling, role }: { bot: Bot; onToggle: () => void; isToggling: boolean; role: string }) {
+   const pos = bot.position;
+   const isLong = pos?.direction === "LONG";
+   const unrealizedPnl = pos && bot.current_price
+     ? isLong
+       ? (bot.current_price - pos.entry_price) * pos.remaining_qty
+       : (pos.entry_price - bot.current_price) * pos.remaining_qty
+     : null;
 
-  return (
-    <Card className="border border-zinc-800 bg-zinc-900 text-white">
-      <CardHeader className="pb-2 flex flex-row items-center justify-between">
-        <div className="flex items-center gap-2">
-          <CardTitle className="text-lg font-bold">{bot.symbol}</CardTitle>
-          <Badge variant={bot.mode === "live" ? "destructive" : "secondary"} className="text-xs">
-            {bot.mode.toUpperCase()}
-          </Badge>
-          <Badge variant={bot.is_running ? "default" : "outline"} className="text-xs">
-            {bot.is_running ? "● RUNNING" : "○ STOPPED"}
-          </Badge>
-        </div>
-        <Button
-          size="sm"
-          variant={bot.is_running ? "destructive" : "default"}
-          onClick={onToggle}
-          disabled={isToggling || !canControl}
-          title={canControl ? undefined : "Sign in to control bots"}
-          className="h-7 px-3"
-        >
-          {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
-           bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
-        </Button>
-      </CardHeader>
+   return (
+     <Card className="border border-zinc-800 bg-zinc-900 text-white">
+       <CardHeader className="pb-2 flex flex-row items-center justify-between">
+         <div className="flex items-center gap-2">
+           <CardTitle className="text-lg font-bold">{bot.symbol}</CardTitle>
+           {role === "superadmin" && (
+             <>
+               <Badge variant={bot.mode === "live" ? "destructive" : "secondary"} className="text-xs">
+                 {bot.mode.toUpperCase()}
+               </Badge>
+               <Badge variant={bot.is_running ? "default" : "outline"} className="text-xs">
+                 {bot.is_running ? "● RUNNING" : "○ STOPPED"}
+               </Badge>
+             </>
+           )}
+         </div>
+         {role === "superadmin" && (
+           <Button
+             size="sm"
+             variant={bot.is_running ? "destructive" : "default"}
+             onClick={onToggle}
+             disabled={isToggling}
+             className="h-7 px-3"
+           >
+             {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
+              bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
+           </Button>
+         )}
+       </CardHeader>
 
       <CardContent className="space-y-3">
         <div className="flex justify-between text-sm">
@@ -843,321 +849,336 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} canControl={can("control_bots")} />
+                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} role={role} />
                 ))}
               </div>
             )}
           </div>
 
           <Tabs defaultValue="chart">
-            <TabsList className="bg-zinc-900 border border-zinc-800">
-              <TabsTrigger value="chart" className="data-[state=active]:bg-zinc-700">
-                <TrendingUp className="w-4 h-4 mr-1.5" />PnL Chart
-              </TabsTrigger>
-              <TabsTrigger value="trades" className="data-[state=active]:bg-zinc-700">
-                <BarChart2 className="w-4 h-4 mr-1.5" />Trades
-              </TabsTrigger>
-              <TabsTrigger value="stats" className="data-[state=active]:bg-zinc-700">
-                <Settings className="w-4 h-4 mr-1.5" />Stats
-              </TabsTrigger>
-              <TabsTrigger value="backtest" className="data-[state=active]:bg-zinc-700">
-                <History className="w-4 h-4 mr-1.5" />Backtest
-              </TabsTrigger>
-              <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
-                <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
-              </TabsTrigger>
-              <TabsTrigger value="recovery" className="data-[state=active]:bg-zinc-700">
-                <Link2 className="w-4 h-4 mr-1.5" />Recovery
-              </TabsTrigger>
+<TabsList className="bg-zinc-900 border border-zinc-800">
+              {(role !== 'guest') && (
+                <TabsTrigger value="settings" className="data-[state=active]:bg-zinc-700">
+                  <Settings className="w-4 h-4 mr-1.5" />Settings
+                </TabsTrigger>
+              )}
             </TabsList>
 
-            <TabsContent value="chart" className="mt-4">
-              <Card className="border border-zinc-800 bg-zinc-900">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base text-zinc-300">Cumulative PnL (all symbols)</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <PnlChart trades={trades} />
-                </CardContent>
-              </Card>
+<TabsContent value="chart" className="mt-4">
+                {role === "superadmin" && (
+                    <>
+                        <Card className="border border-zinc-800 bg-zinc-900">
+                            <CardHeader className="pb-2">
+                                <CardTitle className="text-base text-zinc-300">Cumulative PnL (all symbols)</CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                                <PnlChart trades={trades} />
+                            </CardContent>
+                        </Card>
+                    </>
+                )}
             </TabsContent>
 
             <TabsContent value="trades" className="mt-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <select
-                  value={selectedSymbol}
-                  onChange={e => setSelectedSymbol(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-                >
-                  <option value="all">All symbols</option>
-                  {symbols.map(s => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleExportCSV}
-                  className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-                >
-                  <Download className="w-4 h-4 mr-2" />
-                  Export CSV
-                </Button>
-              </div>
-              <TradesTable trades={filteredTrades} />
+                {role === "superadmin" && (
+                    <>
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <select
+                                value={selectedSymbol}
+                                onChange={e => setSelectedSymbol(e.target.value)}
+                                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                            >
+                                <option value="all">All symbols</option>
+                                {symbols.map(s => (
+                                    <option key={s} value={s}>{s}</option>
+                                ))}
+                            </select>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={handleExportCSV}
+                                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                            >
+                                <Download className="w-4 h-4 mr-2" />
+                                Export CSV
+                            </Button>
+                        </div>
+                        <TradesTable trades={filteredTrades} />
+                    </>
+                )}
             </TabsContent>
 
             <TabsContent value="stats" className="mt-4">
-              <StatsTable stats={stats} />
+                {role === "superadmin" && (
+                    <>
+                        <StatsTable stats={stats} />
+                    </>
+                )}
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <div className="space-y-4" key={btResetKey}>
-                <Card className="border border-zinc-800 bg-zinc-900">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-base text-zinc-300 flex items-center gap-2">
-                      <BarChart2 className="w-4 h-4" />Backtest Configuration
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Symbol</label>
-                        <input
-                          type="text"
-                          value={btSymbol}
-                          onChange={e => setBtSymbol(e.target.value.toUpperCase())}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-                          placeholder="BTCUSDT"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Timeframe</label>
-                        <select
-                          value={btConfig.timeframe}
-                          onChange={e => updateBtConfig("timeframe", e.target.value)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        >
-                          {TIMEFRAMES.map(tf => (
-                            <option key={tf} value={tf}>{tf}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Start Date</label>
-                        <input
-                          type="date"
-                          value={btStartDate}
-                          onChange={e => setBtStartDate(e.target.value)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">End Date</label>
-                        <input
-                          type="date"
-                          value={btEndDate}
-                          onChange={e => setBtEndDate(e.target.value)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Leverage</label>
-                        <input
-                          type="number"
-                          value={btConfig.leverage}
-                          onChange={e => updateBtConfig("leverage", parseInt(e.target.value) || 1)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                          min={1}
-                          max={125}
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Risk %</label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={btConfig.risk_pct}
-                          onChange={e => updateBtConfig("risk_pct", parseFloat(e.target.value) || 0)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">SL %</label>
-                        <input
-                          type="number"
-                          step="0.05"
-                          value={btConfig.sl_pct}
-                          onChange={e => updateBtConfig("sl_pct", parseFloat(e.target.value) || 0)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">TP1 %</label>
-                        <input
-                          type="number"
-                          step="0.05"
-                          value={btConfig.tp1_pct}
-                          onChange={e => updateBtConfig("tp1_pct", parseFloat(e.target.value) || 0)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">TP2 %</label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={btConfig.tp2_pct}
-                          onChange={e => updateBtConfig("tp2_pct", parseFloat(e.target.value) || 0)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">EMA Fast</label>
-                        <input
-                          type="number"
-                          value={btConfig.ema_fast}
-                          onChange={e => updateBtConfig("ema_fast", parseInt(e.target.value) || 1)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">EMA Slow</label>
-                        <input
-                          type="number"
-                          value={btConfig.ema_slow}
-                          onChange={e => updateBtConfig("ema_slow", parseInt(e.target.value) || 1)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-zinc-400 mb-1 block">Volume Multiplier</label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={btConfig.volume_multiplier}
-                          onChange={e => updateBtConfig("volume_multiplier", parseFloat(e.target.value) || 1)}
-                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
-                        />
-                      </div>
-                    </div>
+                {role === "superadmin" && (
+                    <>
+                        <div className="space-y-4" key={btResetKey}>
+                            <Card className="border border-zinc-800 bg-zinc-900">
+                                <CardHeader className="pb-2">
+                                    <CardTitle className="text-base text-zinc-300 flex items-center gap-2">
+                                        <BarChart2 className="w-4 h-4" />Backtest Configuration
+                                    </CardTitle>
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Symbol</label>
+                                            <input
+                                                type="text"
+                                                value={btSymbol}
+                                                onChange={e => setBtSymbol(e.target.value.toUpperCase())}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                                                placeholder="BTCUSDT"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Timeframe</label>
+                                            <select
+                                                value={btConfig.timeframe}
+                                                onChange={e => updateBtConfig("timeframe", e.target.value)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            >
+                                                {TIMEFRAMES.map(tf => (
+                                                    <option key={tf} value={tf}>{tf}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Start Date</label>
+                                            <input
+                                                type="date"
+                                                value={btStartDate}
+                                                onChange={e => setBtStartDate(e.target.value)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">End Date</label>
+                                            <input
+                                                type="date"
+                                                value={btEndDate}
+                                                onChange={e => setBtEndDate(e.target.value)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Leverage</label>
+                                            <input
+                                                type="number"
+                                                value={btConfig.leverage}
+                                                onChange={e => updateBtConfig("leverage", parseInt(e.target.value) || 1)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                                min={1}
+                                                max={125}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Risk %</label>
+                                            <input
+                                                type="number"
+                                                step="0.1"
+                                                value={btConfig.risk_pct}
+                                                onChange={e => updateBtConfig("risk_pct", parseFloat(e.target.value) || 0)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">SL %</label>
+                                            <input
+                                                type="number"
+                                                step="0.05"
+                                                value={btConfig.sl_pct}
+                                                onChange={e => updateBtConfig("sl_pct", parseFloat(e.target.value) || 0)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">TP1 %</label>
+                                            <input
+                                                type="number"
+                                                step="0.05"
+                                                value={btConfig.tp1_pct}
+                                                onChange={e => updateBtConfig("tp1_pct", parseFloat(e.target.value) || 0)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">TP2 %</label>
+                                            <input
+                                                type="number"
+                                                step="0.1"
+                                                value={btConfig.tp2_pct}
+                                                onChange={e => updateBtConfig("tp2_pct", parseFloat(e.target.value) || 0)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">EMA Fast</label>
+                                            <input
+                                                type="number"
+                                                value={btConfig.ema_fast}
+                                                onChange={e => updateBtConfig("ema_fast", parseInt(e.target.value) || 1)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">EMA Slow</label>
+                                            <input
+                                                type="number"
+                                                value={btConfig.ema_slow}
+                                                onChange={e => updateBtConfig("ema_slow", parseInt(e.target.value) || 1)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-zinc-400 mb-1 block">Volume Multiplier</label>
+                                            <input
+                                                type="number"
+                                                step="0.1"
+                                                value={btConfig.volume_multiplier}
+                                                onChange={e => updateBtConfig("volume_multiplier", parseFloat(e.target.value) || 1)}
+                                                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
+                                            />
+                                        </div>
+                                    </div>
 
-                    <div className="mt-4 flex items-center gap-4">
-                      <Button
-                        onClick={handleRunBacktest}
-                        disabled={btRunning}
-                        className="flex items-center gap-2"
-                      >
-                        {btRunning ? (
-                          <><RefreshCw className="w-4 h-4 animate-spin" />Running...</>
-                        ) : (
-                          <><Play className="w-4 h-4" />Run Backtest</>
-                        )}
-                      </Button>
-                      {btError && (
-                        <span className="text-red-400 text-sm">{btError}</span>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
+                                    <div className="mt-4 flex items-center gap-4">
+                                        <Button
+                                            onClick={handleRunBacktest}
+                                            disabled={btRunning}
+                                            className="flex items-center gap-2"
+                                        >
+                                            {btRunning ? (
+                                                <><RefreshCw className="w-4 h-4 animate-spin" />Running...</>
+                                            ) : (
+                                                <><Play className="w-4 h-4" />Run Backtest</>
+                                            )}
+                                        </Button>
+                                        {btError && (
+                                            <span className="text-red-400 text-sm">{btError}</span>
+                                        )}
+                                    </div>
+                                </CardContent>
+                            </Card>
 
-                {btResult && (
-                  <>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-                            <BarChart2 className="w-4 h-4" />Total Trades
-                          </div>
-                          <div className="text-2xl font-bold font-mono text-white">{btResult.total_trades}</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-                            <TrendingUp className="w-4 h-4 text-green-400" />Win Rate
-                          </div>
-                          <div className="text-2xl font-bold font-mono text-green-400">{btResult.win_rate}%</div>
-                          <div className="text-xs text-zinc-500 mt-1">{btResult.wins}W / {btResult.losses}L</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-                            <DollarSign className="w-4 h-4" />Total PnL
-                          </div>
-                          <div className={`text-2xl font-bold font-mono ${btResult.total_pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                            {btResult.total_pnl >= 0 ? "+" : ""}{btResult.total_pnl.toFixed(4)}
-                          </div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-                            <TrendingDown className="w-4 h-4 text-red-400" />Max Drawdown
-                          </div>
-                          <div className="text-2xl font-bold font-mono text-red-400">{btResult.max_drawdown}%</div>
-                        </CardContent>
-                      </Card>
-                    </div>
+                            {btResult && (
+                                <>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                                                    <BarChart2 className="w-4 h-4" />Total Trades
+                                                </div>
+                                                <div className="text-2xl font-bold font-mono text-white">{btResult.total_trades}</div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                                                    <TrendingUp className="w-4 h-4 text-green-400" />Win Rate
+                                                </div>
+                                                <div className="text-2xl font-bold font-mono text-green-400">{btResult.win_rate}%</div>
+                                                <div className="text-xs text-zinc-500 mt-1">{btResult.wins}W / {btResult.losses}L</div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                                                    <DollarSign className="w-4 h-4" />Total PnL
+                                                </div>
+                                                <div className={`text-2xl font-bold font-mono ${btResult.total_pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                                    {btResult.total_pnl >= 0 ? "+" : ""}{btResult.total_pnl.toFixed(4)}
+                                                </div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                                                    <TrendingDown className="w-4 h-4 text-red-400" />Max Drawdown
+                                                </div>
+                                                <div className="text-2xl font-bold font-mono text-red-400">{btResult.max_drawdown}%</div>
+                                            </CardContent>
+                                        </Card>
+                                    </div>
 
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="text-xs text-zinc-400 mb-1">Initial Balance</div>
-                          <div className="text-lg font-bold font-mono text-white">${btResult.initial_balance.toFixed(2)}</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="text-xs text-zinc-400 mb-1">Final Balance</div>
-                          <div className={`text-lg font-bold font-mono ${btResult.final_balance >= btResult.initial_balance ? "text-green-400" : "text-red-400"}`}>
-                            ${btResult.final_balance.toFixed(2)}
-                          </div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="text-xs text-zinc-400 mb-1">Return</div>
-                          <div className={`text-lg font-bold font-mono ${btResult.return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
-                            {btResult.return_pct >= 0 ? "+" : ""}{btResult.return_pct}%
-                          </div>
-                        </CardContent>
-                      </Card>
-                      <Card className="border border-zinc-800 bg-zinc-900">
-                        <CardContent className="pt-4 pb-3">
-                          <div className="text-xs text-zinc-400 mb-1">Avg Win / Loss</div>
-                          <div className="text-lg font-bold font-mono">
-                            <span className="text-green-400">+{btResult.avg_win.toFixed(4)}</span>
-                            {" / "}
-                            <span className="text-red-400">{btResult.avg_loss.toFixed(4)}</span>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    </div>
-                  </>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="text-xs text-zinc-400 mb-1">Initial Balance</div>
+                                                <div className="text-lg font-bold font-mono text-white">${btResult.initial_balance.toFixed(2)}</div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="text-xs text-zinc-400 mb-1">Final Balance</div>
+                                                <div className={`text-lg font-bold font-mono ${btResult.final_balance >= btResult.initial_balance ? "text-green-400" : "text-red-400"}`}>
+                                                    ${btResult.final_balance.toFixed(2)}
+                                                </div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="text-xs text-zinc-400 mb-1">Return</div>
+                                                <div className={`text-lg font-bold font-mono ${btResult.return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                                    {btResult.return_pct >= 0 ? "+" : ""}{btResult.return_pct}%
+                                                </div>
+                                            </CardContent>
+                                        </Card>
+                                        <Card className="border border-zinc-800 bg-zinc-900">
+                                            <CardContent className="pt-4 pb-3">
+                                                <div className="text-xs text-zinc-400 mb-1">Avg Win / Loss</div>
+                                                <div className="text-lg font-bold font-mono">
+                                                    <span className="text-green-400">+{btResult.avg_win.toFixed(4)}</span>
+                                                    {" / "}
+                                                    <span className="text-red-400">{btResult.avg_loss.toFixed(4)}</span>
+                                                </div>
+                                            </CardContent>
+                                        </Card>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </>
                 )}
-              </div>
             </TabsContent>
 
             <TabsContent value="optimizer" className="mt-4">
-              <OptimizerTab
-                jobId={optJobId}
-                job={optJob}
-                setJobId={setOptJobId}
-                setJob={setOptJob}
-                onApplyToBacktest={handleApplyToBacktest}
-                symbol={optSymbol}
-                setSymbol={setOptSymbol}
-                start={optStart}
-                setStart={setOptStart}
-                end={optEnd}
-                setEnd={setOptEnd}
-              />
+                {role === "superadmin" && (
+                    <>
+                        <OptimizerTab
+                            jobId={optJobId}
+                            job={optJob}
+                            setJobId={setOptJobId}
+                            setJob={setOptJob}
+                            onApplyToBacktest={handleApplyToBacktest}
+                            symbol={optSymbol}
+                            setSymbol={setOptSymbol}
+                            start={optStart}
+                            setStart={setOptStart}
+                            end={optEnd}
+                            setEnd={setOptEnd}
+                        />
+                    </>
+                )}
             </TabsContent>
 
             <TabsContent value="recovery" className="mt-4">
-              <RecoveryTab />
+                {role === "superadmin" && (
+                    <>
+                        <RecoveryTab />
+                    </>
+                )}
+            </TabsContent>
+
+            <TabsContent value="settings" className="mt-4">
+                <SettingsPage />
             </TabsContent>
           </Tabs>
         </div>
