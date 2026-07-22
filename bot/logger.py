@@ -9,6 +9,8 @@ TRADE_KEYWORDS = (
     "TP1 hit",
     "TP2 hit",
     "SL hit",
+    "TP1_START",
+    "TP1_RETURN",
     "Partial close",
     "Full close",
     "SL moved to breakeven",
@@ -23,7 +25,18 @@ TRADE_KEYWORDS = (
     "[STATE] Restored from file",
     "[SYNC] Restored from exchange",
     "[RECOVERY]",
+    "[RECOVERY_DEBUG]",
+    "[RECOVERY][CLAIM_ERROR]",
+    "[RECOVERY][REPORT_ERROR]",
+    "[RECOVERY][LIMIT_EXCEEDED]",
+    "[TP1_START]",
+    "[TP1_RETURN]",
+    "[TP2_HIT]",
+    "[SL_HIT]",
     "[DEBUG]",
+    "[CRITICAL]",
+    "[PNL_SUMMARY]",
+    "[PNL_MISMATCH]",
 )
 
 

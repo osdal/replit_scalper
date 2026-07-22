@@ -359,77 +359,96 @@ class PositionTracker:
         return None
 
     def apply_hit(self, hit: str, close_price: float) -> float:
-        p = self.position
-        if p is None:
-            return 0.0
-        indicators_str = (
-            f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
-            f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
-        )
-
-        if hit == "SL":
-            qty = p.remaining_qty
-            pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
-            p.realized_pnl += pnl
-            p.remaining_qty = 0.0
-            p.closed = True
-            # Если SL сработал после переноса (tp1_hit=True) — это закрытие по безубытку, пишем TP1
-            exit_reason = "TP1" if p.tp1_hit else "SL"
-            self.log.warning(
-                f"{exit_reason} hit (SL level) | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
-                f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
+        try:
+            p = self.position
+            if p is None:
+                return 0.0
+            indicators_str = (
+                f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
+                f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
             )
-            self.position = None
-            self._clear_state()
-            return pnl, exit_reason
+                    
+            if hit == "SL":
+                qty = p.remaining_qty
+                pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
+                p.realized_pnl += pnl
+                p.remaining_qty = 0.0
+                p.closed = True
+                # Если SL сработал после переноса (tp1_hit=True) — это закрытие по безубытку, пишем TP1
+                exit_reason = "TP1" if p.tp1_hit else "SL"
+                self.log.warning(
+                    f"{exit_reason} hit (SL level) | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
+                    f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
+                )
+                self.position = None
+                self._clear_state()
+                return pnl, exit_reason
 
-        if hit == "TP1":
-            if p.is_recovery:
-                # Recovery-позиция: TP1 закрывает 100% позиции сразу
+            if hit == "TP1":
+                # Логируем вход в обработку TP1
+                qty_to_close = None
+                if p.is_recovery:
+                    qty_to_close = p.remaining_qty
+                else:
+                    tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
+                    qty_to_close = min(tp1_qty, p.remaining_qty)
+                # Лог входа в обработку TP1
+                self.log.info(f"[TP1_START] position_id={self._trade_id} current_price={close_price} qty_to_close={qty_to_close} total_qty={p.total_qty}")
+                    
+                if p.is_recovery:
+                    # Recovery-позиция: TP1 закрывает 100% позиции сразу
+                    qty = p.remaining_qty
+                    pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
+                    p.realized_pnl += pnl
+                    p.remaining_qty = 0.0
+                    p.closed = True
+                    self.log.info(
+                        f"TP1 hit [RECOVERY] | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
+                        f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
+                    )
+                    self.position = None
+                    self._clear_state()
+                    # Записываем результат возврата перед возвратом
+                    self.log.info(f"[TP1_RETURN] type=tuple pnl={pnl:.4f} exit_reason=TP1")
+                    return pnl, "TP1"
+
+                tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
+                tp1_qty = min(tp1_qty, p.remaining_qty)
+                pnl = self._calc_pnl(p.direction, p.entry_price, close_price, tp1_qty)
+                p.realized_pnl += pnl
+                p.remaining_qty -= tp1_qty
+                p.tp1_hit = True
+                old_sl = p.sl_price
+                p.sl_price = p.entry_price
+                self._save_state()
+                self.log.info(
+                    f"TP1 hit | price={close_price} closed_qty={tp1_qty:.6f} "
+                    f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
+                    f"SL moved to breakeven: {old_sl} → {p.entry_price} | {indicators_str}"
+                )
+                # Записываем результат возврата перед возвратом
+                self.log.info(f"[TP1_RETURN] type=tuple pnl={pnl:.4f} exit_reason=None")
+                return pnl, None
+
+            if hit == "TP2":
                 qty = p.remaining_qty
                 pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
                 p.realized_pnl += pnl
                 p.remaining_qty = 0.0
                 p.closed = True
                 self.log.info(
-                    f"TP1 hit [RECOVERY] | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
+                    f"TP2 hit | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
                     f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
                 )
                 self.position = None
                 self._clear_state()
-                return pnl, "TP1"
+                return pnl, "TP2"
 
-            tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
-            tp1_qty = min(tp1_qty, p.remaining_qty)
-            pnl = self._calc_pnl(p.direction, p.entry_price, close_price, tp1_qty)
-            p.realized_pnl += pnl
-            p.remaining_qty -= tp1_qty
-            p.tp1_hit = True
-            old_sl = p.sl_price
-            p.sl_price = p.entry_price
-            self._save_state()
-            self.log.info(
-                f"TP1 hit | price={close_price} closed_qty={tp1_qty:.6f} "
-                f"remaining_qty={p.remaining_qty:.6f} pnl={pnl:.4f} | "
-                f"SL moved to breakeven: {old_sl} → {p.entry_price} | {indicators_str}"
-            )
-            return pnl, None
+            return 0.0, None
 
-        if hit == "TP2":
-            qty = p.remaining_qty
-            pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
-            p.realized_pnl += pnl
-            p.remaining_qty = 0.0
-            p.closed = True
-            self.log.info(
-                f"TP2 hit | price={close_price} qty={qty:.6f} pnl={pnl:.4f} "
-                f"total_pnl={p.realized_pnl:.4f} | {indicators_str}"
-            )
-            self.position = None
-            self._clear_state()
-            return pnl, "TP2"
-
-        return 0.0, None
+        except Exception as e:
+            self.log.error(f"[ERROR] TP1 processing failed", exc_info=True)
+            raise
 
     async def apply_hit_async(self, hit: str, close_price: float, candle_time_ms: int) -> float:
         """Применяет hit и репортит в БД."""

@@ -25,6 +25,9 @@ load_dotenv()
 HEARTBEAT_CANDLES = 3
 LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
 
+# Глобальные переменные для отслеживания recovery-состояния
+_recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recovery": bool}}
+
 
 def _lock_file(symbol: str) -> str:
     return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
@@ -480,6 +483,17 @@ async def _run_live_or_paper(
             claim = await recovery.claim()
             recovery_qty = None
             chain_id = None
+            
+            # Логируем полный ответ от сервера
+            log.info(f"[RECOVERY] claim response: {claim}")
+            
+            # Сохраняем состояние recovery в глобальной переменной
+            _recovery_state[cfg.symbol] = {
+                "chainId": claim.get("chainId"),
+                "debtAmount": claim.get("debtAmount", 0.0),
+                "is_recovery": claim.get("chainId") is not None,
+            }
+            
             if claim.get("chainId") is not None:
                 chain_id = claim["chainId"]
                 debt = claim["debtAmount"]
@@ -534,6 +548,57 @@ async def _run_live_or_paper(
         except Exception as e:
             log.error(f"on_htf_candle error: {e}", exc_info=True)
 
+    async def periodic_position_check():
+        """Проверка состояния позиции каждые 1 час (3600 секунд)."""
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.sleep(3600)  # 1 час
+                if shutdown_event.is_set():
+                    return
+                    
+                if tracker.has_open_position():
+                    pos = tracker.position
+                    if pos:
+                        # Получаем актуальную информацию о позиции с биржи
+                        exchange_pos = await order_mgr.get_position_info()
+                        if exchange_pos:
+                            # Сравниваем количества
+                            local_qty = pos.remaining_qty
+                            exchange_qty = exchange_pos.get("qty", 0)
+                            
+                            # Порог для сравнения (небольшие различия из-за округления допустимы)
+                            diff_threshold = 0.000001
+                            if abs(local_qty - exchange_qty) > diff_threshold:
+                                log.warning(
+                                    f"[SYNC_WARNING] Position mismatch | "
+                                    f"local_qty={local_qty:.6f} exchange_qty={exchange_qty:.6f} "
+                                    f"direction={pos.direction}"
+                                )
+                                # Обновляем состояние
+                                pos.remaining_qty = exchange_qty
+                                tracker._save_state()
+                                
+                                # Проверяем, не закрыта ли позиция полностью
+                                if exchange_qty < diff_threshold:
+                                    log.warning(
+                                        f"[SYNC_WARNING] Position appears closed on exchange | "
+                                        f"updating local state"
+                                    )
+                                    pos.closed = True
+                                    tracker._clear_state()
+                            else:
+                                events.debug(
+                                    f"[SYNC_CHECK] Position state OK | "
+                                    f"qty={exchange_qty:.6f} direction={pos.direction}"
+                                )
+                        else:
+                            log.warning("[SYNC_WARNING] Could not fetch position info")
+            except Exception as e:
+                log.warning(f"[SYNC_CHECK] Error during periodic check: {e}")
+
+    # Запускаем периодическую проверку состояния позиции в фоне
+    check_task = asyncio.create_task(periodic_position_check())
+
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
     handlers = {cfg.timeframe: on_candle}
@@ -544,6 +609,14 @@ async def _run_live_or_paper(
         client=client, symbol=cfg.symbol, handlers=handlers,
         logger=log, poll_seconds=10, shutdown_event=shutdown_event,
     )
+    
+    # Останавливаем фоновую задачу проверки позиции
+    if not check_task.done():
+        check_task.cancel()
+        try:
+            await check_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
