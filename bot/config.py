@@ -27,6 +27,7 @@ class Config:
     htf_timeframe: str = "1h"
     htf_ema_fast: int = 9
     htf_ema_slow: int = 21
+    recovery_max_position_pct: float = 10.0  # Максимальный % от баланса для recovery-позиции
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")

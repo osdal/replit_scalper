@@ -338,6 +338,19 @@ class OrderManager:
             )
         qty = await self._adjust_qty(raw_qty)
 
+        # Защита от гигантских позиций: проверяем, что qty не превышает 10% баланса
+        max_position_pct = self.cfg.recovery_max_position_pct if recovery_qty is not None else 10.0
+        notional = qty * signal.entry_price
+        max_notional = balance * max_position_pct / 100
+        if notional > max_notional:
+            self.log.critical(
+                f"[CRITICAL] Position size exceeds {max_position_pct}% of balance | "
+                f"notional=${notional:.2f} max_allowed=${max_notional:.2f} "
+                f"qty={qty:.6f} entry={signal.entry_price:.4f} | "
+                f"Rejecting order"
+            )
+            return None
+
         if qty <= 0:
             self.log.error(
                 f"[LIVE] Calculated qty={raw_qty:.6f} rounds to 0 after stepSize adjustment "
