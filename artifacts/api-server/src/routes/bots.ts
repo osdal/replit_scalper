@@ -76,21 +76,21 @@ async function findBotPid(symbol: string): Promise<number | null> {
       );
       const processes = JSON.parse(stdout);
       for (const proc of processes) {
-        if (proc.CommandLine && proc.CommandLine.includes(configFile)) {
+        if (proc.CommandLine && proc.CommandLine.includes(configFile) && proc.CommandLine.includes("main.py")) {
           const pid = parseInt(proc.ProcessId);
           if (!isNaN(pid) && pid > 0) return pid;
         }
       }
     } else {
       // Linux/Mac fallback
-      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
+      const { stdout } = await execAsync(`pgrep -f "main.*${configFile}"`);
       const pid = parseInt(stdout.trim());
       if (!isNaN(pid)) return pid;
     }
   } catch {
     try {
-      // Linux/Mac fallback
-      const { stdout } = await execAsync(`pgrep -f "${configFile}"`);
+      // Fallback: check all python processes with main.py
+      const { stdout } = await execAsync(`pgrep -f "main.*${configFile}"`);
       const pid = parseInt(stdout.trim());
       if (!isNaN(pid)) return pid;
     } catch {}
