@@ -46,6 +46,98 @@ main.py
 ### Точки входа
 - `python bot/main.py [config.yaml]` — основной запуск (live/paper/backtest)
 - `python bot/backtest_runner.py` — запуск бэктеста через stdin JSON (используется API-сервером)
+- `python bot/optimizer.py` — оптимизация параметров через Optuna (используется из дашборда или CLI)
+
+---
+
+## 2. Оптимизатор параметров
+
+### Принцип работы (`bot/optimizer.py`)
+
+Оптимизатор использует библиотеку **Optuna** для подбора наилучших параметров стратегии через бэктестинг на исторических данных.
+
+### Процесс:
+1. **Скачивание данных** — один раз загружаются исторические свечи с Binance за заданный период
+2. **Запуск trials** — Optuna создаёт N комбинаций параметров через байесовский TPE Sampler
+3. **Бэктест** — для каждой комбинации запускается `run_backtest_on_df()`
+4. **Оценка (score)** — `profit_factor × sqrt(trades) × win_rate / (1 + max_drawdown%)`
+5. **Результат** — вывод топ-10 и сохранение CSV с топ-100
+
+### Параметры, которые подбирает оптимизатор:
+| Параметр | Диапазон |
+|----------|----------|
+| `ema_fast` | 5–20 |
+| `ema_slow` | fast+3 … 55 |
+| `sl_pct` | 0.2–1.5% (шаг 0.05) |
+| `tp1_pct` | 0.2–1.0% (шаг 0.05) |
+| `tp2_pct` | tp1+0.1 … 2.4% (шаг 0.1) |
+| `volume_multiplier` | 1.0–2.5× (шаг 0.1) |
+| `tp1_close_pct` | 30–70% (шаг 10) |
+| `risk_pct` | 1–10% (шаг 0.5) |
+| `htf_ema_fast` | 5–15 |
+| `htf_ema_slow` | fast+3 … 40 |
+
+### Использование из CLI:
+```bash
+cd bot
+python optimizer.py --symbol ETHUSDT --start 2026-07-01 --end 2026-07-24 --trials 200 --jobs 4
+python optimizer.py --help
+```
+
+### Флаги:
+| Флаг | Описание |
+|------|----------|
+| `--symbol` | Торговая пара (обязательно) |
+| `--start` / `--end` | Период бэктеста (обязательно) |
+| `--trials` | Число комбинаций (по умолч. 100) |
+| `--jobs N` | Параллельные вычисления (1 = последовательно) |
+| `--study-name NAME` | Сохранение результатов в SQLite (`data/optuna.db`) |
+| `--timeframe` | Таймфрейм (по умолч. из конфига) |
+| `--config` | Путь к конфигу (по умолч. `config.yaml`) |
+
+### HTF-кеширование:
+При повторении комбинации `htf_ema_fast`/`htf_ema_slow` HTF-индикаторы не пересчитываются — используется кэш в памяти. Это ускоряет оптимизацию при большом количестве trial'ов.
+
+### SQLite-персистентность:
+При указании `--study-name` результаты сохраняются в `data/optuna.db`. При повторном запуске с тем же `--study-name` Optuna продолжит с того же места, а не начнёт заново.
+
+---
+
+## 2b. Дашборд — вкладка Optimizer
+
+Дашборд предоставляет UI для запуска и мониторинга оптимизации:
+- **Symbol** — выбор пары из списка активных ботов
+- **Start / End** — период для бэктеста
+- **Trials** — количество комбинаций
+- **Parallel Jobs** — количество одновременных вычислений
+- **Progress bar** — реальный прогресс выполнения
+- **Output** — live-вывод Python-процесса
+- **Top Results** — таблица с результатами (Rank, Score, Trades, WR%, PnL, DD%, EMA F/S, SL%, TP1/TP2%, Vol×, TP1cl%, Risk%, HTF F/S)
+- **✓ (Apply to Bot)** — сохраняет параметры в конфиг бота через `PUT /api/bots/:symbol/config`
+- **➡ (Apply to Backtest)** — копирует параметры во вкладку Backtest
+
+Результаты оптимизации также доступны по `GET /api/optimizer/results/:symbol`.
+
+---
+
+## 2c. Дашборд — вкладка Backtest
+
+Вкладка позволяет запускать бэктест с произвольными параметрами и просматривать результаты:
+
+### Параметры:
+- Symbol, Timeframe, Start/End Date
+- Leverage, Risk%, SL%, TP1%, TP2%, EMA Fast/Slow, Volume Multiplier
+- **HTF Filter** — чекбокс включения/выключения фильтра по старшему таймфрейму
+- **HTF EMA Fast/Slow** — настройка EMA для HTF (дизейблены если HTF выключен)
+
+### Результаты:
+- Total Trades, Win Rate (W/L)
+- Total PnL, Max Drawdown
+- Initial/Final Balance, Return%
+- Avg Win / Avg Loss
+
+### Кнопка "Load to Config":
+Сохраняет текущие параметры бэктеста (включая HTF-настройки и risk_pct) в конфиг бота. После сохранения требуется перезагрузка ботов через "Stop All & Reload".
 
 ---
 
@@ -176,11 +268,12 @@ poetry install
 | `aiohttp` | ≥3.8 | HTTP-клиент для recovery API |
 | `pyyaml` | ≥6.0 | Парсинг YAML конфигов |
 | `python-dotenv` | ≥1.0 | Загрузка .env |
+| `optuna` | ≥3.0 | Байесовская оптимизация параметров |
 | `uvicorn` / `fastapi` | — | Для API-сервера (dashboard) |
 
 ### Настройка конфига
 1. Скопируйте `bot/config.yaml` под нужный символ (например `bot/config_btc.yaml`)
-2. Отредактируйте параметры: `symbol`, `timeframe`, `risk_pct`, `sl_pct`, `tp1_pct`, `tp2_pct`, `leverage`, `mode`
+2. Отредактируйте параметры: `symbol`, `timeframe`, `risk_pct`, `sl_pct`, `tp1_pct`, `tp2_pct`, `leverage`, `mode`, `htf_enabled`, `htf_ema_fast`, `htf_ema_slow`
 
 ### Запуск
 ```bash
@@ -196,6 +289,11 @@ python bot/main.py bot/config_btc.yaml
 
 # Бэктест через CLI (JSON stdin) — используется API-сервером
 echo '{"symbol":"BTCUSDT","start":"2026-05-01","end":"2026-06-01","config":{"timeframe":"5m","leverage":10}}' | python bot/backtest_runner.py
+
+# Оптимизация параметров
+python bot/optimizer.py --symbol ETHUSDT --start 2026-07-01 --end 2026-07-24 --trials 200 --jobs 4
+
+# Через дашборд (см. раздел 2b): http://localhost:5173 → вкладка Optimizer
 ```
 
 ### Блокировка (lock-file)
@@ -245,9 +343,10 @@ echo '{"symbol":"BTCUSDT","start":"2026-05-01","end":"2026-06-01","config":{"tim
 | `market_data.py:62-161` | REST polling каждые 10 сек — задержка до 10 сек после закрытия свечи. Нет вебсокетов. | 🟡 Medium |
 | `recovery_client.py:23-35` | `readRecoveryConfig` читает файл **при каждом вызове** (без кэша). Может стать бутылком при частых claim. | 🟡 Medium |
 | `main.py:329-335` | `df_buffer = pd.concat([df_buffer, new_row]).tail(500)` — создаёт новый DataFrame каждую свечу. Утечка памяти при долгой работе. | 🟡 Medium |
-| `config.py:51-56` | `load_config` игнорирует неизвестные поля в YAML молча (`filtered = {k:v for k,v in data.items() if k in valid_fields}`). Опечатки в конфиге не выдают ошибку. | 🟡 Medium |
-| `bot/*.yaml` | Много конфигов под разные символы (`config_btc.yaml`, `config_eth.yaml` и т.д.) — нет единого шаблона/генератора. | 🟢 Low |
+| `config.py:51-56` | `load_config` игнорирует неизвестные поля в YAML молча. Опечатки в конфиге не выдают ошибку. | 🟡 Medium |
+| `bot/*.yaml` | Много конфигов под разные символы — нет единого шаблона/генератора. | 🟢 Low |
 | `kucoin/` | Отдельный бот для KuCoin дублирует логику. Нет общего ядра. | 🟢 Low |
+| `optimizer.py` | `n_jobs=1` на Windows может не давать ускорения из-за GIL. Рекомендуется использовать `--study-name` для сохранения промежуточных результатов. | 🟡 Medium |
 
 ---
 

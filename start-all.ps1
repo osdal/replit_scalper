@@ -11,7 +11,7 @@ Write-Host "============================================"
 Write-Host ""
 
 # 0. Stop existing processes before starting new ones
-Write-Host "[0/5] Stopping existing processes..."
+Write-Host "[0/6] Stopping existing processes..."
 Stop-Process -Name node -ErrorAction SilentlyContinue -Force
 Stop-Process -Name python -ErrorAction SilentlyContinue -Force
 # Принудительно освобождаем порт 5000 (старый API может не отпустить
@@ -29,8 +29,17 @@ while ((Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Silently
 Write-Host "      OK"
 Write-Host ""
 
+# 0b. Build dashboard
+Write-Host "[0b/6] Building dashboard..."
+pnpm --filter @workspace/dashboard run build
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "      Dashboard build failed, continuing anyway..."
+}
+Write-Host "      OK"
+Write-Host ""
+
 # 1. Init database
-Write-Host "[1/5] Initializing database..."
+Write-Host "[1/6] Initializing database..."
 
 # Backup existing database
 if (Test-Path "$scriptDir\data\bot.db") {
@@ -47,7 +56,7 @@ Write-Host "      OK"
 Write-Host ""
 
 # 2. Start API server in background
-Write-Host "[2/5] Starting API server..."
+Write-Host "[2/6] Starting API server..."
 $env:BOT_DIR = "bot"
 $env:DATABASE_PATH = ".\data\bot.db"
 $env:PORT = "5000"
@@ -72,7 +81,7 @@ Write-Host "      OK - http://localhost:5000"
 Write-Host ""
 
 # 3. Start Dashboard in background
-Write-Host "[3/5] Starting Dashboard..."
+Write-Host "[3/6] Starting Dashboard..."
 Start-Process -FilePath "cmd" -ArgumentList "/c pnpm --filter @workspace/dashboard run dev" -WindowStyle Hidden -WorkingDirectory $scriptDir
 Start-Sleep -Seconds 2
 
@@ -94,7 +103,7 @@ Write-Host "      OK - http://localhost:5173"
 Write-Host ""
 
 # 4. Start Bots (auto-detect all config files)
-Write-Host "[4/5] Starting bots..."
+Write-Host "[4/6] Starting bots..."
 $botConfigs = Get-ChildItem -Path "$scriptDir\bot" -Filter "config_*.yaml"
 foreach ($config in $botConfigs) {
     $botName = $config.BaseName -replace '^config_', ''
@@ -105,7 +114,7 @@ Write-Host "      OK - $($botConfigs.Count) bots started"
 Write-Host ""
 
 # 5. Final status
-Write-Host "[5/5] Startup complete!"
+Write-Host "[5/6] Startup complete!"
 Write-Host "============================================"
 Write-Host "  All services started!"
 Write-Host "  API:       http://localhost:5000"

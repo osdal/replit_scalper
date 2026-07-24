@@ -34,7 +34,7 @@ const runningJobs: Map<string, {
 
 // POST /optimizer/run — запустить оптимизацию
 router.post("/run", (req, res) => {
-  const { symbol, timeframe, start, end, trials = 100, config } = req.body;
+  const { symbol, timeframe, start, end, trials = 100, config, jobs = 1 } = req.body;
 
   if (!symbol || !start || !end) {
     return res.status(400).json({ error: "symbol, start, end are required" });
@@ -50,6 +50,8 @@ router.post("/run", (req, res) => {
     "--trials", String(trials),
     "--start", start,
     "--end", end,
+    "--jobs", String(jobs),
+    "--study-name", `optimizer_${symbol}`,
   ];
   if (timeframe) args.push("--timeframe", timeframe);
 
@@ -171,26 +173,38 @@ router.get("/results/:symbol", (req, res) => {
 
 function parseResults(output: string[]): object | null {
   // Ищем строки с результатами в выводе
-  const results: { rank: number; score: number; params: Record<string, number> }[] = [];
+  const results: { rank: number; score: number; trades: number; winRate: number; pnl: number; dd: number; params: Record<string, number> }[] = [];
   let inTable = false;
 
   for (const line of output) {
     if (line.includes("TOP") && line.includes("RESULTS")) { inTable = true; continue; }
     if (inTable && line.match(/^\s+\d+\s+[\d.]+/)) {
       const parts = line.trim().split(/\s+/);
-      if (parts.length >= 9) {
+      // New column layout: Rank Score Trades WR% PnL DD% EMA_F EMA_S SL% TP1% TP2% VolX TP1cl% Risk% HTF_F HTF_S
+      if (parts.length >= 14) {
+        const params: Record<string, number> = {
+          ema_fast: parseInt(parts[6]),
+          ema_slow: parseInt(parts[7]),
+          sl_pct: parseFloat(parts[8]),
+          tp1_pct: parseFloat(parts[9]),
+          tp2_pct: parseFloat(parts[10]),
+          volume_multiplier: parseFloat(parts[11]),
+          tp1_close_pct: parseInt(parts[12]),
+          risk_pct: parseFloat(parts[13]),
+        };
+        // HTF columns are present when length is >= 16
+        if (parts.length >= 16) {
+          params.htf_ema_fast = parseInt(parts[14]);
+          params.htf_ema_slow = parseInt(parts[15]);
+        }
         results.push({
           rank: parseInt(parts[0]),
           score: parseFloat(parts[1]),
-          params: {
-            ema_fast: parseInt(parts[2]),
-            ema_slow: parseInt(parts[3]),
-            sl_pct: parseFloat(parts[4]),
-            tp1_pct: parseFloat(parts[5]),
-            tp2_pct: parseFloat(parts[6]),
-            volume_multiplier: parseFloat(parts[7]),
-            tp1_close_pct: parseInt(parts[8]),
-          }
+          trades: parseInt(parts[2]),
+          winRate: parseFloat(parts[3]),
+          pnl: parseFloat(parts[4]),
+          dd: parseFloat(parts[5]),
+          params,
         });
       }
     }
