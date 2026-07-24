@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -81,6 +81,10 @@ interface BacktestParams {
   tp2_pct: number;
   volume_multiplier: number;
   tp1_close_pct: number;
+  risk_pct: number;
+  htf_enabled: boolean;
+  htf_ema_fast: number;
+  htf_ema_slow: number;
   start: string;
   end: string;
 }
@@ -439,6 +443,8 @@ export default function Dashboard() {
   const [optSymbol, setOptSymbol] = useState("BTCUSDT");
   const [optStart, setOptStart] = useState("2026-05-01");
   const [optEnd, setOptEnd] = useState("2026-06-13");
+  const [optTrials, setOptTrials] = useState(100);
+  const [optJobs, setOptJobs] = useState(1);
   // Фильтр по торговой паре
   const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
   const symbols = [...new Set(trades.map(t => t.symbol))].sort();
@@ -582,12 +588,55 @@ export default function Dashboard() {
       tp2_pct: params.tp2_pct,
       volume_multiplier: params.volume_multiplier,
       tp1_close_pct: params.tp1_close_pct,
+      risk_pct: params.risk_pct ?? DEFAULT_CONFIG.risk_pct,
+      htf_enabled: params.htf_enabled ?? DEFAULT_CONFIG.htf_enabled,
+      htf_ema_fast: params.htf_ema_fast ?? DEFAULT_CONFIG.htf_ema_fast,
+      htf_ema_slow: params.htf_ema_slow ?? DEFAULT_CONFIG.htf_ema_slow,
     };
     setBtSymbol(params.symbol);
     setBtConfig(newConfig);
     setBtStartDate(params.start);
     setBtEndDate(params.end);
     setBtResetKey(k => k + 1);
+  };
+
+  const handleApplyBacktestToBot = async () => {
+    const sym = btSymbol.toUpperCase();
+    const htfStatus = btConfig.htf_enabled ? "ON" : "OFF";
+    const params = [
+      `ema_fast=${btConfig.ema_fast}`,
+      `ema_slow=${btConfig.ema_slow}`,
+      `sl_pct=${btConfig.sl_pct}`,
+      `tp1_pct=${btConfig.tp1_pct}`,
+      `tp2_pct=${btConfig.tp2_pct}`,
+      `volume_multiplier=${btConfig.volume_multiplier}`,
+      `tp1_close_pct=${btConfig.tp1_close_pct}`,
+      `risk_pct=${btConfig.risk_pct}`,
+      `htf=${htfStatus}`,
+    ].join(", ");
+    if (!confirm(`Apply current backtest parameters to ${sym} config?\n\n${params}`)) return;
+    try {
+      const res = await updateConfig(sym, {
+        ema_fast: btConfig.ema_fast,
+        ema_slow: btConfig.ema_slow,
+        sl_pct: btConfig.sl_pct,
+        tp1_pct: btConfig.tp1_pct,
+        tp2_pct: btConfig.tp2_pct,
+        volume_multiplier: btConfig.volume_multiplier,
+        tp1_close_pct: btConfig.tp1_close_pct,
+        risk_pct: btConfig.risk_pct,
+        htf_enabled: btConfig.htf_enabled,
+        htf_ema_fast: btConfig.htf_ema_fast,
+        htf_ema_slow: btConfig.htf_ema_slow,
+      });
+      if (res.error) {
+        alert("Error: " + res.error);
+      } else {
+        alert(`${sym} config updated. Use "Stop All & Reload" then restart the bot.`);
+      }
+    } catch (e) {
+      alert("Failed to update config: " + String(e));
+    }
   };
 
   const handleRunBacktest = async () => {
@@ -880,6 +929,37 @@ export default function Dashboard() {
                           className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none"
                         />
                       </div>
+                      <div className="flex items-end">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={btConfig.htf_enabled}
+                            onChange={e => updateBtConfig("htf_enabled", e.target.checked)}
+                            className="rounded border-zinc-700 bg-zinc-800 text-green-500 focus:ring-green-500"
+                          />
+                          <span className="text-xs text-zinc-400">HTF Filter</span>
+                        </label>
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">HTF EMA Fast</label>
+                        <input
+                          type="number"
+                          value={btConfig.htf_ema_fast}
+                          onChange={e => updateBtConfig("htf_ema_fast", parseInt(e.target.value) || 1)}
+                          disabled={!btConfig.htf_enabled}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none disabled:opacity-50"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-400 mb-1 block">HTF EMA Slow</label>
+                        <input
+                          type="number"
+                          value={btConfig.htf_ema_slow}
+                          onChange={e => updateBtConfig("htf_ema_slow", parseInt(e.target.value) || 1)}
+                          disabled={!btConfig.htf_enabled}
+                          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none disabled:opacity-50"
+                        />
+                      </div>
                     </div>
 
                     <div className="mt-4 flex items-center gap-4">
@@ -893,6 +973,14 @@ export default function Dashboard() {
                         ) : (
                           <><Play className="w-4 h-4" />Run Backtest</>
                         )}
+                      </Button>
+                      <Button
+                        onClick={handleApplyBacktestToBot}
+                        variant="outline"
+                        className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 flex items-center gap-2"
+                        title="Save current parameters to bot config"
+                      >
+                        <Settings className="w-4 h-4" />Load to Config
                       </Button>
                       {btError && (
                         <span className="text-red-400 text-sm">{btError}</span>
@@ -975,6 +1063,17 @@ export default function Dashboard() {
                         </CardContent>
                       </Card>
                     </div>
+
+                    <div className="mt-4 flex justify-start">
+                      <Button
+                        onClick={handleApplyBacktestToBot}
+                        variant="outline"
+                        className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 flex items-center gap-2"
+                        title="Save these parameters to bot config"
+                      >
+                        <Settings className="w-4 h-4" />Load to Config
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>
@@ -993,6 +1092,10 @@ export default function Dashboard() {
                 setStart={setOptStart}
                 end={optEnd}
                 setEnd={setOptEnd}
+                trials={optTrials}
+                setTrials={setOptTrials}
+                jobs={optJobs}
+                setJobs={setOptJobs}
               />
             </TabsContent>
 
