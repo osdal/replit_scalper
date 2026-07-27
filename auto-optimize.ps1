@@ -9,7 +9,7 @@
 #   .\auto-optimize.ps1 -SyncOnly (sync current CSV results without running optimizer)
 
 param(
-    [int]$Trials = 100,
+    [int]$Trials = 400,
     [int]$Jobs = 4,
     [int]$DaysBack = 5,
     [string[]]$Symbols = @(),
