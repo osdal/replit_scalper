@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
-import { RefreshCw, Link2, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { RefreshCw, Link2, AlertTriangle, CheckCircle2, Trash2 } from "lucide-react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -100,6 +100,16 @@ export default function RecoveryTab() {
       setConfig(updated);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const deleteChain = async (id: number) => {
+    if (!confirm(`Delete recovery chain #${id}?`)) return;
+    try {
+      await fetch(`${API}/recovery/chains/${id}`, { method: "DELETE" });
+      setChains(prev => prev.filter(c => c.id !== id));
+    } catch {
+      // ignore
     }
   };
 
@@ -224,18 +234,26 @@ export default function RecoveryTab() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-zinc-400 text-xs border-b border-zinc-800">
-                  {["ID", "Status", "Debt", "Locked By", "Created", "Updated", "Closed"].map(h => (
+                  {["", "ID", "Status", "Debt", "Locked By", "Created", "Updated", "Closed"].map(h => (
                     <th key={h} className="text-left pb-2 pr-4">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {chains.length === 0 && (
-                  <tr><td colSpan={7} className="text-center text-zinc-500 py-6">No chains yet</td></tr>
+                  <tr><td colSpan={8} className="text-center text-zinc-500 py-6">No chains yet</td></tr>
                 )}
                 {[...chains].reverse().map(c => (
                   <tr key={c.id} className="border-b border-zinc-800/50 text-zinc-300">
-                    <td className="py-1.5 pr-4">#{c.id}</td>
+                    <td className="py-1.5 pr-2">
+                      <button
+                        onClick={() => deleteChain(c.id)}
+                        className="p-1 rounded hover:bg-red-900/50 transition-colors text-zinc-500 hover:text-red-400"
+                        title="Delete chain"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
                     <td className="py-1.5 pr-4">
                       <Badge variant={
                         c.status === "free" ? "secondary" :
