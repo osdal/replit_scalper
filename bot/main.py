@@ -14,11 +14,11 @@ from logger import get_logger, get_events_logger
 from market_data import get_recent_klines, start_kline_polling
 from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest, Signal
 from signal_handler import SignalHandler
-from order_manager import OrderManager, calc_recovery_quantity
+from order_manager import OrderManager
 from position_tracker import PositionTracker, Position
 from backtester import run_backtest
 from db_reporter import DbReporter
-from recovery_client import RecoveryClient, readRecoveryConfig
+from recovery_client import RecoveryClient
 
 load_dotenv()
 
@@ -481,7 +481,7 @@ async def _run_live_or_paper(
 
             # Пробуем захватить свободный долг для recovery-режима
             claim = await recovery.claim()
-            recovery_qty = None
+            recovery_target = None
             chain_id = None
             
             # Логируем полный ответ от сервера
@@ -498,32 +498,17 @@ async def _run_live_or_paper(
                 chain_id = claim["chainId"]
                 debt = claim["debtAmount"]
                 bonus = claim.get("bonusPct", 0.0)
-                balance = await order_mgr.get_balance()
-                # Читаем max_pct из recovery_config.yaml (0 = без ограничения)
-                rec_cfg = readRecoveryConfig()
-                max_pct = rec_cfg.get("recovery_max_pct", 50.0)
-                recovery_qty = calc_recovery_quantity(
-                    debt_amount=debt,
-                    bonus_pct=bonus,
-                    tp1_pct=cfg.tp1_pct,
-                    entry_price=signal.entry_price,
-                    balance=balance,
-                    risk_pct=cfg.risk_pct,
-                    sl_pct=cfg.sl_pct,
-                    max_pct=max_pct if max_pct > 0 else None,
-                    logger=log,
-                    symbol=cfg.symbol,
-                )
+                recovery_target = debt * (1 + bonus / 100)
                 log.info(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
-                    f"bonus={bonus}% max_pct={max_pct}% recovery_qty={recovery_qty:.6f}"
+                    f"bonus={bonus}% target_profit={recovery_target:.4f} USDT"
                 )
 
-            result = await order_mgr.open_position(signal, recovery_qty=recovery_qty)
+            result = await order_mgr.open_position(signal, recovery_target=recovery_target)
             if result is not None:
                 entry_price, qty = result
                 signal.entry_price = entry_price
-                is_recovery = recovery_qty is not None
+                is_recovery = recovery_target is not None
                 await tracker.open_async(
                     signal, qty=qty,
                     is_recovery=is_recovery,

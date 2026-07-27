@@ -323,34 +323,17 @@ class OrderManager:
 
     async def open_position(
         self, signal: Signal,
-        recovery_qty: Optional[float] = None,
+        recovery_target: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
         balance = await self.get_balance()
-        if recovery_qty is not None:
-            raw_qty = recovery_qty
-        else:
-            raw_qty = calc_quantity(
-                balance=balance,
-                risk_pct=self.cfg.risk_pct,
-                sl_pct=self.cfg.sl_pct,
-                entry_price=signal.entry_price,
-                leverage=self.cfg.leverage,
-            )
+        raw_qty = calc_quantity(
+            balance=balance,
+            risk_pct=self.cfg.risk_pct,
+            sl_pct=self.cfg.sl_pct,
+            entry_price=signal.entry_price,
+            leverage=self.cfg.leverage,
+        )
         qty = await self._adjust_qty(raw_qty)
-
-        # Protection against oversized positions: only for recovery positions
-        if recovery_qty is not None:
-            max_position_pct = self.cfg.recovery_max_position_pct
-            notional = qty * signal.entry_price
-            max_notional = balance * max_position_pct / 100
-            if notional > max_notional:
-                self.log.critical(
-                    f"[CRITICAL] Recovery position exceeds {max_position_pct}% of balance | "
-                    f"notional=${notional:.2f} max_allowed=${max_notional:.2f} "
-                    f"qty={qty:.6f} entry={signal.entry_price:.4f} | "
-                    f"Rejecting order"
-                )
-                return None
 
         if qty <= 0:
             self.log.error(
@@ -360,14 +343,8 @@ class OrderManager:
             )
             return None
 
-        tp1_close_pct = 100 if recovery_qty is not None else self.cfg.tp1_close_pct
-
-        if recovery_qty is not None:
-            self.log.info(
-                f"[RECOVERY] Order params | raw_qty={raw_qty:.6f} adjusted_qty={qty:.6f} "
-                f"entry_price={signal.entry_price:.4f} tp1_price={signal.tp1_price:.4f} "
-                f"stepSize={self._step_size} tickSize={self._tick_size}"
-            )
+        is_recovery = recovery_target is not None
+        tp1_close_pct = 100 if is_recovery else self.cfg.tp1_close_pct
 
         if self.cfg.mode == "live":
             await self._set_leverage()
@@ -381,18 +358,24 @@ class OrderManager:
             self.log.info(
                 f"[LIVE] Market order placed | {signal.direction} {self.cfg.symbol} "
                 f"qty={qty} entry≈{entry_price}"
-                f"{' [RECOVERY]' if recovery_qty is not None else ''}"
+                f"{' [RECOVERY]' if is_recovery else ''}"
             )
-            if recovery_qty is not None:
-                # Recalculate TP1 based on actual fill price for recovery
-                tp1_price = entry_price * (1 + self.cfg.tp1_pct / 100) if signal.direction == "LONG" else entry_price * (1 - self.cfg.tp1_pct / 100)
+            if is_recovery:
+                # Recalculate TP to cover target profit
+                # target_profit = qty * price_move → price_move = target_profit / qty
+                target = recovery_target
+                price_move = target / qty
+                if signal.direction == "LONG":
+                    tp1_price = entry_price + price_move
+                else:
+                    tp1_price = entry_price - price_move
                 adjusted_tp1 = await self._adjust_price(tp1_price)
-                self.log.info(
-                    f"[RECOVERY] TP1 price | raw={signal.tp1_price:.4f} recalculated={tp1_price:.4f} "
-                    f"adjusted={adjusted_tp1:.4f} tickSize={self._tick_size} "
-                    f"expected_profit={qty * (adjusted_tp1 - entry_price):.4f} USDT"
-                )
                 adjusted_sl = await self._adjust_price(signal.sl_price)
+                self.log.info(
+                    f"[RECOVERY] Orders | target_profit={target:.4f} "
+                    f"tp1_price={tp1_price:.4f} sl_price={signal.sl_price:.4f} "
+                    f"qty={qty:.6f} entry={entry_price:.4f}"
+                )
                 await self._place_sl(signal.direction, adjusted_sl, qty=qty)
                 await self._place_tp_limit(signal.direction, adjusted_tp1, qty)
             else:
