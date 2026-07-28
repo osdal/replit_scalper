@@ -195,7 +195,6 @@ async def _sync_position_on_start(
         ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
         timestamp=datetime.datetime.utcnow(),
     )
-    await tracker._report_open(mock_signal, exchange_qty)
     tracker._save_state()
 
     log.info(
