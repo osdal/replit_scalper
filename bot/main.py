@@ -39,30 +39,11 @@ def _acquire_lock(symbol: str) -> bool:
         try:
             with open(lock_path, "r") as f:
                 pid = int(f.read().strip())
-            # Проверяем, мертав ли процесс
             if pid > 0:
                 try:
-                    import subprocess
-                    import platform
-                    if platform.system() == "Windows":
-                        result = subprocess.run(
-                            ["tasklist", "/FI", f"PID eq {pid}"],
-                            capture_output=True, text=True, timeout=5
-                        )
-                        if f",{pid}," in result.stdout or f" {pid} " in result.stdout:
-                            return False
-                    else:
-                        # Linux/macOS: use /proc or ps
-                        try:
-                            result = subprocess.run(
-                                ["ps", "-p", str(pid)],
-                                capture_output=True, text=True, timeout=5
-                            )
-                            if result.returncode == 0:
-                                return False
-                        except Exception:
-                            pass
-                except Exception:
+                    os.kill(pid, 0)
+                    return False
+                except OSError:
                     pass
         except Exception:
             pass
