@@ -378,6 +378,7 @@ class OrderManager:
                 )
                 await self._place_sl(signal.direction, adjusted_sl, qty=qty)
                 await self._place_tp_limit(signal.direction, adjusted_tp1, qty)
+                return entry_price, qty, tp1_price
             else:
                 await self._place_all_orders(
                     direction=signal.direction,
@@ -395,6 +396,14 @@ class OrderManager:
                 f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} "
                 f"balance={balance:.2f} USDT"
             )
+            if is_recovery:
+                target = recovery_target
+                price_move = target / qty
+                if signal.direction == "LONG":
+                    tp1_price = signal.entry_price + price_move
+                else:
+                    tp1_price = signal.entry_price - price_move
+                return signal.entry_price, qty, tp1_price
             return signal.entry_price, qty
 
     async def close_partial(self, direction: str, qty: float, price: float, reason: str) -> bool:

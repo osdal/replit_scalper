@@ -506,9 +506,12 @@ async def _run_live_or_paper(
 
             result = await order_mgr.open_position(signal, recovery_target=recovery_target)
             if result is not None:
-                entry_price, qty = result
+                entry_price, qty = result[0], result[1]
                 signal.entry_price = entry_price
                 is_recovery = recovery_target is not None
+                if is_recovery and len(result) > 2:
+                    signal.tp1_price = result[2]
+                    signal.tp2_price = result[2]  # no TP2 for recovery
                 await tracker.open_async(
                     signal, qty=qty,
                     is_recovery=is_recovery,
