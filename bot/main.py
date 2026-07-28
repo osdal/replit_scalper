@@ -432,6 +432,16 @@ async def _run_live_or_paper(
                             remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
                             tp2_price=pos.tp2_price,
                         )
+                    elif hit == "TP1" and pos.is_recovery:
+                        # Recovery TP1: закрытие 100% позиции, отмена ордеров, репорт
+                        events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
+                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+                        events.info(f"TP1_APPLY_RECOVERY | pnl={pnl}")
+                        await order_mgr.cancel_all_tp_sl(pos.direction)
+                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                        if real_qty > 0 and real_qty < 0.001:
+                            await order_mgr.close_dust(pos.direction)
+                        await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                     elif hit == "TP2":
                         # TP2: биржа закрыла остаток, бот фиксирует результат
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
