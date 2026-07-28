@@ -506,9 +506,12 @@ class OrderManager:
         self, symbol: str, entry_time_ms: int, exit_time_ms: int,
     ) -> Optional[float]:
         """
-        Получает реальный суммарный PnL с биржи за период сделки.
-        Использует Income API — надёжнее, чем парсинг userTrades.
-        Returns None если не удалось получить данные.
+        Gets real PnL from Binance for a trade period.
+        Uses Income API first (most reliable, includes fees).
+        Falls back to userTrades calculation for older trades
+        (income API only retains ~7 days).
+
+        Returns None if neither source provides data.
         """
         try:
             income = await self.client.futures_income_history(
@@ -518,10 +521,42 @@ class OrderManager:
                 endTime=exit_time_ms + 60000,
                 limit=50,
             )
-            if not income:
+            if income:
+                total_pnl = sum(float(i.get("income", "0") or 0) for i in income)
+                if abs(total_pnl) > 0.0001:
+                    return total_pnl
+        except Exception as e:
+            self.log.warning(f"[LIVE] Income API error: {e}")
+
+        # Fallback: parse userTrades for older trades (no income history)
+        try:
+            trades = await self.client.futures_user_trades(
+                symbol=symbol,
+                startTime=entry_time_ms,
+                endTime=exit_time_ms + 60000,
+            )
+            if not trades:
                 return None
-            total_pnl = sum(float(i.get("income", "0") or 0) for i in income)
+            total_pnl = 0.0
+            entry_commission = 0.0
+            position_side = None
+            for t in trades:
+                realized = float(t.get("realizedPnl", "0") or 0)
+                commission = float(t.get("commission", "0") or 0)
+                commission_asset = t.get("commissionAsset", "")
+                commission_usd = commission if commission_asset == "USDT" else 0.0
+                side = t.get("side", "")
+                if position_side is None:
+                    position_side = "LONG" if side == "BUY" else "SHORT"
+                    entry_commission += commission_usd
+                elif (position_side == "LONG" and side == "SELL") or \
+                     (position_side == "SHORT" and side == "BUY"):
+                    total_pnl += realized - commission_usd
+                    position_side = None
+                else:
+                    entry_commission += commission_usd
+            total_pnl -= entry_commission
             return total_pnl if abs(total_pnl) > 0.0001 else None
         except Exception as e:
-            self.log.warning(f"[LIVE] Could not fetch realized PnL from Binance: {e}")
+            self.log.warning(f"[LIVE] userTrades fallback error: {e}")
             return None
