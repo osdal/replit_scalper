@@ -530,7 +530,7 @@ class OrderManager:
 
         # Fallback: parse userTrades for older trades (no income history)
         try:
-            trades = await self.client.futures_user_trades(
+            trades = await self.client.futures_account_trades(
                 symbol=symbol,
                 startTime=entry_time_ms,
                 endTime=exit_time_ms + 60000,
