@@ -190,6 +190,19 @@ async def _sync_position_on_start(
                     break
         except Exception:
             pass
+    # Register open trade in DB so _trade_id is set for future close handling.
+    # Check if there's already an open trade for this symbol to avoid duplicates.
+    import requests
+    try:
+        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+        existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=1", timeout=5).json()
+        has_open = any(t.get("is_open") for t in (existing.get("trades") or []))
+        if not has_open:
+            await tracker._report_open(mock_signal, exchange_qty)
+        else:
+            log.info(f"[SYNC] Open trade already exists for {cfg.symbol}, skipping _report_open")
+    except Exception:
+        await tracker._report_open(mock_signal, exchange_qty)
     tracker._save_state()
 
     log.info(
