@@ -14,7 +14,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
-  Play, Square, RefreshCw, Settings, Link2, Download, History,
+  Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -152,7 +152,7 @@ function heartbeatAge(ts: string | null): string {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void; isToggling: boolean }) {
+function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: () => void; isToggling: boolean; onDelete: (symbol: string) => void }) {
   const pos = bot.position;
   const isLong = pos?.direction === "LONG";
   const unrealizedPnl = pos && bot.current_price
@@ -183,6 +183,13 @@ function BotCard({ bot, onToggle, isToggling }: { bot: Bot; onToggle: () => void
           {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
            bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
         </Button>
+        <button
+          onClick={() => onDelete(bot.symbol)}
+          className="p-2 rounded hover:bg-red-900/50 transition-colors text-zinc-500 hover:text-red-400"
+          title="Delete bot"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
       </CardHeader>
 
       <CardContent className="space-y-3">
@@ -545,6 +552,15 @@ export default function Dashboard() {
     }
   };
 
+  const handleDeleteBot = async (symbol: string) => {
+    if (!confirm("Delete " + symbol + " permanently?")) return;
+    try {
+      await fetch(API + "/bots/" + symbol, { method: "DELETE" });
+      const freshBots = await fetchBots();
+      setBots(freshBots);
+    } catch {}
+  };
+
   const handleExportCSV = () => {
     try {
       const headers = [
@@ -732,7 +748,7 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} />
+                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} />
                 ))}
               </div>
             )}
@@ -801,7 +817,7 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
-              <div className="space-y-4" key={btResetKey}>
+              <div className="space-y-4" key={btResetKey} style={{ minHeight: '400px' }}>
                 <Card className="border border-zinc-800 bg-zinc-900">
                   <CardHeader className="pb-2">
                     <CardTitle className="text-base text-zinc-300 flex items-center gap-2">

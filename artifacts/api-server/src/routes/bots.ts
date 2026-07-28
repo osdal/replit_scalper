@@ -356,6 +356,23 @@ router.post("/:symbol/stop", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// DELETE /bots/:symbol — удалить бота из БД
+router.delete("/:symbol", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    
+    // Stop if running
+    const proc = botProcesses.get(symbol);
+    if (proc && !proc.killed) { proc.kill(); }
+    botProcesses.delete(symbol);
+    
+    await db.delete(botsTable).where(eq(botsTable.symbol, symbol));
+    res.json({ success: true, message: `Bot ${symbol} deleted` });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 export async function reloadConfigsFromYaml(): Promise<void> {
   // Resolve bot directory - it's at project root level (../../../bot from artifacts/api-server/src/routes)
   const projectRoot = path.resolve(__dirname, "..", "..", "..", "..");
