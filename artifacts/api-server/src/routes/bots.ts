@@ -202,8 +202,12 @@ router.post("/:symbol/start", async (req, res) => {
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
     // Проверяем не запущен ли уже (через Map или через поиск PID)
-    if (botProcesses.has(symbol)) {
+    const existingProc = botProcesses.get(symbol);
+    if (existingProc && !existingProc.killed) {
       return res.json({ success: false, message: "Bot already running (dashboard)" });
+    }
+    if (existingProc?.killed) {
+      botProcesses.delete(symbol);
     }
     const existingPid = await findBotPid(symbol);
     if (existingPid) {
