@@ -71,7 +71,7 @@ def _release_lock(symbol: str) -> None:
 
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
-    order_mgr: OrderManager, log
+    order_mgr: OrderManager, log, recovery=None,
 ) -> None:
     if cfg.mode != "live":
         return
@@ -176,6 +176,20 @@ async def _sync_position_on_start(
         ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
         timestamp=datetime.datetime.utcnow(),
     )
+    # Check for locked recovery chain to preserve recovery context
+    if recovery and cfg.mode == "live":
+        import requests
+        try:
+            api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+            chains = requests.get(f"{api_url}/recovery/chains", timeout=5).json()
+            for ch in chains:
+                if ch.get("locked_by") == cfg.symbol and ch.get("status") == "locked":
+                    tracker.position.is_recovery = True
+                    tracker.position.recovery_chain_id = ch["id"]
+                    log.info(f"[SYNC] Marked position as recovery | chain #{ch['id']}")
+                    break
+        except Exception:
+            pass
     tracker._save_state()
 
     log.info(
@@ -286,7 +300,7 @@ async def _run_live_or_paper(
     tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None)
     handler   = SignalHandler(cfg, log)
 
-    await _sync_position_on_start(cfg, client, tracker, order_mgr, log)
+    await _sync_position_on_start(cfg, client, tracker, order_mgr, log, recovery)
 
     await reporter.report_heartbeat(0)
 
