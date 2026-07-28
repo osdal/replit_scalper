@@ -346,15 +346,17 @@ async def _run_live_or_paper(
                 if cfg.mode == "live" and tracker.has_open_position():
                     await tracker.sync_unrealized_pnl()
 
-            # Check for dust positions on exchange every 12 candles
+            # Check for dust positions and stale orders on exchange every 12 candles
             if candle_count[0] % 12 == 0 and cfg.mode == "live":
                 try:
                     all_positions = await order_mgr.client.futures_position_information()
+                    syms_with_pos = set()
                     for p in all_positions:
                         amt = float(p.get("positionAmt", "0") or 0)
                         sym = p.get("symbol", "")
                         if abs(amt) < 0.001:
                             continue
+                        syms_with_pos.add(sym)
                         ticker = await order_mgr.client.futures_symbol_ticker(symbol=sym)
                         price = float(ticker.get("price", 0))
                         notional = abs(amt) * price
@@ -366,6 +368,17 @@ async def _run_live_or_paper(
                                 quantity=abs(amt), reduceOnly=True,
                             )
                             log.info(f"[DUST] Closed dust on {sym} | {direction} qty={abs(amt)} notional=${notional:.4f}")
+                    
+                    # Cancel stale orders on symbols with no position and no tracker position
+                    bot_sym = cfg.symbol
+                    if bot_sym not in syms_with_pos and not tracker.has_open_position():
+                        try:
+                            open_orders = await order_mgr.client.futures_get_open_orders(symbol=bot_sym)
+                            if open_orders:
+                                await order_mgr.client.futures_cancel_all_open_orders(symbol=bot_sym)
+                                log.info(f"[DUST] Canceled {len(open_orders)} stale orders on {bot_sym} (no position)")
+                        except Exception:
+                            pass
                 except Exception as e:
                     log.debug(f"[DUST] Check error: {e}")
 
