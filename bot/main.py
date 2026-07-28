@@ -346,6 +346,29 @@ async def _run_live_or_paper(
                 if cfg.mode == "live" and tracker.has_open_position():
                     await tracker.sync_unrealized_pnl()
 
+            # Check for dust positions on exchange every 12 candles
+            if candle_count[0] % 12 == 0 and cfg.mode == "live":
+                try:
+                    all_positions = await order_mgr.client.futures_position_information()
+                    for p in all_positions:
+                        amt = float(p.get("positionAmt", "0") or 0)
+                        sym = p.get("symbol", "")
+                        if abs(amt) < 0.001:
+                            continue
+                        ticker = await order_mgr.client.futures_symbol_ticker(symbol=sym)
+                        price = float(ticker.get("price", 0))
+                        notional = abs(amt) * price
+                        if notional < 1.0:
+                            direction = "LONG" if amt > 0 else "SHORT"
+                            side = "SELL" if amt > 0 else "BUY"
+                            await order_mgr.client.futures_create_order(
+                                symbol=sym, side=side, type="MARKET",
+                                quantity=abs(amt), reduceOnly=True,
+                            )
+                            log.info(f"[DUST] Closed dust on {sym} | {direction} qty={abs(amt)} notional=${notional:.4f}")
+                except Exception as e:
+                    log.debug(f"[DUST] Check error: {e}")
+
             if tracker.has_open_position():
                 # Проверяем реальный объём позиции на бирже (раз в 12 свечей ~ 1 минута)
                 pos = tracker.position
