@@ -70,7 +70,7 @@ def build_trial_params(trial: optuna.Trial, base_cfg: Config) -> dict:
     p["tp2_pct"] = trial.suggest_float("tp2_pct", tp2_min_aligned, 2.4, step=0.1)
     p["volume_multiplier"] = trial.suggest_float("volume_multiplier", 1.0, 2.5, step=0.1)
     p["tp1_close_pct"] = trial.suggest_int("tp1_close_pct", 30, 70, step=10)
-    p["risk_pct"] = trial.suggest_float("risk_pct", 1.0, 10.0, step=0.5)
+    p["risk_pct"] = 3.0
 
     htf_fast = trial.suggest_int("htf_ema_fast", 5, 15)
     p["htf_ema_fast"] = htf_fast
@@ -83,6 +83,8 @@ def apply_trial_params(cfg: Config, params: dict) -> Config:
     cfg = deepcopy(cfg)
     for k, v in params.items():
         setattr(cfg, k, v)
+    if "risk_pct" not in params:
+        cfg.risk_pct = 3.0
     cfg.htf_enabled = True
     cfg.mode = "backtest"
     return cfg
@@ -151,14 +153,14 @@ def print_top(study: optuna.Study, n: int = 10) -> None:
         header = (
             f"  {'Rank':>4}  {'Score':>8}  {'Trades':>6}  {'WR%':>5}"
             f"  {'PnL':>8}  {'DD%':>6}  {'EMA_F':>5}  {'EMA_S':>5}"
-            f"  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'VolX':>5}  {'TP1cl%':>6}  {'Risk%':>6}"
+            f"  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'VolX':>5}  {'TP1cl%':>6}"
             f"  {'HTF_F':>5}  {'HTF_S':>5}"
         )
     else:
         header = (
             f"  {'Rank':>4}  {'Score':>8}  {'Trades':>6}  {'WR%':>5}"
             f"  {'PnL':>8}  {'DD%':>6}  {'EMA_F':>5}  {'EMA_S':>5}"
-            f"  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'VolX':>5}  {'TP1cl%':>6}  {'Risk%':>6}"
+            f"  {'SL%':>5}  {'TP1%':>5}  {'TP2%':>5}  {'VolX':>5}  {'TP1cl%':>6}"
         )
     print(header)
     hr_len = len(header) - 2
@@ -169,7 +171,6 @@ def print_top(study: optuna.Study, n: int = 10) -> None:
         tp1_display = f"{p.get('tp1_pct', 0):.2f}"
         tp2_display = f"{p.get('tp2_pct', 0):.2f}"
         sl_display = f"{p.get('sl_pct', 0):.2f}"
-        risk_display = f"{p.get('risk_pct', 0):.1f}"
         vol_display = f"{p.get('volume_multiplier', 0):.1f}"
         htf_f = p.get('htf_ema_fast')
         htf_s = p.get('htf_ema_slow')
@@ -180,7 +181,7 @@ def print_top(study: optuna.Study, n: int = 10) -> None:
             f"{attrs.get('total_pnl', '-'):>8}  {attrs.get('max_drawdown', '-'):>6}  "
             f"{p.get('ema_fast', '-'):>5}  {p.get('ema_slow', '-'):>5}  "
             f"{sl_display:>5}  {tp1_display:>5}  {tp2_display:>5}  {vol_display:>5}  "
-            f"{p.get('tp1_close_pct', '-'):>6}  {risk_display:>6}"
+            f"{p.get('tp1_close_pct', '-'):>6}"
             f"{htf_part}"
         )
     print(f"{'=' * 108}")

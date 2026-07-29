@@ -162,7 +162,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
       tp2_pct: getParam(result, "tp2_pct"),
       volume_multiplier: getParam(result, "volume_multiplier"),
       tp1_close_pct: getParam(result, "tp1_close_pct"),
-      risk_pct: getParam(result, "risk_pct"),
+      risk_pct: 3.0,
       htf_enabled: htfEnabled,
       htf_ema_fast: htfFast,
       htf_ema_slow: htfSlow,
@@ -180,10 +180,10 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
     const tp2 = getParam(result, "tp2_pct");
     const vol = getParam(result, "volume_multiplier");
     const tp1c = getParam(result, "tp1_close_pct");
-    const risk = getParam(result, "risk_pct");
+    const risk = 3.0;
     if (!confirm(`Apply to ${sym}?\nEMA ${ema_f}/${ema_s} | SL ${sl}% | TP1 ${tp1}% | TP2 ${tp2}% | Vol×${vol} | Risk ${risk}%`)) return;
     try {
-      const body: Record<string, number> = { ema_fast: ema_f, ema_slow: ema_s, sl_pct: sl, tp1_pct: tp1, tp2_pct: tp2, volume_multiplier: vol, tp1_close_pct: tp1c, risk_pct: risk };
+      const body: Record<string, number> = { ema_fast: ema_f, ema_slow: ema_s, sl_pct: sl, tp1_pct: tp1, tp2_pct: tp2, volume_multiplier: vol, tp1_close_pct: tp1c, risk_pct: 3.0 };
       const htf_f = getParam(result, "htf_ema_fast");
       const htf_s = getParam(result, "htf_ema_slow");
       if (htf_f > 0) body.htf_ema_fast = htf_f;
@@ -207,7 +207,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
   const isRunning = job?.status === "running";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" style={{ minHeight: '400px' }}>
       <Card className="border border-zinc-800 bg-zinc-900">
         <CardHeader className="pb-2">
           <CardTitle className="text-base text-zinc-300 flex items-center gap-2">
@@ -322,7 +322,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-zinc-400 text-xs border-b border-zinc-800">
-                    {["","Rank","Score","Trades","WR%","PnL","DD%","EMA F","EMA S","SL%","TP1%","TP2%","Vol×","TP1cl%","Risk%","HTF F","HTF S"].map(h => (
+                    {["","Rank","Score","Trades","WR%","PnL","DD%","EMA F","EMA S","SL%","TP1%","TP2%","Vol×","TP1cl%","HTF F","HTF S"].map(h => (
                       <th key={h} className="text-left pb-2 pr-3">{h}</th>
                     ))}
                   </tr>
@@ -364,7 +364,6 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
                         <td className="py-1.5 pr-3">{p.tp2_pct}</td>
                         <td className="py-1.5 pr-3">{p.volume_multiplier}</td>
                         <td className="py-1.5 pr-3">{p.tp1_close_pct}</td>
-                        <td className="py-1.5 pr-3">{p.risk_pct ?? "-"}</td>
                         <td className="py-1.5 pr-3">{p.htf_ema_fast ?? "-"}</td>
                         <td className="py-1.5 pr-3">{p.htf_ema_slow ?? "-"}</td>
                       </tr>

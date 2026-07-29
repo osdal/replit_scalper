@@ -220,3 +220,15 @@ $env:KUCOIN_API_PASSPHRASE = "your_passphrase"
 Start-Process python -ArgumentList "kucoin/main_kucoin.py BTCUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/btc.log"
 Start-Process python -ArgumentList "kucoin/main_kucoin.py ETHUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/eth.log"
 Start-Process python -ArgumentList "kucoin/main_kucoin.py SOLUSDT 5m" -WorkingDirectory $PWD -RedirectStandardOutput "kucoin/logs/sol.log"
+
+.\auto-optimize.ps1
+.\auto-optimize.ps1 -Symbols @("ARBUSDT","OPUSDT", "APTUSDT", "SUIUSDT", "NEARUSDT", "FILUSDT", "INJUSDT", "HBARUSDT", "KASUSDT" ) -Trials 400 -Jobs 4
+
+Все флаги:
+
+Флаг	По умолчанию	Описание
+-Symbols @("ETH","BTC")	все пары	Какие пары оптимизировать
+-Trials 200	400	Число комбинаций
+-Jobs 4	4	Параллельные вычисления
+-DaysBack 3	5	За сколько дней данные
+-SyncOnly	—	Только применить CSV б
