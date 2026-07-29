@@ -438,21 +438,23 @@ class OrderManager:
             real_qty = await self._get_real_position_qty(direction)
             if real_qty <= 0:
                 return False
-            # Получаем текущую цену для расчёта notional
             ticker = await self.client.futures_symbol_ticker(symbol=self.cfg.symbol)
             price = float(ticker.get("price", 0))
             notional = real_qty * price
             if notional > 1.0:
                 return False
             side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+            # Use minimum stepSize to ensure order is accepted by Binance
+            step_size = self._step_size if self._step_size else 0.001
+            min_qty = max(real_qty, step_size)
             await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=real_qty,
+                quantity=min_qty,
                 reduceOnly=True,
             )
-            self.log.info(f"[LIVE] Dust closed | {direction} qty={real_qty} notional=${notional:.4f}")
+            self.log.info(f"[LIVE] Dust closed | {direction} qty={min_qty} actual_qty={real_qty} notional=${notional:.4f}")
             return True
         except Exception as e:
             self.log.warning(f"[LIVE] Could not close dust: {e}")
