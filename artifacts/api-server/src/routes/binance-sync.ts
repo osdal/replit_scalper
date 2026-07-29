@@ -18,9 +18,22 @@ const BOT_DIR    = process.env.BOT_DIR || process.cwd();
 
 function getSymbols(): string[] {
   try {
-    const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+    const dirs = [
+      BOT_DIR,
+      path.join(process.cwd(), "bot"),
+      path.join(process.cwd(), "..", "bot"),
+      "bot",
+    ];
+    let configs: string[] = [];
+    for (const dir of dirs) {
+      try {
+        configs = fs.readdirSync(dir).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+        if (configs.length > 0) break;
+      } catch {}
+    }
     return configs.map(f => f.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT").sort();
   } catch {
+    console.error("[SYNC] Failed to read config files from any directory");
     return [];
   }
 }
