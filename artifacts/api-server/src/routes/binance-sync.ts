@@ -3,38 +3,29 @@
  * Берёт реальный PnL из income history (после комиссий и funding).
  */
 import { Router } from "express";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, botsTable } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
 import fs from "fs";
-import path from "path";
 
 const router = Router();
 
 const API_KEY    = process.env.BINANCE_API_KEY || "";
 const API_SECRET = process.env.BINANCE_API_SECRET || "";
 const BASE_URL   = "https://fapi.binance.com";
-const BOT_DIR    = process.env.BOT_DIR || "bot";
 
-function getSymbols(): string[] {
+async function getSymbols(): Promise<string[]> {
   try {
-    const dirs = [
-      BOT_DIR,
-      path.join(process.cwd(), "bot"),
-      path.join(process.cwd(), "..", "bot"),
-      "bot",
-    ];
-    let configs: string[] = [];
-    for (const dir of dirs) {
-      try {
-        configs = fs.readdirSync(dir).filter((f: string) => /^config_\w+\.yaml$/.test(f));
-        if (configs.length > 0) break;
-      } catch {}
-    }
-    return configs.map(f => f.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT").sort();
+    const bots = await db.select({ symbol: botsTable.symbol }).from(botsTable);
+    return bots.map(b => b.symbol).sort();
   } catch {
-    console.error("[SYNC] Failed to read config files from any directory");
-    return [];
+    // Fallback: read from config files
+    try {
+      const configs = fs.readdirSync("bot").filter((f: string) => /^config_\w+\.yaml$/.test(f));
+      return configs.map(f => f.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT").sort();
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -58,10 +49,9 @@ async function binanceGet(path: string, params: Record<string, string | number> 
 router.post("/", async (_req, res) => {
   try {
     if (!API_KEY || !API_SECRET) {
-      return res.status(400).json({ error: "BINANCE_API_KEY and BINANCE_API_SECRET not configured" });
     }
 
-    const symbols = getSymbols();
+    const symbols = await getSymbols();
     if (symbols.length === 0) {
       return res.status(400).json({ error: "No bot configs found" });
     }
