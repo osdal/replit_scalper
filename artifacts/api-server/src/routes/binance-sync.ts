@@ -6,17 +6,24 @@ import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 
 const router = Router();
 
 const API_KEY    = process.env.BINANCE_API_KEY || "";
 const API_SECRET = process.env.BINANCE_API_SECRET || "";
 const BASE_URL   = "https://fapi.binance.com";
+const BOT_DIR    = process.env.BOT_DIR || process.cwd();
 
-const SYMBOLS = [
-  "ETHUSDT", "SOLUSDT", "BTCUSDT", "BNBUSDT",
-  "DOGEUSDT", "TRXUSDT", "XRPUSDT", "ONTUSDT"
-];
+function getSymbols(): string[] {
+  try {
+    const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+    return configs.map(f => f.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT").sort();
+  } catch {
+    return [];
+  }
+}
 
 function sign(params: Record<string, string | number>): string {
   const qs = Object.entries(params).map(([k, v]) => `${k}=${v}`).join("&");
@@ -41,12 +48,19 @@ router.post("/", async (_req, res) => {
       return res.status(400).json({ error: "BINANCE_API_KEY and BINANCE_API_SECRET not configured" });
     }
 
-    // Очищаем старые записи
-    await db.run(sql`DELETE FROM trades`);
+    const symbols = getSymbols();
+    if (symbols.length === 0) {
+      return res.status(400).json({ error: "No bot configs found" });
+    }
 
-    let total = 0;
+    // Get existing trade entry_times to avoid inserting duplicates
+    const existing = await db.select({ symbol: tradesTable.symbol, entry_time: tradesTable.entry_time }).from(tradesTable);
+    const existingSet = new Set(existing.map(e => `${e.symbol}_${e.entry_time}`));
 
-    for (const symbol of SYMBOLS) {
+    let added = 0;
+    let skipped = 0;
+
+    for (const symbol of symbols) {
       try {
         // 1. Получаем все исполнения (userTrades) — для entry/exit цен
         const userTrades: any[] = await binanceGet("/fapi/v1/userTrades", {
@@ -55,21 +69,26 @@ router.post("/", async (_req, res) => {
 
         if (!userTrades.length) continue;
 
-        // 2. Группируем userTrades в позиции (realizedPnl уже есть в каждой сделке)
+        // 2. Группируем userTrades в позиции
         const positions = groupPositions(userTrades, symbol);
 
         for (const pos of positions) {
+          const key = `${pos.symbol}_${pos.entry_time}`;
+          if (existingSet.has(key)) {
+            skipped++;
+            continue;
+          }
           await db.insert(tradesTable).values(pos);
-          total++;
+          added++;
         }
 
-        console.log(`[SYNC] ${symbol}: ${positions.length} positions`);
+        console.log(`[SYNC] ${symbol}: ${positions.length} positions (${added} added, ${skipped} skipped)`);
       } catch (e: any) {
         console.error(`[SYNC] Error for ${symbol}:`, e.message);
       }
     }
 
-    res.json({ success: true, synced: total });
+    res.json({ success: true, synced: added, skipped, symbols: symbols.length });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
