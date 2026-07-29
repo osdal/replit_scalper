@@ -14,7 +14,7 @@ const router = Router();
 const API_KEY    = process.env.BINANCE_API_KEY || "";
 const API_SECRET = process.env.BINANCE_API_SECRET || "";
 const BASE_URL   = "https://fapi.binance.com";
-const BOT_DIR    = process.env.BOT_DIR || process.cwd();
+const BOT_DIR    = process.env.BOT_DIR || "bot";
 
 function getSymbols(): string[] {
   try {
