@@ -93,6 +93,48 @@ async def _sync_position_on_start(
             log.warning(f"[SYNC] Exchange shows no position but state has open position — clearing state")
             tracker.position = None
             tracker._clear_state()
+            # Close any stale open trades in DB and report to recovery
+            try:
+                import requests as sync_requests
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                for trade in (trades_resp.get("trades") or []):
+                    if trade.get("is_open"):
+                        trade_id = trade["id"]
+                        entry_time_str = trade.get("entry_time", "")
+                        exit_time_ms = int(__import__("time").time() * 1000)
+                        entry_time_ms = 0
+                        try:
+                            if entry_time_str:
+                                import datetime
+                                entry_time_ms = int(datetime.datetime.fromisoformat(entry_time_str[:19].replace("T", " ").replace("Z", "")).timestamp() * 1000)
+                        except Exception:
+                            pass
+                        real_pnl = None
+                        if entry_time_ms > 0 and order_mgr:
+                            real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_time_ms, exit_time_ms)
+                        pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
+                        exit_price_val = 0.0
+                        try:
+                            klines = await client.futures_klines(symbol=cfg.symbol, interval="1m", limit=1)
+                            exit_price_val = float(klines[0][4])
+                        except Exception:
+                            pass
+                        # Patch the trade as closed
+                        import requests as sync_patch
+                        sync_patch.patch(f"{api_url}/trades/{trade_id}", json={
+                            "exit_price": exit_price_val,
+                            "pnl": round(pnl_to_use, 4),
+                            "exit_reason": "SL",
+                            "exit_time": datetime.datetime.utcnow().isoformat(),
+                            "is_open": False,
+                        })
+                        log.info(f"[SYNC] Closed stale DB trade #{trade_id} for {cfg.symbol} | pnl={pnl_to_use:.4f}")
+                        if pnl_to_use < 0 and recovery:
+                            await recovery.report(pnl=pnl_to_use)
+                            log.info(f"[SYNC] Reported recovery from stale trade #{trade_id} | pnl={pnl_to_use:.4f}")
+            except Exception as e:
+                log.debug(f"[SYNC] Stale trade cleanup error: {e}")
         log.info(f"[SYNC] No open position found for {cfg.symbol}")
         return
 
