@@ -485,7 +485,9 @@ async def _run_live_or_paper(
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
-                                    await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                                    await recovery.release(chain_id=pos.recovery_chain_id)
+                                    await recovery.report(pnl=pnl)
+                                    log.info(f"[RECOVERY] External close on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
                                 elif pnl < 0:
                                     await recovery.report(pnl=pnl)
                             else:
@@ -554,7 +556,9 @@ async def _run_live_or_paper(
                         if real_qty > 0 and real_qty < 0.001:
                             await order_mgr.close_dust(pos.direction)
                         if pos.is_recovery:
-                            await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                            await recovery.release(chain_id=pos.recovery_chain_id)
+                            await recovery.report(pnl=pnl)
+                            log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
                         elif pnl < 0:
                             await recovery.report(pnl=pnl)
                         return
