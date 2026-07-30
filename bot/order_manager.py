@@ -373,7 +373,13 @@ class OrderManager:
                 f"{' [RECOVERY]' if is_recovery else ''}"
             )
             # Verify position exists on exchange before continuing
-            real_qty = await self._get_real_position_qty(signal.direction)
+            # Retry up to 3 times with 1s delay — position may appear with slight delay
+            real_qty = 0.0
+            for attempt in range(3):
+                await asyncio.sleep(1.0)
+                real_qty = await self._get_real_position_qty(signal.direction)
+                if real_qty > 0:
+                    break
             if real_qty < 0.000001:
                 self.log.error(
                     f"[LIVE] Position verification failed | "
