@@ -49,7 +49,7 @@ def build_params(trial: optuna.Trial) -> dict:
     p["tp2_pct"] = p["tp1_pct"]
     p["tp1_close_pct"] = 100
     p["volume_multiplier"] = trial.suggest_float("volume_multiplier", 1.0, 2.5, step=0.1)
-    p["risk_pct"] = trial.suggest_float("risk_pct", 1.0, 10.0, step=0.5)
+    p["risk_pct"] = 3.0
     htf_fast = trial.suggest_int("htf_ema_fast", 5, 15)
     p["htf_ema_fast"] = htf_fast
     p["htf_ema_slow"] = trial.suggest_int("htf_ema_slow", htf_fast + 3, 40)
@@ -135,7 +135,6 @@ def optimize_symbol(sym: str, base_cfg_path: str, args) -> dict:
         "ema_slow": best.params.get("ema_slow", "-"),
         "sl_pct": round(best.params.get("sl_pct", 0), 2),
         "tp_pct": round(min(best.params.get("sl_pct", 0) * 2, 3.0), 2),
-        "risk_pct": round(best.params.get("risk_pct", 0), 1),
         "vol_mult": round(best.params.get("volume_multiplier", 0), 1),
         "htf_f": best.params.get("htf_ema_fast", "-"),
         "htf_s": best.params.get("htf_ema_slow", "-"),
@@ -196,19 +195,19 @@ def main():
     header = (
         f"  {'Symbol':>14s}  {'Score':>8}  {'Trades':>6}  {'WR%':>5}"
         f"  {'PnL':>8}  {'DD%':>6}  {'EMA_F':>5}  {'EMA_S':>5}"
-        f"  {'SL%':>5}  {'TP%':>5}  {'Risk%':>6}  {'VolX':>5}  {'HTF_F':>5}  {'HTF_S':>5}"
+        f"  {'SL%':>5}  {'TP%':>5}  {'VolX':>5}  {'HTF_F':>5}  {'HTF_S':>5}"
     )
     print(header)
-    print(f"  {'-' * 113}")
+    print(f"  {'-' * 99}")
     results.sort(key=lambda r: r["score"], reverse=True)
     for r in results:
         print(
             f"  {r['symbol']:>14s}  {r['score']:>8}  {str(r['trades']):>6}  {str(r['win_rate']):>5}"
             f"  {str(r['pnl']):>8}  {str(r['dd']):>6}  {str(r['ema_fast']):>5}  {str(r['ema_slow']):>5}"
-            f"  {str(r['sl_pct']):>5}  {str(r['tp_pct']):>5}  {str(r['risk_pct']):>6}  {str(r['vol_mult']):>5}"
+            f"  {str(r['sl_pct']):>5}  {str(r['tp_pct']):>5}  {str(r['vol_mult']):>5}"
             f"  {str(r['htf_f']):>5}  {str(r['htf_s']):>5}"
         )
-    print(f"{'=' * 115}")
+    print(f"{'=' * 101}")
 
     csv_path = os.path.join(os.path.dirname(__file__), "logs", f"tp2x_opt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)

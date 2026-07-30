@@ -54,7 +54,7 @@ def build_trial_params_symmetric(trial: optuna.Trial) -> dict:
     p["tp2_pct"] = p["sl_pct"]         # no TP2 — close 100% at TP1 = SL level
     p["tp1_close_pct"] = 100            # full close at TP1
     p["volume_multiplier"] = trial.suggest_float("volume_multiplier", 1.0, 2.5, step=0.1)
-    p["risk_pct"] = trial.suggest_float("risk_pct", 1.0, 10.0, step=0.5)
+    p["risk_pct"] = 3.0
     htf_fast = trial.suggest_int("htf_ema_fast", 5, 15)
     p["htf_ema_fast"] = htf_fast
     p["htf_ema_slow"] = trial.suggest_int("htf_ema_slow", htf_fast + 3, 40)
@@ -148,7 +148,6 @@ def optimize_symbol(sym: str, base_cfg_path: str, args) -> dict:
         "ema_fast": best.params.get("ema_fast", "-"),
         "ema_slow": best.params.get("ema_slow", "-"),
         "sl_tp_pct": round(best.params.get("sl_pct", 0), 2),
-        "risk_pct": round(best.params.get("risk_pct", 0), 1),
         "vol_mult": round(best.params.get("volume_multiplier", 0), 1),
         "htf_f": best.params.get("htf_ema_fast", "-"),
         "htf_s": best.params.get("htf_ema_slow", "-"),
@@ -217,19 +216,19 @@ def main():
     header = (
         f"  {'Symbol':>14s}  {'Score':>8}  {'Trades':>6}  {'WR%':>5}"
         f"  {'PnL':>8}  {'DD%':>6}  {'EMA_F':>5}  {'EMA_S':>5}"
-        f"  {'SL=TP%':>6}  {'Risk%':>6}  {'VolX':>5}  {'HTF_F':>5}  {'HTF_S':>5}"
+        f"  {'SL=TP%':>6}  {'VolX':>5}  {'HTF_F':>5}  {'HTF_S':>5}"
     )
     print(header)
-    print(f"  {'-' * 108}")
+    print(f"  {'-' * 96}")
     results.sort(key=lambda r: r["score"], reverse=True)
     for r in results:
         print(
             f"  {r['symbol']:>14s}  {r['score']:>8}  {str(r['trades']):>6}  {str(r['win_rate']):>5}"
             f"  {str(r['pnl']):>8}  {str(r['dd']):>6}  {str(r['ema_fast']):>5}  {str(r['ema_slow']):>5}"
-            f"  {str(r['sl_tp_pct']):>6}  {str(r['risk_pct']):>6}  {str(r['vol_mult']):>5}"
+            f"  {str(r['sl_tp_pct']):>6}  {str(r['vol_mult']):>5}"
             f"  {str(r['htf_f']):>5}  {str(r['htf_s']):>5}"
         )
-    print(f"{'=' * 110}")
+    print(f"{'=' * 98}")
 
     # Save CSV
     import csv
