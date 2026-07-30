@@ -37,65 +37,6 @@ def calc_quantity(
     return quantity
 
 
-def calc_recovery_quantity(
-    debt_amount: float,
-    bonus_pct: float,
-    tp1_pct: float,
-    entry_price: float,
-    balance: float,
-    risk_pct: float,
-    sl_pct: float,
-    max_pct: Optional[float] = None,
-    logger: Optional[logging.Logger] = None,
-    symbol: str = "UNKNOWN",
-) -> float:
-    """
-    Рассчитывает размер позиции-компенсатора так, чтобы прибыль
-    при полном закрытии на TP1 покрыла debt_amount + бонус.
-
-    Формула: TargetProfit = debt_amount * (1 + bonus_pct/100)
-    Qty = TargetProfit / (entry_price * tp1_pct / 100 * (1 - fee_rate))
-    fee_rate = 0.0004 (0.02% * 2 для taker fee в обе стороны)
-    """
-    fee_rate = 0.0004  # 0.02% * 2 для вход/выход
-
-    # 1. Рассчитываем целевой профит (накопленный убыток + бонус)
-    target_profit = debt_amount * (1 + bonus_pct / 100)
-
-    # 2. Расстояние до TP1 в долларах (с учётом комиссии)
-    tp1_distance = entry_price * tp1_pct / 100 * (1 - fee_rate)
-    if tp1_distance <= 0:
-        return 0.0
-
-    # 3. Сырой размер позиции
-    raw_qty = target_profit / tp1_distance
-
-    # 4. Логируем детали расчета
-    if logger:
-        logger.info(
-            f"[RECOVERY_CALC] symbol={symbol} "
-            f"debt={debt_amount:.4f} bonus={bonus_pct}% "
-            f"target_profit={target_profit:.4f} "
-            f"entry={entry_price:.4f} tp1_pct={tp1_pct}% "
-            f"tp1_distance_before_fee={entry_price * tp1_pct / 100:.4f} "
-            f"tp1_distance_after_fee={tp1_distance:.4f} "
-            f"raw_qty={raw_qty:.6f}"
-        )
-
-    # 5. Ограничиваем максимальный размер позиции в % от депозита
-    if max_pct is not None and max_pct > 0 and entry_price > 0:
-        max_notional = balance * max_pct / 100
-        max_qty = max_notional / entry_price
-        result_qty = min(raw_qty, max_qty)
-        if logger:
-            logger.info(f"[RECOVERY_CALC] max_pct={max_pct}% max_qty={max_qty:.6f} result={result_qty:.6f}")
-        return result_qty
-
-    if logger:
-        logger.info(f"[RECOVERY_CALC] No max limit applied, qty={raw_qty:.6f}")
-    return raw_qty
-
-
 def _round_step(value: float, step: float) -> float:
     precision = max(0, round(-math.log10(step)))
     return round(math.floor(value / step) * step, precision)
@@ -338,13 +279,29 @@ class OrderManager:
         recovery_target: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
         balance = await self.get_balance()
-        raw_qty = calc_quantity(
-            balance=balance,
-            risk_pct=self.cfg.risk_pct,
-            sl_pct=self.cfg.sl_pct,
-            entry_price=signal.entry_price,
-            leverage=self.cfg.leverage,
-        )
+        is_recovery = recovery_target is not None
+        
+        if is_recovery:
+            # Recovery: qty = target_profit / (entry * tp1_pct%)
+            # This ensures TP1 hit covers debt + bonus
+            raw_qty = recovery_target / (signal.entry_price * self.cfg.tp1_pct / 100)
+            # Check margin with leverage
+            margin = raw_qty * signal.entry_price / self.cfg.leverage
+            if margin > balance:
+                self.log.warning(
+                    f"[RECOVERY] Insufficient margin | "
+                    f"required=${margin:.2f} balance=${balance:.2f} "
+                    f"target={recovery_target:.4f} qty={raw_qty:.6f}"
+                )
+                return None
+        else:
+            raw_qty = calc_quantity(
+                balance=balance,
+                risk_pct=self.cfg.risk_pct,
+                sl_pct=self.cfg.sl_pct,
+                entry_price=signal.entry_price,
+                leverage=self.cfg.leverage,
+            )
         qty = await self._adjust_qty(raw_qty)
 
         if qty <= 0:
@@ -355,7 +312,6 @@ class OrderManager:
             )
             return None
 
-        is_recovery = recovery_target is not None
         tp1_close_pct = 100 if is_recovery else self.cfg.tp1_close_pct
 
         if self.cfg.mode == "live":
