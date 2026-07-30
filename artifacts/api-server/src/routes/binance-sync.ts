@@ -56,36 +56,41 @@ router.post("/", async (_req, res) => {
       return res.status(400).json({ error: "No bot configs found" });
     }
 
-    // Get existing trade entry_times to avoid inserting duplicates
-    const existing = await db.select({ symbol: tradesTable.symbol, entry_time: tradesTable.entry_time }).from(tradesTable);
-    const existingSet = new Set(existing.map(e => `${e.symbol}_${e.entry_time}`));
+    // Get existing trades to avoid duplicates (fuzzy: symbol + direction + 1min entry window)
+    const existing = await db.select({
+      symbol: tradesTable.symbol,
+      direction: tradesTable.direction,
+      entry_time: tradesTable.entry_time,
+    }).from(tradesTable);
 
     let added = 0;
     let skipped = 0;
 
     for (const symbol of symbols) {
       try {
-        // 1. Получаем все исполнения (userTrades) — для entry/exit цен
         const userTrades: any[] = await binanceGet("/fapi/v1/userTrades", {
           symbol, limit: 1000,
         });
 
         if (!userTrades.length) continue;
 
-        // 2. Группируем userTrades в позиции
         const positions = groupPositions(userTrades, symbol);
 
         for (const pos of positions) {
-          const key = `${pos.symbol}_${pos.entry_time}`;
-          if (existingSet.has(key)) {
-            skipped++;
-            continue;
-          }
+          const isDuplicate = existing.some(e => {
+            if (e.symbol !== pos.symbol || e.direction !== pos.direction) return false;
+            try {
+              const t1 = new Date(e.entry_time).getTime();
+              const t2 = new Date(pos.entry_time).getTime();
+              return Math.abs(t1 - t2) < 60000;
+            } catch { return false; }
+          });
+          if (isDuplicate) { skipped++; continue; }
           await db.insert(tradesTable).values(pos);
           added++;
         }
 
-        console.log(`[SYNC] ${symbol}: ${positions.length} positions (${added} added, ${skipped} skipped)`);
+        console.log(`[SYNC] ${symbol}: ${positions.length} positions (${added} added)`);
       } catch (e: any) {
         console.error(`[SYNC] Error for ${symbol}:`, e.message);
       }
