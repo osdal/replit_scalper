@@ -162,6 +162,18 @@ class OrderManager:
             self.log.warning(f"[LIVE] Could not fetch position qty: {e}")
             return -1.0
 
+    async def _get_real_position_entry(self, direction: str) -> Optional[float]:
+        try:
+            positions = await self.client.futures_position_information(symbol=self.cfg.symbol)
+            for p in positions:
+                amt = float(p.get("positionAmt", 0))
+                if (direction == "LONG" and amt > 0) or (direction == "SHORT" and amt < 0):
+                    return float(p.get("entryPrice", 0))
+            return None
+        except Exception as e:
+            self.log.warning(f"[LIVE] Could not fetch position entry: {e}")
+            return None
+
     async def get_position_info(self) -> dict | None:
         """
         Возвращает информацию о текущей позиции на Бинансе.
@@ -360,6 +372,23 @@ class OrderManager:
                 f"qty={qty} entry≈{entry_price}"
                 f"{' [RECOVERY]' if is_recovery else ''}"
             )
+            # Verify position exists on exchange before continuing
+            real_qty = await self._get_real_position_qty(signal.direction)
+            if real_qty < 0.000001:
+                self.log.error(
+                    f"[LIVE] Position verification failed | "
+                    f"order sent but no position found on exchange. "
+                    f"qty={qty} direction={signal.direction} order_status={order.get('status')}"
+                )
+                return None
+            if real_qty < qty * 0.9:
+                self.log.warning(
+                    f"[LIVE] Position partially filled | "
+                    f"requested={qty:.6f} actual={real_qty:.6f} ({real_qty/qty*100:.1f}%)"
+                )
+                # Use actual qty from exchange
+                qty = real_qty
+                entry_price = await self._get_real_position_entry(signal.direction) or entry_price
             if is_recovery:
                 # Recalculate TP to cover target profit
                 # target_profit = qty * price_move → price_move = target_profit / qty
