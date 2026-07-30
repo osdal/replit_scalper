@@ -56,14 +56,15 @@ router.post("/", async (_req, res) => {
       return res.status(400).json({ error: "No bot configs found" });
     }
 
-    // Get existing trades to avoid duplicates (fuzzy: symbol + direction + 1min entry window)
+    // Get existing trades to match against
     const existing = await db.select({
+      id: tradesTable.id,
       symbol: tradesTable.symbol,
       direction: tradesTable.direction,
       entry_time: tradesTable.entry_time,
     }).from(tradesTable);
 
-    let added = 0;
+    let updated = 0;
     let skipped = 0;
 
     for (const symbol of symbols) {
@@ -77,7 +78,8 @@ router.post("/", async (_req, res) => {
         const positions = groupPositions(userTrades, symbol);
 
         for (const pos of positions) {
-          const isDuplicate = existing.some(e => {
+          // Find matching trade in DB (1-min entry window)
+          const match = existing.find(e => {
             if (e.symbol !== pos.symbol || e.direction !== pos.direction) return false;
             try {
               const t1 = new Date(e.entry_time).getTime();
@@ -85,18 +87,33 @@ router.post("/", async (_req, res) => {
               return Math.abs(t1 - t2) < 60000;
             } catch { return false; }
           });
-          if (isDuplicate) { skipped++; continue; }
-          await db.insert(tradesTable).values(pos);
-          added++;
+
+          if (match) {
+            // Update existing trade with real Binance data
+            await db.update(tradesTable)
+              .set({
+                pnl: pos.pnl,
+                exit_price: pos.is_open ? null : pos.exit_price,
+                exit_reason: pos.is_open ? null : pos.exit_reason,
+                exit_time: pos.exit_time,
+                is_open: pos.is_open,
+              })
+              .where(eq(tradesTable.id, match.id));
+            updated++;
+          } else if (!pos.is_open) {
+            // Only insert closed trades we don't have — historical cleanup
+            await db.insert(tradesTable).values(pos);
+            updated++;
+          }
         }
 
-        console.log(`[SYNC] ${symbol}: ${positions.length} positions (${added} added)`);
+        console.log(`[SYNC] ${symbol}: ${positions.length} positions (${updated} updated, ${skipped} skipped)`);
       } catch (e: any) {
         console.error(`[SYNC] Error for ${symbol}:`, e.message);
       }
     }
 
-    res.json({ success: true, synced: added, skipped, symbols: symbols.length });
+    res.json({ success: true, synced: updated, skipped, symbols: symbols.length });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
