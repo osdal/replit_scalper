@@ -233,9 +233,19 @@ async def _sync_position_on_start(
         except Exception:
             pass
     # Register open trade in DB so _trade_id is set for future close handling.
-    # Always create a new trade record — stale records cause more problems than duplicates.
+    # Clean up any stale open trades first, then create a fresh record.
     import requests
     try:
+        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+        existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=20", timeout=5).json()
+        for old_trade in (existing.get("trades") or []):
+            if old_trade.get("is_open"):
+                requests.patch(
+                    f"{api_url}/trades/{old_trade['id']}",
+                    json={"is_open": False, "exit_reason": "UNKNOWN", "exit_time": datetime.datetime.utcnow().isoformat()},
+                    timeout=5,
+                )
+                log.info(f"[SYNC] Closed stale open trade #{old_trade['id']} for {cfg.symbol}")
         await tracker._report_open(mock_signal, exchange_qty)
     except Exception:
         pass
