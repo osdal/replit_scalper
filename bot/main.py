@@ -91,25 +91,57 @@ async def _sync_position_on_start(
     if exchange_qty < 0.000001:
         if tracker.load_state():
             log.warning(f"[SYNC] Exchange shows no position but state has open position — clearing state")
+            # Close stale DB trades with real PnL from Binance
+            try:
+                import requests as sync_requests
+                import datetime
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                for trade in (trades_resp.get("trades") or []):
+                    if trade.get("is_open"):
+                        trade_id = trade["id"]
+                        entry_time_str = trade.get("entry_time", "")
+                        exit_ms = int(__import__("time").time() * 1000)
+                        entry_ms = 0
+                        try:
+                            if entry_time_str:
+                                entry_ms = int(datetime.datetime.fromisoformat(entry_time_str[:19].replace("T", " ").replace("Z", "")).timestamp() * 1000)
+                        except Exception:
+                            pass
+                        real_pnl = None
+                        if entry_ms > 0 and order_mgr:
+                            real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
+                        pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
+                        sync_requests.patch(f"{api_url}/trades/{trade_id}", json={
+                            "is_open": False,
+                            "exit_reason": "SL",
+                            "pnl": round(pnl_val, 4),
+                            "exit_time": datetime.datetime.utcnow().isoformat(),
+                        }, timeout=5)
+                        log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
+                        if pnl_val < 0 and recovery:
+                            await recovery.report(pnl=pnl_val)
+                            log.info(f"[SYNC] Reported recovery from stale trade #{trade_id} | pnl={pnl_val:.4f}")
+            except Exception as e:
+                log.debug(f"[SYNC] Cleanup error: {e}")
             tracker.position = None
             tracker._clear_state()
-        # Clean up any stale open trades regardless of state
-        try:
-            import requests as sync_requests
-            import datetime
-            api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
-            trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
-            for trade in (trades_resp.get("trades") or []):
-                if trade.get("is_open"):
-                    trade_id = trade["id"]
-                    sync_requests.patch(f"{api_url}/trades/{trade_id}", json={
-                        "is_open": False,
-                        "exit_reason": "UNKNOWN",
-                        "exit_time": datetime.datetime.utcnow().isoformat(),
-                    }, timeout=5)
-                    log.info(f"[SYNC] Closed stale open trade #{trade_id} for {cfg.symbol} (no exchange position)")
-        except Exception as e:
-            log.debug(f"[SYNC] Stale trade cleanup error: {e}")
+        else:
+            # No tracker state either — check for stale DB trades
+            try:
+                import requests as sync_requests
+                import datetime
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                for trade in (trades_resp.get("trades") or []):
+                    if trade.get("is_open"):
+                        sync_requests.patch(f"{api_url}/trades/{trade['id']}", json={
+                            "is_open": False, "exit_reason": "UNKNOWN",
+                            "exit_time": datetime.datetime.utcnow().isoformat(),
+                        }, timeout=5)
+                        log.info(f"[SYNC] Closed stale open trade #{trade['id']} for {cfg.symbol} (no exchange position)")
+            except Exception as e:
+                log.debug(f"[SYNC] Stale trade cleanup error: {e}")
         log.info(f"[SYNC] No open position found for {cfg.symbol}")
         return
 
@@ -120,6 +152,37 @@ async def _sync_position_on_start(
                 real_qty = await order_mgr._get_real_position_qty(pos.direction)
                 if real_qty < 0.000001:
                     log.warning(f"[SYNC] Exchange shows no position but state has open position — position closed externally (TP/SL), clearing state")
+                    # Fetch real PnL and close DB trade
+                    try:
+                        import requests as s2
+                        import datetime
+                        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                        trades_resp = s2.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                        for trade in (trades_resp.get("trades") or []):
+                            if trade.get("is_open") and pos.entry_timestamp:
+                                entry_ms = 0
+                                try:
+                                    if isinstance(pos.entry_timestamp, str):
+                                        entry_ms = int(datetime.datetime.fromisoformat(pos.entry_timestamp).timestamp() * 1000)
+                                    else:
+                                        entry_ms = int(pos.entry_timestamp.timestamp() * 1000)
+                                except Exception:
+                                    pass
+                                exit_ms = int(__import__("time").time() * 1000)
+                                real_pnl = None
+                                if entry_ms > 0:
+                                    real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
+                                pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
+                                s2.patch(f"{api_url}/trades/{trade['id']}", json={
+                                    "is_open": False, "exit_reason": "SL",
+                                    "pnl": round(pnl_val, 4),
+                                    "exit_time": datetime.datetime.utcnow().isoformat(),
+                                }, timeout=5)
+                                log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
+                                if pnl_val < 0 and recovery:
+                                    await recovery.report(pnl=pnl_val)
+                    except Exception:
+                        pass
                     tracker.position = None
                     tracker._clear_state()
                     return
