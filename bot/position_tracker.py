@@ -1,6 +1,7 @@
 import json
 import os
 import datetime
+import asyncio
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 import logging
@@ -478,19 +479,47 @@ class PositionTracker:
         total_trade_pnl = accumulated_pnl_before + last_event_pnl
 
         if is_recovery_tp1_full_close:
-            await self._report_close(close_price, remaining_before, total_trade_pnl, "TP1")
+            await self._verify_position_closed(p.direction, 10)
+            real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+            pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
+            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1")
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
         elif hit == "TP1":
-            # TP1 — частичное закрытие. В дашборде ничего не меняется,
-            # но учёт PnL ведётся в трекере (realized_pnl), SL переносится в безубыток.
             self._save_state()
         elif hit in ("SL", "TP2"):
             exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
+            await self._verify_position_closed(p.direction, 10)
+            real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+            pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
             if trade_id_before:
-                await self._report_close_with_id(trade_id_before, close_price, remaining_before, total_trade_pnl, exit_reason)
+                await self._report_close_with_id(trade_id_before, close_price, remaining_before, pnl_to_use, exit_reason)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
+            # Update local PnL with real value for return
+            if real_pnl is not None:
+                total_trade_pnl = real_pnl
 
         return total_trade_pnl
+
+    async def _verify_position_closed(self, direction: str, max_wait_sec: int = 10) -> None:
+        """Wait until exchange confirms position is fully closed (retry every 1s)."""
+        if not self.order_mgr:
+            return
+        for _ in range(max_wait_sec):
+            real_qty = await self.order_mgr._get_real_position_qty(direction)
+            if real_qty < 0.000001:
+                return
+            await asyncio.sleep(1.0)
+        self.log.warning(f"[POSITION_CHECK] Position still open after {max_wait_sec}s wait")
+
+    async def _fetch_binance_pnl(self, entry_time_ms: int, trade_id: Optional[int]) -> Optional[float]:
+        """Fetch real PnL from Binance after position is closed."""
+        if not self.order_mgr or not trade_id or entry_time_ms <= 0:
+            return None
+        try:
+            exit_ms = int(__import__("time").time() * 1000)
+            return await self.order_mgr.get_realized_pnl(self.cfg.symbol, entry_time_ms, exit_ms)
+        except Exception:
+            return None
 
     async def _sync_pnl_from_exchange(self, entry_time_ms: int, trade_id: Optional[int], exit_time_ms: Optional[int] = None) -> None:
         """
