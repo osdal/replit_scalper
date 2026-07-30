@@ -166,6 +166,7 @@ def main():
     parser.add_argument("--end", default=None, help="End date YYYY-MM-DD")
     parser.add_argument("--trials", type=int, default=100, help="Trials per symbol")
     parser.add_argument("--jobs", type=int, default=1, help="Parallel workers")
+    parser.add_argument("--apply", action="store_true", help="Apply best params to config files")
     args = parser.parse_args()
 
     if not args.start or not args.end:
@@ -217,6 +218,40 @@ def main():
             w.writeheader()
             w.writerows(results)
     print(f"\n  Results saved -> {csv_path}")
+
+    # Apply to configs if --apply flag is set
+    if args.apply:
+        import yaml
+        import requests
+        applied = 0
+        for r in results:
+            sym_lower = r["symbol"].replace("USDT", "").lower()
+            cfg_file = os.path.join(os.path.dirname(__file__), f"config_{sym_lower}.yaml")
+            if not os.path.exists(cfg_file):
+                print(f"  {r['symbol']}: config not found ({cfg_file})")
+                continue
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                cfg["ema_fast"] = r["ema_fast"]
+                cfg["ema_slow"] = r["ema_slow"]
+                cfg["sl_pct"] = r["sl_pct"]
+                cfg["tp1_pct"] = r["tp_pct"]
+                cfg["tp2_pct"] = r["tp_pct"]
+                cfg["tp1_close_pct"] = 100
+                cfg["volume_multiplier"] = r["vol_mult"]
+                cfg["risk_pct"] = 3.0
+                cfg["htf_enabled"] = True
+                cfg["htf_ema_fast"] = r["htf_f"]
+                cfg["htf_ema_slow"] = r["htf_s"]
+                with open(cfg_file, "w", encoding="utf-8") as f:
+                    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+                print(f"  Updated {os.path.basename(cfg_file)} | SL={r['sl_pct']}% TP={r['tp_pct']}% EMA={r['ema_fast']}/{r['ema_slow']}")
+                applied += 1
+            except Exception as e:
+                print(f"  {r['symbol']}: error - {e}")
+        if applied > 0:
+            print(f"\n  Applied to {applied} configs. Run 'refresh' in dashboard to reload bots.")
 
 
 if __name__ == "__main__":
