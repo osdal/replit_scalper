@@ -281,14 +281,8 @@ class OrderManager:
         balance = await self.get_balance()
         is_recovery = recovery_target is not None
 
-        if self.cfg.fixed_notional_usd > 0:
-            raw_qty = self.cfg.fixed_notional_usd / signal.entry_price
-        elif self.cfg.fixed_qty > 0:
-            raw_qty = self.cfg.fixed_qty
-        elif self.cfg.fixed_risk_usd > 0:
-            # Fixed loss in USD at SL: qty = risk_usd / (entry * sl_pct%)
-            raw_qty = self.cfg.fixed_risk_usd / (signal.entry_price * self.cfg.sl_pct / 100)
-        elif is_recovery:
+        if is_recovery:
+            # Recovery FIRST — must size to cover debt, ignore fixed sizing
             # Recovery: qty = target_profit / (entry * tp1_pct%)
             # This ensures TP1 hit covers debt + bonus
             raw_qty = recovery_target / (signal.entry_price * self.cfg.tp1_pct / 100)
@@ -301,6 +295,13 @@ class OrderManager:
                     f"target={recovery_target:.4f} qty={raw_qty:.6f}"
                 )
                 return None
+        elif self.cfg.fixed_notional_usd > 0:
+            raw_qty = self.cfg.fixed_notional_usd / signal.entry_price
+        elif self.cfg.fixed_qty > 0:
+            raw_qty = self.cfg.fixed_qty
+        elif self.cfg.fixed_risk_usd > 0:
+            # Fixed loss in USD at SL: qty = risk_usd / (entry * sl_pct%)
+            raw_qty = self.cfg.fixed_risk_usd / (signal.entry_price * self.cfg.sl_pct / 100)
         else:
             raw_qty = calc_quantity(
                 balance=balance,
