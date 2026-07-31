@@ -280,8 +280,10 @@ class OrderManager:
     ) -> Optional[Tuple[float, float]]:
         balance = await self.get_balance()
         is_recovery = recovery_target is not None
-        
-        if is_recovery:
+
+        if self.cfg.fixed_qty > 0:
+            raw_qty = self.cfg.fixed_qty
+        elif is_recovery:
             # Recovery: qty = target_profit / (entry * tp1_pct%)
             # This ensures TP1 hit covers debt + bonus
             raw_qty = recovery_target / (signal.entry_price * self.cfg.tp1_pct / 100)
