@@ -231,16 +231,17 @@ def main():
             w.writerows(results)
     print(f"\n  Results saved -> {csv_path}")
 
-    # Save all trades of best results to a single combined file
+    # Save all trades of best results to a single combined file, sorted by entry time
     if all_trades:
+        all_trades_sorted = sorted(all_trades, key=lambda t: t.get("entry_time", "") or "")
         trades_path = os.path.join(os.path.dirname(__file__), "logs", f"tp2x_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         with open(trades_path, "w", newline="", encoding="utf-8") as f:
             fieldnames = ["symbol", "direction", "entry_price", "exit_price", "qty", "pnl", "exit_reason", "entry_time", "exit_time"]
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
-            for t in all_trades:
+            for t in all_trades_sorted:
                 w.writerow({k: t.get(k, "") for k in fieldnames})
-        print(f"  All trades saved ({len(all_trades)}) -> {trades_path}")
+        print(f"  All trades saved sorted by time ({len(all_trades_sorted)}) -> {trades_path}")
 
     # Apply to configs if --apply flag is set
     if args.apply:
