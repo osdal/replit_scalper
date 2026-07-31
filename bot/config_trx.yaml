@@ -3,7 +3,6 @@ backtest_end: '2026-06-15'
 backtest_start: '2026-06-01'
 ema_fast: 6
 ema_slow: 53
-fixed_qty: 0.0
 htf_ema_fast: 5
 htf_ema_slow: 8
 htf_enabled: true
@@ -12,7 +11,6 @@ leverage: 75
 log_file: logs/trx.log
 mode: live
 paper_balance: 1000.0
-risk_pct: 3.0
 sl_pct: 0.2
 symbol: TRXUSDT
 timeframe: 5m
@@ -21,5 +19,8 @@ tp1_pct: 0.4
 tp2_pct: 0.4
 volume_ma_period: 20
 volume_multiplier: 2.2
+
 fixed_notional_usd: 1.0
+fixed_qty: 0.0
 fixed_risk_usd: 0
+risk_pct: 3.0
