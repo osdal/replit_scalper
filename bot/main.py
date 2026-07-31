@@ -313,16 +313,50 @@ async def _sync_position_on_start(
         f"(levels recalculated from config)"
     )
 
-    await _replace_tp_sl(order_mgr, tracker.position, log)
+    closed_immediately = await _replace_tp_sl(order_mgr, tracker.position, log)
+    if closed_immediately:
+        # SL was already breached — position closed with market order.
+        # Clear tracker state so no phantom position is monitored.
+        tracker.position = None
+        tracker._clear_state()
 
 
-async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
+async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> bool:
+    """Replace TP/SL orders on exchange. Returns True if position was
+    closed immediately due to SL being breached at restore time."""
     if not pos or pos.remaining_qty < 0.000001:
         log.warning(f"[SYNC] No position to replace TP/SL (remaining_qty={pos.remaining_qty if pos else 0})")
-        return
+        return False
     try:
-        await order_mgr.cancel_all_tp_sl(pos.direction)
+        # Check if market has already breached the SL level.
+        # If so, the STOP_MARKET won't trigger until price returns yet the
+        # tracker would consider it hit — leaving an orphan on the exchange.
+        # Close the position immediately with a real market order instead.
         import asyncio as _asyncio
+        try:
+            ticker = await order_mgr.client.futures_symbol_ticker(symbol=order_mgr.cfg.symbol)
+            current_price = float(ticker.get("price", 0))
+        except Exception:
+            current_price = 0.0
+        if current_price > 0:
+            breached = (pos.direction == "LONG" and current_price <= pos.sl_price) or \
+                       (pos.direction == "SHORT" and current_price >= pos.sl_price)
+            if breached:
+                log.warning(
+                    f"[SYNC] SL already breached on restore | {pos.direction} "
+                    f"current={current_price:.4f} sl={pos.sl_price:.4f} — "
+                    f"closing position with market order"
+                )
+                side = "SELL" if pos.direction == "LONG" else "BUY"
+                await order_mgr.client.futures_create_order(
+                    symbol=order_mgr.cfg.symbol,
+                    side=side,
+                    type="MARKET",
+                    quantity=pos.remaining_qty,
+                    reduceOnly=True,
+                )
+                return True
+        await order_mgr.cancel_all_tp_sl(pos.direction)
         await _asyncio.sleep(1.5)
         log.info(f"[SYNC] Placing orders | sl_price={pos.sl_price} tp1_price={pos.tp1_price} tp2_price={pos.tp2_price} remaining_qty={pos.remaining_qty}")
         await order_mgr._place_all_orders(
@@ -335,6 +369,7 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log) -> None:
         log.info(f"[SYNC] TP/SL orders replaced on exchange")
     except Exception as e:
         log.error(f"[SYNC] Failed to replace TP/SL orders: {e}", exc_info=True)
+    return False
 
 
 def _setup_signal_handlers(log):
