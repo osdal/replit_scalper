@@ -30,6 +30,7 @@ class Config:
     recovery_max_position_pct: float = 100.0
     fixed_qty: float = 0.0          # Fixed position size in coins (0 = use risk_pct of balance)
     fixed_notional_usd: float = 0.0 # Fixed position notional in USD (0 = disabled)
+    fixed_risk_usd: float = 0.0     # Fixed loss in USD at SL (0 = use risk_pct of balance)
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")

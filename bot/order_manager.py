@@ -285,6 +285,9 @@ class OrderManager:
             raw_qty = self.cfg.fixed_notional_usd / signal.entry_price
         elif self.cfg.fixed_qty > 0:
             raw_qty = self.cfg.fixed_qty
+        elif self.cfg.fixed_risk_usd > 0:
+            # Fixed loss in USD at SL: qty = risk_usd / (entry * sl_pct%)
+            raw_qty = self.cfg.fixed_risk_usd / (signal.entry_price * self.cfg.sl_pct / 100)
         elif is_recovery:
             # Recovery: qty = target_profit / (entry * tp1_pct%)
             # This ensures TP1 hit covers debt + bonus
