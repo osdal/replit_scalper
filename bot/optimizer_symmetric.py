@@ -164,19 +164,8 @@ def optimize_symbol(sym: str, base_cfg_path: str, args) -> dict:
         "dd": best.user_attrs.get("max_drawdown", "-"),
     }
     print(f" OK score={result['score']}", flush=True)
-    # Save individual trades of best result
     trades_list = best.user_attrs.get("trades_list") or []
-    if trades_list:
-        import csv
-        trades_dir = os.path.join(os.path.dirname(__file__), "logs", "trades")
-        os.makedirs(trades_dir, exist_ok=True)
-        trades_path = os.path.join(trades_dir, f"{cfg.symbol}_best_trades.csv")
-        with open(trades_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["direction","entry_price","exit_price","qty","pnl","exit_reason","entry_time","exit_time"])
-            w.writeheader()
-            w.writerows(trades_list)
-        print(f"    Trades saved -> {trades_path}")
-    return result
+    return result, trades_list
 
 
 # ── Auto-detect symbols ──────────────────────────────────────────────────
@@ -227,9 +216,13 @@ def main():
     print(f"  Symbols: {len(symbols)}\n")
 
     results = []
+    all_trades = []
     for sym in symbols:
-        res = optimize_symbol(sym, args.config, args)
+        res, trades_list = optimize_symbol(sym, args.config, args)
         results.append(res)
+        for t in trades_list:
+            t["symbol"] = sym
+            all_trades.append(t)
 
     # Summary table
     print(f"\n{'=' * 110}")
@@ -260,6 +253,17 @@ def main():
             w.writeheader()
             w.writerows(results)
     print(f"\n  Results saved -> {csv_path}")
+
+    # Save all trades of best results to a single combined file
+    if all_trades:
+        trades_path = os.path.join(os.path.dirname(__file__), "logs", f"symmetric_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        with open(trades_path, "w", newline="", encoding="utf-8") as f:
+            fieldnames = ["symbol", "direction", "entry_price", "exit_price", "qty", "pnl", "exit_reason", "entry_time", "exit_time"]
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            for t in all_trades:
+                w.writerow({k: t.get(k, "") for k in fieldnames})
+        print(f"  All trades saved ({len(all_trades)}) -> {trades_path}")
 
     # Apply to configs if --apply flag is set
     if args.apply:
