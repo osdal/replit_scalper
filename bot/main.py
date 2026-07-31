@@ -33,21 +33,69 @@ def _lock_file(symbol: str) -> str:
     return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
 
 
+def _process_is_bot(pid: int, symbol: str) -> bool:
+    """Return True only if PID is a live Python process running this bot's main.py."""
+    try:
+        os.kill(pid, 0)
+    except (OSError, SystemError):
+        # On Windows os.kill(pid, 0) may fail even for live processes (WinError 87),
+        # so we still proceed to inspect the command line and only decide there.
+        pass
+
+    config_hint = f"config_{symbol.replace('USDT', '').lower()}.yaml"
+    try:
+        import subprocess
+        import platform
+        if platform.system() == "Windows":
+            # Use wmic; fall back to Get-CimInstance (Windows 10/11) for the command line
+            try:
+                result = subprocess.run(
+                    ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/value"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                out = result.stdout
+            except Exception:
+                try:
+                    result = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         f"Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | Select-Object -ExpandProperty CommandLine"],
+                        capture_output=True, text=True, timeout=8,
+                    )
+                    out = result.stdout
+                except Exception:
+                    result = subprocess.run(
+                        ["tasklist", "/V", "/FI", f"PID eq {pid}"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    out = result.stdout
+        else:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, timeout=5,
+            )
+            out = result.stdout
+        # If no process matched (empty output), it's not a live bot.
+        if not out or (platform.system() != "Windows" and result.returncode != 0):
+            return False
+        return ("main.py" in out) and (config_hint in out)
+    except Exception:
+        # If we can't inspect the command line, treat the process as not a bot
+        # (safer: allow re-acquiring the lock rather than blocking forever.)
+        return False
+
+
 def _acquire_lock(symbol: str) -> bool:
     lock_path = _lock_file(symbol)
     if os.path.exists(lock_path):
         try:
             with open(lock_path, "r") as f:
                 pid = int(f.read().strip())
-            if pid > 0:
-                try:
-                    os.kill(pid, 0)
-                    return False
-                except OSError:
-                    pass
+            if pid > 0 and _process_is_bot(pid, symbol):
+                # A live bot is already running — don't allow a second instance
+                return False
         except Exception:
             pass
-        # Lock-файл битый или процесс мертв - удаляем
+        # Lock-файл битый или процесс не является работающим ботом - удаляем
         try:
             os.remove(lock_path)
         except:
