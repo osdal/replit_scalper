@@ -3,7 +3,6 @@ backtest_end: '2026-06-08'
 backtest_start: '2026-05-01'
 ema_fast: 16
 ema_slow: 44
-fixed_qty: 0.0
 htf_ema_fast: 9
 htf_ema_slow: 12
 htf_enabled: true
@@ -12,7 +11,6 @@ leverage: 75
 log_file: logs/avax.log
 mode: live
 paper_balance: 1000.0
-risk_pct: 3.0
 sl_pct: 0.2
 symbol: AVAXUSDT
 timeframe: 5m
@@ -21,5 +19,8 @@ tp1_pct: 0.4
 tp2_pct: 0.4
 volume_ma_period: 20
 volume_multiplier: 2.3
+
 fixed_notional_usd: 1.0
+fixed_qty: 0.0
 fixed_risk_usd: 0
+risk_pct: 3.0
