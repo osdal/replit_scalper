@@ -1,4 +1,4 @@
-auto_mode: true
+﻿auto_mode: true
 backtest_end: '2026-06-15'
 backtest_start: '2026-06-01'
 ema_fast: 18
@@ -21,3 +21,4 @@ tp1_pct: 0.4
 tp2_pct: 0.4
 volume_ma_period: 20
 volume_multiplier: 1.3
+fixed_notional_usd: 0

@@ -281,7 +281,9 @@ class OrderManager:
         balance = await self.get_balance()
         is_recovery = recovery_target is not None
 
-        if self.cfg.fixed_qty > 0:
+        if self.cfg.fixed_notional_usd > 0:
+            raw_qty = self.cfg.fixed_notional_usd / signal.entry_price
+        elif self.cfg.fixed_qty > 0:
             raw_qty = self.cfg.fixed_qty
         elif is_recovery:
             # Recovery: qty = target_profit / (entry * tp1_pct%)

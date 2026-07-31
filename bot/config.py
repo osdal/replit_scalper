@@ -28,7 +28,8 @@ class Config:
     htf_ema_fast: int = 9
     htf_ema_slow: int = 21
     recovery_max_position_pct: float = 100.0
-    fixed_qty: float = 0.0  # Fixed position size (0 = use risk_pct of balance)
+    fixed_qty: float = 0.0          # Fixed position size in coins (0 = use risk_pct of balance)
+    fixed_notional_usd: float = 0.0 # Fixed position notional in USD (0 = disabled)
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")
@@ -42,7 +43,7 @@ class Config:
             raise ValueError("tp1_pct and tp2_pct must be positive")
         if self.tp1_pct > self.tp2_pct:
             raise ValueError("tp1_pct must be less than tp2_pct")
-        if not (0 < self.tp1_close_pct < 100):
+        if not (0 < self.tp1_close_pct <= 100):
             raise ValueError("tp1_close_pct must be between 0 and 100")
         if self.ema_fast >= self.ema_slow:
             raise ValueError("ema_fast must be less than ema_slow")
