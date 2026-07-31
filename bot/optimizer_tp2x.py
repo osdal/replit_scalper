@@ -85,6 +85,13 @@ def build_objective(base_cfg: Config, df_raw: pd.DataFrame, df_htf: pd.DataFrame
         trial.set_user_attr("win_rate", round(stats.win_rate, 1))
         trial.set_user_attr("total_pnl", round(stats.total_pnl, 2))
         trial.set_user_attr("max_drawdown", round(stats.max_drawdown, 2))
+        trial.set_user_attr("trades_list", [
+            {"direction": t.direction, "entry_price": t.entry_price,
+             "exit_price": t.exit_price, "qty": t.qty, "pnl": t.pnl,
+             "exit_reason": t.exit_reason,
+             "entry_time": str(t.entry_time), "exit_time": str(t.exit_time)}
+            for t in stats.trades
+        ])
         return score(stats)
 
     return objective
@@ -144,6 +151,18 @@ def optimize_symbol(sym: str, base_cfg_path: str, args) -> dict:
         "dd": best.user_attrs.get("max_drawdown", "-"),
     }
     print(f" OK score={result['score']}", flush=True)
+    # Save individual trades of best result
+    trades_list = best.user_attrs.get("trades_list") or []
+    if trades_list:
+        import csv
+        trades_dir = os.path.join(os.path.dirname(__file__), "logs", "trades")
+        os.makedirs(trades_dir, exist_ok=True)
+        trades_path = os.path.join(trades_dir, f"{cfg.symbol}_best_trades.csv")
+        with open(trades_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["direction","entry_price","exit_price","qty","pnl","exit_reason","entry_time","exit_time"])
+            w.writeheader()
+            w.writerows(trades_list)
+        print(f"    Trades saved -> {trades_path}")
     return result
 
 
