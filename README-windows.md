@@ -17,6 +17,7 @@ replit_scalper/
 │   ├── position_tracker.py# Отслеживание позиции, PnL, персистентность
 │   ├── signal_handler.py  # Подтверждение сигналов (auto/semi-auto)
 │   ├── recovery_client.py # Внешний API для recovery-режима
+│   ├── notifier.py        # Отправка сигналов/событий в Telegram
 │   ├── market_data.py     # Получение свечей (REST polling)
 │   ├── logger.py          # Настройка логирования (файл + консоль)
 │   ├── backtester.py      # Бэктестинг на исторических данных
@@ -40,6 +41,7 @@ main.py
   ├─ order_manager.py ──► open_position() / cancel_all_tp_sl() / move_sl_to_breakeven()
   ├─ position_tracker.py ──► open_async() / check() / apply_hit_async()
   ├─ recovery_client.py ──► claim() / report() / release()
+  ├─ notifier.py ──► send_signal() / send_event() / send_message() → Telegram
   └─ logger.py / db_reporter.py ──► логи и БД
 ```
 
@@ -233,6 +235,10 @@ DASHBOARD_API_URL=http://localhost:5000/api
 
 # Путь к конфигу recovery (опционально, по умолчанию bot/recovery_config.yaml)
 # RECOVERY_CONFIG_PATH=./bot/recovery_config.yaml
+
+# Telegram-уведомления (опционально; если не заданы — уведомления игнорируются)
+# TELEGRAM_BOT_TOKEN=<токен бота от @BotFather>
+# TELEGRAM_CHAT_ID=<id канала/чата, обычно отрицательное число>
 ```
 
 ### `recovery_config.yaml` (в `bot/`)
@@ -269,6 +275,7 @@ poetry install
 | `pyyaml` | ≥6.0 | Парсинг YAML конфигов |
 | `python-dotenv` | ≥1.0 | Загрузка .env |
 | `optuna` | ≥3.0 | Байесовская оптимизация параметров |
+| `python-telegram-bot` | ≥21.0 | Отправка уведомлений в Telegram (async `telegram.Bot`) |
 | `uvicorn` / `fastapi` | — | Для API-сервера (dashboard) |
 
 ### Настройка конфига
@@ -332,6 +339,8 @@ python bot/optimizer.py --symbol ETHUSDT --start 2026-07-01 --end 2026-07-24 --t
 | `logs/bot.log` | Основной лог (только торговые события + ошибки) |
 | `logs/events.log` | Ключевые события в формате `timestamp [SYMBOL] message` (для дашборда) |
 | `logs/backtest.log` | Лог бэктеста |
+
+> ℹ️ **Telegram-уведомления не заменяют логирование.** Telegram (`bot/notifier.py`) — это лишь дублирование торговых сигналов и ключевых событий в мессенджер для быстрого уведомления. Полная диагностика и история всегда доступны в логах (`logs/*.log`) и на дашборде.
 
 ---
 
@@ -430,6 +439,68 @@ recovery_max_position_pct: 10.0  # Максимальный % от баланс�
 - **Файл:** `bot/position_tracker.py`, `bot/main.py`
 - **Изменение:** При рестарте проверяем locked цепочки → если свободны, позволяем зайти в recovery с `is_recovery=True`
 - **Результат:** Цепочки теперь автоматически освобождаются при рестарте бота
+
+---
+
+## 12. Уведомления в Telegram + восстановление recovery (август 2026)
+
+### Уведомления в Telegram (`bot/notifier.py`)
+
+Новый модуль `Notifier` дублирует торговые сигналы и события в Telegram-канал. Реализован на асинхронной библиотеке `python-telegram-bot` (не блокирует основной asyncio-цикл).
+
+**Настройка (`.env`):**
+```
+TELEGRAM_BOT_TOKEN=<токен бота от @BotFather>
+TELEGRAM_CHAT_ID=<id канала/чата>
+```
+Если переменные не заданы — `Notifier` логирует `WARNING` и все отправки игнорируются (не влияет на торговлю).
+
+**Функциональность:**
+- `send_signal(signal_data)` — красивое сообщение о новом сигнале (Entry/SL/TP1/TP2/EMA/Volume/Leverage)
+- `send_event(event_type, details)` — события:
+  - `position_opened` → `✅ Position opened | {symbol} {direction} qty={qty} entry={price}`
+  - `tp1_hit` / `tp2_hit` → `🎯 TP1/TP2 hit | {symbol} qty={qty} pnl={pnl}`
+  - `sl_hit` → `❌ SL hit | {symbol} qty={qty} pnl={pnl}`
+  - `recovery` → `🔄 Recovery | {symbol} chainId={chainId} debt={debt}`
+- `send_message(text)` — произвольное сообщение
+- Автоматический повтор при ошибках (до 3 попыток с паузой 1с) через `_send_with_retry`
+- Интеграция в `bot/main.py`: вызовы `notifier.send_signal(...)` после `get_signal`, `notifier.send_event(...)` в местах открытия позиции и TP1/TP2/SL
+
+> Файлы: `bot/notifier.py` (новый), `bot/main.py` (интеграция), `bot/position_tracker.py` (параметр `notifier`).
+
+### Защита от открытия второй позиции по той же монете
+**Проблема:** Бот мог открыть новую позицию, пока предыдущая по тому же символу ещё отслеживалась открытой (например, после частичного TP1). На бирже (one-way mode) вторая открывающая сделка сливалась в одну позицию, а в дашборде появлялись две записи (кейс «двойной SUI»).
+
+**Решение (`bot/main.py`):**
+- Guard в `on_candle`: если после обработки TP/SL `tracker.has_open_position()` всё ещё True — новую позицию не открываем (`log.debug(...); return`).
+- Проверка реальной позиции на бирже **после `recovery.claim()`** перед открытием компенсатора: если по символу уже есть позиция — цепочка освобождается (`release`) и открытие пропускается.
+
+### Устранение дублирования recovery-цепочек
+**Проблема:** Один убыток создавал **две** свободные цепочки — бот через `recovery.report(pnl)` (без chainId) и дашборд через `POST /trades/sync-closed` (`trades.ts`).
+
+**Решение (`artifacts/api-server/src/routes/trades.ts`):** из `/sync-closed` удалено создание recovery-цепочек. Цепочки создаёт только сам бот через `report()` при закрытии убыточной сделки. Две цепочки = два компенсатора = риск двух позиций по одной монете.
+
+### Восстановление «зависших» locked recovery-цепочек
+
+**Проблема:** Цепочка переходит в `locked` при `POST /claim`. Если бот упал между `claim` и открытием позиции (или во время открытия), цепочка оставалась `locked` навсегда: `claim` берёт только `free`-цепочки → застрявший долг выпадал из ротации.
+
+**Решение — 3 уровня защиты:**
+
+1. **Сервер (`artifacts/api-server/src/routes/recovery.ts` + `index.ts`)**
+   - `recoverStaleChains()` освобождает `locked`-цепочку в `free`, если: процесс бота-владельца мёртв, **или** с момента блокировки прошло больше `RECOVERY_LOCK_TTL_MINUTES` (по умолчанию 360 = 6ч), **или** `locked_by` пуст.
+   - Запуск при старте сервера и периодически каждые 30 минут.
+   - Ручной запуск: `POST /api/recovery/recover-stale`.
+
+2. **Бот (`bot/recovery_client.py` + `main.py`)**
+   - Новый метод `RecoveryClient.release_all_for_symbol()` освобождает все `locked`-цепочки символа.
+   - Вызывается в `_sync_position_on_start` в ветках, где биржа показывает «позиции нет» — закрывает случай, когда бот упал между `claim` и открытием.
+
+3. **Ручная очистка через API** — `DELETE /api/recovery/chains` (все) или `DELETE /api/recovery/chains/:id` (одна).
+
+### Прочая очистка
+- Из `bot/trades.ts` убран неиспользуемый импорт `recoveryChainsTable` после удаления дублирующего создания цепочек.
+- `.env.example` дополнен переменными `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+- `bot/requirements.txt` и `pyproject.toml` дополнены зависимостью `python-telegram-bot>=21.0`.
 
 ---
 

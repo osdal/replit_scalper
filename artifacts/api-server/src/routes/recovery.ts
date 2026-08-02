@@ -5,11 +5,15 @@
  */
 import { Router } from "express";
 import { db, recoveryChainsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, lt } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -243,5 +247,92 @@ router.delete("/chains", async (_req, res) => {
     res.status(500).json({ error: String(e) });
   }
 });
+
+// ── Восстановление "зависших" locked-цепочек ──────────────────────────────
+//
+// Цепочка переходит в status="locked" при POST /claim. Если бот упал между
+// claim и открытием позиции (или во время открытия), цепочка остаётся locked
+// навсегда: claim берёт только free цепочки, поэтому такой долг выпадает из
+// ротации. Это возникает, например, когда процесс бота падает/убивается.
+//
+// Освобождаем locked-цепочку если:
+//   1) бот, который её захватил (locked_by), больше не запущен (процесс умер), ИЛИ
+//   2) цепочка заблокирована дольше, чем RECOVERY_LOCK_TTL (защита от случая,
+//      когда процесс жив, но потерял контроль над цепочкой, либо symbol пуст).
+const RECOVERY_LOCK_TTL_MS = (() => {
+  const v = Number(process.env.RECOVERY_LOCK_TTL_MINUTES);
+  return (Number.isFinite(v) && v > 0 ? v : 360) * 60 * 1000; // по умолчанию 6 часов
+})();
+
+async function isBotProcessAlive(symbol: string): Promise<boolean> {
+  const configFile = `config_${String(symbol).replace("USDT", "").toLowerCase()}.yaml`;
+  try {
+    let stdout = "";
+    if (process.platform === "win32") {
+      ({ stdout } = await execAsync(
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"`
+      ));
+    } else {
+      ({ stdout } = await execAsync(
+        `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
+      ));
+    }
+    return stdout.includes(configFile);
+  } catch {
+    return false;
+  }
+}
+
+async function recoverStaleChains(): Promise<number> {
+  const locked = await db.select()
+    .from(recoveryChainsTable)
+    .where(eq(recoveryChainsTable.status, "locked"));
+
+  const now = Date.now();
+  let released = 0;
+
+  for (const chain of locked) {
+    let stale = false;
+
+    // Процесс-владелец мёртв — безусловно освобождаем.
+    if (chain.locked_by) {
+      stale = !(await isBotProcessAlive(chain.locked_by));
+    }
+
+    // Срок блокировки истёк — защитный TTL.
+    if (!stale && chain.updated_at) {
+      const updatedMs = new Date(chain.updated_at).getTime();
+      if (Number.isFinite(updatedMs) && (now - updatedMs) > RECOVERY_LOCK_TTL_MS) {
+        stale = true;
+      }
+    }
+
+    // locked_by пуст (маловероятно, но возможно при старых данных) — холоста.
+    if (!chain.locked_by) {
+      stale = true;
+    }
+
+    if (stale) {
+      await db.update(recoveryChainsTable)
+        .set({ status: "free", locked_by: null, locked_trade_id: null, updated_at: new Date().toISOString() })
+        .where(eq(recoveryChainsTable.id, chain.id));
+      released++;
+    }
+  }
+
+  return released;
+}
+
+// POST /recovery/recover-stale — вручную запустить освобождение зависших цепочек
+router.post("/recover-stale", async (_req, res) => {
+  try {
+    const released = await recoverStaleChains();
+    res.json({ success: true, released });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+export { recoverStaleChains };
 
 export default router;

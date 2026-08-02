@@ -8,6 +8,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { reloadConfigsFromYaml } from "./routes/bots";
+import { recoverStaleChains } from "./routes/recovery";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -100,3 +101,21 @@ resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
     logger.info({ port }, "Server listening");
   });
 });
+
+// Восстанавливаем "зависшие" locked recovery-цепочки: на старте и периодически.
+// Если бот-владелец цепочки мёртв (упал между claim и открытием позиции) —
+// цепочка возвращается в free, иначе она навсегда остаётся locked и долг
+// выпадает из ротации.
+recoverStaleChains()
+  .then((n) => { if (n > 0) logger.info({ released: n }, "Released stale locked recovery chains at startup"); })
+  .catch((e) => logger.warn({ err: e }, "Could not recover stale recovery chains at startup"));
+
+const CHAIN_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // каждые 30 минут
+setInterval(async () => {
+  try {
+    const released = await recoverStaleChains();
+    if (released > 0) logger.info({ released }, "Released stale locked recovery chains (periodic)");
+  } catch (e) {
+    logger.warn({ err: e }, "Periodic stale recovery chain cleanup failed");
+  }
+}, CHAIN_CLEANUP_INTERVAL_MS);

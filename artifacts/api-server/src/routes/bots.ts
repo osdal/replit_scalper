@@ -74,10 +74,14 @@ async function findBotPid(symbol: string): Promise<number | null> {
       const { stdout } = await execAsync(
         `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
       );
-      const processes = JSON.parse(stdout);
-      for (const proc of processes) {
-        if (proc.CommandLine && proc.CommandLine.includes(configFile) && proc.CommandLine.includes("main.py")) {
-          const pid = parseInt(proc.ProcessId);
+      // ConvertTo-Json returns an array when >1 process, an object when exactly 1,
+      // or empty/null when none. Normalize to an array before iterating.
+      let raw: unknown = JSON.parse(stdout.trim() || "null");
+      const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      for (const proc of processes as Array<Record<string, unknown>>) {
+        const cmd = proc.CommandLine as string | undefined;
+        if (cmd && cmd.includes(configFile) && cmd.includes("main.py")) {
+          const pid = parseInt(String(proc.ProcessId));
           if (!isNaN(pid) && pid > 0) return pid;
         }
       }
