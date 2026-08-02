@@ -139,6 +139,7 @@ async def _sync_position_on_start(
     if exchange_qty < 0.000001:
         if tracker.load_state():
             log.warning(f"[SYNC] Exchange shows no position but state has open position — clearing state")
+            sync_pos = tracker.position
             # Close stale DB trades with real PnL from Binance
             try:
                 import requests as sync_requests
@@ -170,6 +171,11 @@ async def _sync_position_on_start(
                         if pnl_val < 0 and recovery:
                             await recovery.report(pnl=pnl_val)
                             log.info(f"[SYNC] Reported recovery from stale trade #{trade_id} | pnl={pnl_val:.4f}")
+                            # Освобождаем захваченную recovery-цепочку, если позиция её держала,
+                            # чтобы она не осталась навсегда в статусе locked.
+                            if sync_pos and getattr(sync_pos, "recovery_chain_id", None):
+                                await recovery.release(chain_id=sync_pos.recovery_chain_id)
+                                log.info(f"[SYNC] Released locked recovery chain #{sync_pos.recovery_chain_id} for {cfg.symbol}")
             except Exception as e:
                 log.debug(f"[SYNC] Cleanup error: {e}")
             tracker.position = None
@@ -246,6 +252,10 @@ async def _sync_position_on_start(
                                 log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
                                 if pnl_val < 0 and recovery:
                                     await recovery.report(pnl=pnl_val)
+                                    # Освобождаем захваченную recovery-цепочку, если эта позиция её держала.
+                                    if pos and getattr(pos, "recovery_chain_id", None):
+                                        await recovery.release(chain_id=pos.recovery_chain_id)
+                                        log.info(f"[SYNC] Released locked recovery chain #{pos.recovery_chain_id} after external close for {cfg.symbol}")
                     except Exception:
                         pass
                     tracker.position = None
