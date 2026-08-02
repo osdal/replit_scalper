@@ -39,58 +39,83 @@ class DbReporter:
 
     async def report_trade(self, trade: dict) -> Optional[int]:
         """Записывает новую сделку. Возвращает ID созданной записи."""
-        session = await self._get_session()
-        if session is None:
-            return None
-        try:
-            async with session.post(
-                f"{API_URL}/trades",
-                json=trade,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status in (200, 201):
-                    data = await resp.json()
-                    return data.get("id")
-                else:
-                    self.log.debug(f"[REPORTER] trade POST failed: {resp.status}")
-        except Exception as e:
-            self.log.debug(f"[REPORTER] trade error: {e}")
+        for attempt in range(3):
+            session = await self._get_session()
+            if session is None:
+                return None
+            try:
+                async with session.post(
+                    f"{API_URL}/trades",
+                    json=trade,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        data = await resp.json()
+                        return data.get("id")
+                    else:
+                        self.log.debug(f"[REPORTER] trade POST failed: {resp.status}")
+                        return None
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                self.log.debug(f"[REPORTER] trade attempt {attempt+1} error: {e}")
+                await self._close_session()
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
         return None
 
     async def patch_trade(self, trade_id: int, data: dict) -> bool:
         """Обновляет существующую сделку (закрытие). Возвращает True если успешно."""
-        session = await self._get_session()
-        if session is None:
-            return False
-        try:
-            async with session.patch(
-                f"{API_URL}/trades/{trade_id}",
-                json=data,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status >= 400:
-                    self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
-                    return False
-                return True
-        except Exception as e:
-            self.log.debug(f"[REPORTER] patch_trade error: {e}")
-            return False
+        for attempt in range(3):
+            session = await self._get_session()
+            if session is None:
+                return False
+            try:
+                async with session.patch(
+                    f"{API_URL}/trades/{trade_id}",
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status >= 400:
+                        self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
+                        return False
+                    return True
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                self.log.debug(f"[REPORTER] patch_trade attempt {attempt+1} error: {e}")
+                await self._close_session()
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+        return False
 
     async def _patch(self, data: dict) -> None:
-        session = await self._get_session()
-        if session is None:
-            return
-        try:
-            async with session.patch(
-                f"{API_URL}/bots/{self.symbol}",
-                json=data,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status >= 400:
-                    self.log.debug(f"[REPORTER] PATCH failed: {resp.status}")
-        except Exception as e:
-            self.log.debug(f"[REPORTER] error: {e}")
+        # Retry across API restarts: on a connection error, rebuild the
+        # session (the old one holds a dead connection after the server
+        # restarts) and try again a few times.
+        for attempt in range(3):
+            session = await self._get_session()
+            if session is None:
+                return
+            try:
+                async with session.patch(
+                    f"{API_URL}/bots/{self.symbol}",
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status >= 400:
+                        self.log.debug(f"[REPORTER] PATCH failed: {resp.status}")
+                    return
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                self.log.debug(f"[REPORTER] PATCH attempt {attempt+1} error: {e}")
+                # Session likely stale after an API restart — drop and rebuild it.
+                await self._close_session()
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+
+    async def _close_session(self) -> None:
+        if self._session and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._session = None
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        await self._close_session()

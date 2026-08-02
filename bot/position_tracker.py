@@ -463,6 +463,7 @@ class PositionTracker:
         # Сохраняем trade_id и tp1_hit ДО apply_hit (который может вызвать _clear_state)
         trade_id_before = self._trade_id
         remaining_before = p.remaining_qty if p else 0
+        total_qty_before = p.total_qty if p else 0.0
         tp1_hit_before = p.tp1_hit if p else False
         # entry_timestamp может быть строкой из JSON или datetime объектом
         entry_time_ms = 0
@@ -492,7 +493,10 @@ class PositionTracker:
             real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
             if trade_id_before:
-                await self._report_close_with_id(trade_id_before, close_price, remaining_before, pnl_to_use, exit_reason)
+                # qty для БД: если remaining уже 0 (позиция полностью закрыта
+                # TP1 на 100%), сохраняем исходный объём позиции, а не 0.
+                qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
+                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
             # Update local PnL with real value for return
             if real_pnl is not None:

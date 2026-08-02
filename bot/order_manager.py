@@ -296,7 +296,9 @@ class OrderManager:
                 )
                 return None
         elif self.cfg.fixed_notional_usd > 0:
-            raw_qty = self.cfg.fixed_notional_usd / signal.entry_price
+            # fixed_notional_usd = МАРЖА (обеспечение).
+            # Позиция = margin * leverage, чтобы удовлетворять minNotional.
+            raw_qty = (self.cfg.fixed_notional_usd * self.cfg.leverage) / signal.entry_price
         elif self.cfg.fixed_qty > 0:
             raw_qty = self.cfg.fixed_qty
         elif self.cfg.fixed_risk_usd > 0:
@@ -514,18 +516,31 @@ class OrderManager:
 
         Returns None if neither source provides data.
         """
+        # Net PnL = realized PnL minus open/close commissions minus funding.
+        # This matches Binance position history (net realized PnL), unlike the
+        # gross REALIZED_PNL income line which ignores fees.
         try:
-            income = await self.client.futures_income_history(
-                symbol=symbol,
-                incomeType="REALIZED_PNL",
-                startTime=entry_time_ms,
-                endTime=exit_time_ms + 60000,
-                limit=50,
-            )
-            if income:
-                total_pnl = sum(float(i.get("income", "0") or 0) for i in income)
-                if abs(total_pnl) > 0.0001:
-                    return total_pnl
+            g = {}
+            for itype in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                income = await self.client.futures_income_history(
+                    symbol=symbol,
+                    incomeType=itype,
+                    startTime=entry_time_ms,
+                    endTime=exit_time_ms + 60000,
+                    limit=50,
+                )
+                if income:
+                    g[itype] = sum(float(i.get("income", "0") or 0) for i in income)
+                else:
+                    g[itype] = 0.0
+            # If we have at least the realized PnL, compute net.
+            if "REALIZED_PNL" in g and abs(g["REALIZED_PNL"]) > 0.0001:
+                # Binance income values: REALIZED_PNL is gross; COMMISSION and
+                # FUNDING_FEE are typically NEGATIVE (amounts deducted).
+                # So subtract them from gross by ADDING them:
+                #   net = gross + commission + funding  (both <= 0)
+                total_pnl = g["REALIZED_PNL"] + g["COMMISSION"] + g["FUNDING_FEE"]
+                return total_pnl if abs(total_pnl) > 0.0001 else 0.0
         except Exception as e:
             self.log.warning(f"[LIVE] Income API error: {e}")
 
