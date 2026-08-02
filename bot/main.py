@@ -19,6 +19,7 @@ from position_tracker import PositionTracker, Position
 from backtester import run_backtest
 from db_reporter import DbReporter
 from recovery_client import RecoveryClient
+from notifier import Notifier
 
 load_dotenv()
 
@@ -119,7 +120,7 @@ def _release_lock(symbol: str) -> None:
 
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
-    order_mgr: OrderManager, log, recovery=None,
+    order_mgr: OrderManager, log, recovery=None, notifier=None,
 ) -> None:
     if cfg.mode != "live":
         return
@@ -180,8 +181,17 @@ async def _sync_position_on_start(
                 log.debug(f"[SYNC] Cleanup error: {e}")
             tracker.position = None
             tracker._clear_state()
+            # Биржа показывает, что позиции нет — любые locked-цепочки этого
+            # символа зависли (бот упал между claim и открытием, или позиция
+            # была закрыта вне бота без отчёта). Освобождаем все такие цепочки.
+            if recovery:
+                await recovery.release_all_for_symbol()
         else:
             # No tracker state either — check for stale DB trades, fetch real PnL
+            # А также освобождаем "зависшие" locked-цепочки: бот мог упасть
+            # между claim и открытием позиции, оставив цепочку locked навсегда.
+            if recovery:
+                await recovery.release_all_for_symbol()
             try:
                 import requests as sync_requests
                 import datetime
@@ -486,7 +496,7 @@ async def main():
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events)
+        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events, Notifier())
 
     finally:
         _release_lock(cfg.symbol)
@@ -502,12 +512,13 @@ async def _run_live_or_paper(
     reporter: DbReporter, recovery: RecoveryClient,
     shutdown_event: asyncio.Event,
     events: logging.Logger,
+    notifier: Notifier,
 ):
     order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
-    tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None)
+    tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None, notifier=notifier)
     handler   = SignalHandler(cfg, log)
 
-    await _sync_position_on_start(cfg, client, tracker, order_mgr, log, recovery)
+    await _sync_position_on_start(cfg, client, tracker, order_mgr, log, recovery, notifier)
 
     await reporter.report_heartbeat(0)
 
@@ -634,6 +645,11 @@ async def _run_live_or_paper(
                                     f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
                                 )
                                 pnl = await tracker.apply_hit_async(hit_type, current_price, candle_time_ms)
+                                closed_qty = pos.remaining_qty
+                                if hit_type == "TP2":
+                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "qty": closed_qty, "pnl": pnl})
+                                elif hit_type == "SL":
+                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "qty": closed_qty, "pnl": pnl})
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
@@ -666,6 +682,13 @@ async def _run_live_or_paper(
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         new_sl = tracker.position.sl_price if tracker.position else 'N/A'
                         events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
+                        # Notify TP1 hit
+                        notifier.send_event("tp1_hit", {
+                            "symbol": cfg.symbol,
+                            "qty": pos.remaining_qty,
+                            "pnl": pnl,
+                            "remaining_qty": tracker.position.remaining_qty if tracker.position else 0,
+                        })
                         await order_mgr.move_sl_to_breakeven(
                             pos.direction, pos.entry_price,
                             remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
@@ -686,6 +709,12 @@ async def _run_live_or_paper(
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"TP2_APPLY | pnl={pnl}")
+                        # Notify TP2 hit
+                        notifier.send_event("tp2_hit", {
+                            "symbol": cfg.symbol,
+                            "qty": pos.remaining_qty,
+                            "pnl": pnl,
+                        })
                         # Отменяем оставшиеся ордера (SL если остался)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
                         # Проверяем, не осталась ли пылевая позиция
@@ -701,6 +730,12 @@ async def _run_live_or_paper(
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
                         events.info(f"SL_APPLY | pnl={pnl}")
+                        # Notify SL hit
+                        notifier.send_event("sl_hit", {
+                            "symbol": cfg.symbol,
+                            "qty": pos.remaining_qty,
+                            "pnl": pnl,
+                        })
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
                         # Проверяем, не осталась ли пылевая позиция
@@ -715,6 +750,15 @@ async def _run_live_or_paper(
                             await recovery.report(pnl=pnl)
                         return
 
+            # Защита от открытия второй позиции по той же монете.
+            # Если после обработки сигналов TP/SL позиция всё ещё отслеживается
+            # как открытая (например, после частичного TP1, когда remaining_qty > 0),
+            # НЕ открываем новую сделку — иначе на бирже (one-way mode) две сделки
+            # сольются в одну, а в дашборде появится дубль.
+            if tracker.has_open_position():
+                log.debug(f"[GUARD] Position still open for {cfg.symbol} — skip new signal")
+                return
+
             raw_signal = get_signal(df_buffer, cfg)
             if raw_signal is None:
                 return
@@ -726,6 +770,20 @@ async def _run_live_or_paper(
                     return
 
             signal = raw_signal
+            signal_data = {
+                "direction": signal.direction,
+                "symbol": cfg.symbol,
+                "entry_price": signal.entry_price,
+                "sl_price": signal.sl_price,
+                "tp1_price": signal.tp1_price,
+                "tp2_price": signal.tp2_price,
+                "ema_fast": signal.ema_fast,
+                "ema_slow": signal.ema_slow,
+                "volume": signal.volume,
+                "volume_ma": signal.volume_ma,
+                "leverage": cfg.leverage,
+            }
+            notifier.send_signal(signal_data)
             confirmed = await handler.confirm(signal)
             if not confirmed:
                 return
@@ -754,6 +812,25 @@ async def _run_live_or_paper(
                     f"[RECOVERY] Claimed chain #{chain_id} | debt={debt:.4f} "
                     f"bonus={bonus}% target_profit={recovery_target:.4f} USDT"
                 )
+                # Перед открытием компенсатора проверяем, что на бирже нет
+                # уже открытой позиции по этому символу. Если позиция уже есть
+                # (допустим, бот только что не успел её закрыть, или была
+                # внешняя сделка) — recovery-ордер наложится на неё и на бирже
+                # (one-way mode) они сольются в одну позицию. В таком случае
+                # компенсировать нельзя — отпускаем цепочку.
+                if cfg.mode == "live" and order_mgr:
+                    try:
+                        existing_qty = await order_mgr._get_real_position_qty(signal.direction)
+                        if existing_qty >= 0.000001:
+                            log.warning(
+                                f"[RECOVERY] Skip chain #{chain_id} — position already open "
+                                f"on {cfg.symbol} {signal.direction} qty={existing_qty:.6f}. "
+                                f"Releasing chain."
+                            )
+                            await recovery.release(chain_id=chain_id)
+                            return
+                    except Exception as e:
+                        log.warning(f"[RECOVERY] Position check failed ({e}) — proceeding cautiously")
 
             result = await order_mgr.open_position(signal, recovery_target=recovery_target)
             if result is not None:
@@ -769,6 +846,14 @@ async def _run_live_or_paper(
                     recovery_chain_id=chain_id,
                 )
                 events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
+                notifier.send_event("position_opened", {
+                    "symbol": cfg.symbol,
+                    "direction": signal.direction,
+                    "qty": qty,
+                    "price": entry_price,
+                    "is_recovery": is_recovery,
+                    "chainId": chain_id,
+                })
             elif chain_id is not None:
                 log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
                 await recovery.release(chain_id=chain_id)

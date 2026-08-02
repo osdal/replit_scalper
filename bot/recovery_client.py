@@ -116,6 +116,35 @@ class RecoveryClient:
         except Exception as e:
             self.log.error(f"[RECOVERY] release error: {e}")
 
+    async def release_all_for_symbol(self) -> None:
+        """
+        Освобождает ВСЕ locked-цепочки, захваченные этим символом.
+        Вызывается при старте бота, когда на бирже нет открытой позиции:
+        это значит, что в прошлой сессии бот упал между claim и открытием
+        позиции (или потерял контроль), и цепочки зависли в locked.
+        """
+        session = await self._get_session()
+        if session is None:
+            return
+        try:
+            async with session.get(
+                f"{API_URL}/recovery/chains",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    self.log.warning(f"[RECOVERY] list chains failed: {resp.status}")
+                    return
+                chains = await resp.json()
+            for ch in chains:
+                if ch.get("locked_by") == self.symbol and ch.get("status") == "locked":
+                    await self.release(chain_id=ch["id"])
+                    self.log.warning(
+                        f"[RECOVERY] Released stale locked chain #{ch['id']} for {self.symbol} "
+                        f"(no position on exchange at startup)"
+                    )
+        except Exception as e:
+            self.log.error(f"[RECOVERY] release_all_for_symbol error: {e}")
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()

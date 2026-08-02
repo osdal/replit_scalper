@@ -101,15 +101,10 @@ if (-not $dbOK) {
 Write-Host "      OK - http://localhost:5173"
 Write-Host ""
 
-# 4. Start Bots (auto-detect all config files)
-Write-Host "[4/6] Starting bots..."
+# 4. Bots are started manually (via the dashboard Start button / API)
+#    This script intentionally does NOT auto-start bots.
 $botConfigs = Get-ChildItem -Path "$scriptDir\bot" -Filter "config_*.yaml"
-foreach ($config in $botConfigs) {
-    $botName = $config.BaseName -replace '^config_', ''
-    Write-Host "      Starting $botName Bot..."
-    Start-Process -FilePath "python" -ArgumentList "bot\main.py $($config.Name)" -WindowStyle Hidden -WorkingDirectory $scriptDir
-}
-Write-Host "      OK - $($botConfigs.Count) bots started"
+Write-Host "[4/6] Bots: manual start ($($botConfigs.Count) configs found) - use dashboard 'Start' button"
 Write-Host ""
 
 # 5. Final status
@@ -118,7 +113,7 @@ Write-Host "============================================"
 Write-Host "  All services started!"
 Write-Host "  API:       http://localhost:5000"
 Write-Host "  Dashboard: http://localhost:5173"
-Write-Host "  Bots:      $($botConfigs.Length) running"
+Write-Host "  Bots:      start manually via dashboard ($($botConfigs.Count) configs)"
 Write-Host "============================================"
 Write-Host ""
 

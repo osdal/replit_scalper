@@ -8,4 +8,5 @@ dependencies = [
     "python-binance>=1.0.36",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
+    "python-telegram-bot>=21.0",
 ]

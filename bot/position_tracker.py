@@ -4,6 +4,8 @@ import datetime
 import asyncio
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
+
+from notifier import Notifier
 import logging
 
 from strategy import Signal
@@ -48,11 +50,12 @@ class Position:
 
 
 class PositionTracker:
-    def __init__(self, cfg: Config, logger: logging.Logger, reporter: Optional["DbReporter"] = None, order_mgr: Optional["OrderManager"] = None):
+    def __init__(self, cfg: Config, logger: logging.Logger, reporter: Optional["DbReporter"] = None, order_mgr: Optional["OrderManager"] = None, notifier: Optional["Notifier"] = None):
         self.cfg = cfg
         self.log = logger
         self.reporter = reporter
         self.order_mgr = order_mgr
+        self.notifier = notifier
         self.position: Optional[Position] = None
         self._state_file = _state_file(cfg.symbol)
         self._trade_id: Optional[int] = None  # ID сделки в БД
@@ -359,11 +362,11 @@ class PositionTracker:
                 return "TP2"
         return None
 
-    def apply_hit(self, hit: str, close_price: float) -> float:
+    def apply_hit(self, hit: str, close_price: float) -> tuple[float, str]:
         try:
             p = self.position
             if p is None:
-                return 0.0
+                return 0.0, None
             indicators_str = (
                 f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
                 f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, tradesTable, recoveryChainsTable } from "@workspace/db";
+import { db, tradesTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 
 const router = Router();
@@ -227,15 +227,12 @@ router.post("/sync-closed", async (_req, res) => {
           .where(eq(tradesTable.id, trade.id));
         closed++;
 
-        // Если убыток — создаём recovery chain
-        if (pnl < 0) {
-          await db.insert(recoveryChainsTable).values({
-            debt_amount: Math.abs(pnl),
-            status: "free",
-            created_at: now,
-            updated_at: now,
-          });
-        }
+        // ВАЖНО: recovery chain для убытка ЗДЕСЬ не создаём.
+        // Цепочку создаёт сам бот при закрытии убыточной сделки через
+        // recovery.report(pnl) (см. bot/main.py). Если бы мы создавали цепочку
+        // и здесь, один и тот же убыток задваивался бы в две свободных
+        // цепочки, каждая из которых запускала бы свой компенсатор и
+        // приводила к открытию двух позиций по одной монете.
       }
     }
 

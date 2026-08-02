@@ -232,3 +232,50 @@ Start-Process python -ArgumentList "kucoin/main_kucoin.py SOLUSDT 5m" -WorkingDi
 -Jobs 4	4	Параллельные вычисления
 -DaysBack 3	5	За сколько дней данные
 -SyncOnly	—	Только применить CSV б
+
+
+cd bot
+
+Симметричный (optimizer_symmetric.py)
+Колонка	Значение
+Symbol	Торговая пара
+Score	Оценка (чем выше, тем лучше): profit_factor × √trades × win_rate / (1 + DD%)
+Trades	Количество сделок за период
+WR%	Винрейт (% прибыльных)
+PnL	Прибыль/убыток в USDT
+DD%	Максимальная просадка
+EMA_F	Быстрая EMA
+EMA_S	Медленная EMA
+SL=TP%	Стоп и тейк — одинаковые
+Risk%	Риск на сделку (% от баланса)
+VolX	Множитель объёма
+HTF_F / HTF_S	EMA старшего таймфрейма (1h)
+TP=2×SL (optimizer_tp2x.py)
+Колонка	Значение
+SL%	Стоп-лосс
+TP%	Тейк-профит (ровно в 2 раза больше SL)
+Остальное	Так же как в симметричном
+
+# Симметричный (SL = TP)
+python optimizer_symmetric.py --start 2026-07-22 --end 2026-07-28 --trials 100 --jobs 4
+
+# TP в 2 раза больше SL
+python optimizer_tp2x.py --start 2026-07-22 --end 2026-07-30 --trials 400 --jobs 4
+
+# Конкретные пары
+python optimizer_symmetric.py --symbols BTCUSDT,ETHUSDT,SOLUSDT --start 2026-07-22 --end 2026-07-28 --trials 50 --jobs 4
+
+# Только тест (без изменений конфигов)
+python optimizer_symmetric.py --start 2026-07-22 --end 2026-07-28 --trials 100 --jobs 4
+
+# Тест + запись лучших параметров в config_*.yaml
+python optimizer_symmetric.py --start 2026-07-22 --end 2026-07-28 --trials 100 --jobs 4 --apply
+python optimizer_tp2x.py --start 2026-07-22 --end 2026-07-28 --trials 100 --jobs 4 --apply
+
+Приоритет всегда такой, независимо от того, в каком порядке поля записаны в конфиг YAML:
+
+fixed_notional_usd
+fixed_qty
+fixed_risk_usd
+recovery
+risk_pct
