@@ -102,6 +102,34 @@ async function findBotPid(symbol: string): Promise<number | null> {
   return null;
 }
 
+/**
+ * За один вызов PowerShell получает PID всех python-процессов, запускающих
+ * наших ботов (main.py config_*.yaml). Значительно быстрее, чем 24 отдельных
+ * вызова findBotPid(), каждый из которых спавнит powershell.exe.
+ */
+async function findAllBotPids(): Promise<Map<string, number>> {
+  const pidBySymbol = new Map<string, number>();
+  try {
+    if (process.platform !== "win32") return pidBySymbol;
+    const { stdout } = await execAsync(
+      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
+    );
+    let raw: unknown;
+    try { raw = JSON.parse(stdout.trim() || "null"); } catch { raw = null; }
+    const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    for (const proc of processes as Array<Record<string, unknown>>) {
+      const cmd = (proc.CommandLine as string) || "";
+      if (!cmd.includes("main.py")) continue;
+      const m = cmd.match(/config_([a-z0-9]+)\.yaml/);
+      if (!m) continue;
+      const symbol = (m[1].toUpperCase() + "USDT");
+      const pid = parseInt(String(proc.ProcessId));
+      if (!isNaN(pid) && pid > 0) pidBySymbol.set(symbol, pid);
+    }
+  } catch { /* ignore */ }
+  return pidBySymbol;
+}
+
 // Убить процесс по PID
 async function killPid(pid: number): Promise<void> {
   try {
@@ -279,6 +307,8 @@ router.post("/:symbol/start", async (req, res) => {
 router.post("/stop-all", async (_req, res) => {
   try {
     const stoppedBots: string[] = [];
+
+    // 1. Kill bots we spawned and track (dashboard-managed).
     for (const [symbol, proc] of botProcesses) {
       if (!proc.killed) {
         proc.kill();
@@ -286,20 +316,30 @@ router.post("/stop-all", async (_req, res) => {
       }
     }
     botProcesses.clear();
-    
-    // Clear lock files
+
+    // 2. Kill any stray bot processes (not tracked) by their config file,
+    //    but ONLY python bot processes — never a global taskkill of all python
+    //    (that can kill the API/dashboard dev chain on Windows).
+    //    Один вызов PowerShell забирает PID всех ботов, дальше убиваем параллельно.
+    const strayPids = await findAllBotPids();
+    await Promise.all(Array.from(strayPids.entries()).map(async ([symbol, pid]) => {
+      const existed = botProcesses.get(symbol);
+      try {
+        if (process.platform === "win32") {
+          await execAsync(`taskkill /PID ${pid} /F`);
+        } else {
+          process.kill(pid, "SIGKILL");
+        }
+        if (!existed && !stoppedBots.includes(symbol)) stoppedBots.push(symbol);
+      } catch { /* already gone */ }
+    }));
+
+    // 3. Clear lock files (after stopping bots).
     const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith("bot.lock."));
     for (const lockFile of lockFiles) {
-      fs.unlinkSync(path.join(BOT_DIR, lockFile));
+      try { fs.unlinkSync(path.join(BOT_DIR, lockFile)); } catch { /* ignore */ }
     }
-    
-    // Also kill any Python processes running bots
-    if (process.platform === "win32") {
-      execAsync("taskkill /IM python.exe /F 2>nul || true", { stdio: "ignore" });
-    } else {
-      execAsync("pkill -f 'python.*main.py' 2>/dev/null || true", { stdio: "ignore" });
-    }
-    
+
     res.json({ success: true, message: `Stopped ${stoppedBots.length} bots`, bots: stoppedBots });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
