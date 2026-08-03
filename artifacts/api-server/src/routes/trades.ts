@@ -38,7 +38,7 @@ router.patch("/:id", async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const updates: Record<string, unknown> = {};
-    const allowed = ["exit_price", "pnl", "exit_reason", "qty", "is_open", "exit_time"];
+    const allowed = ["exit_price", "pnl", "exit_reason", "qty", "is_open", "exit_time", "status", "reject_reason"];
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
@@ -81,7 +81,7 @@ router.get("/stats", async (_req, res) => {
         ROUND(COALESCE(SUM(pnl),0),4)                                 AS total_pnl,
         ROUND(COALESCE(AVG(CASE WHEN pnl>0 THEN pnl END),0),4)        AS avg_win,
         ROUND(COALESCE(AVG(CASE WHEN pnl<=0 THEN pnl END),0),4)       AS avg_loss
-      FROM trades WHERE is_open=0 GROUP BY symbol ORDER BY symbol
+      FROM trades WHERE is_open=0 AND status != 'rejected' GROUP BY symbol ORDER BY symbol
     `);
     res.json(stats.rows);
   } catch (e) { res.status(500).json({ error: String(e) }); }

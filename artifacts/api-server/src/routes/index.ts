@@ -6,6 +6,7 @@ import optimizerRouter  from "./optimizer";
 import binanceSyncRouter from "./binance-sync";
 import recoveryRouter     from "./recovery";
 import refreshRouter      from "./refresh";
+import tradingRouter      from "./trading";
 
 const router = Router();
 
@@ -17,9 +18,6 @@ router.use("/optimizer",     optimizerRouter);
 router.use("/binance-sync", binanceSyncRouter);
 router.use("/recovery",     recoveryRouter);
 router.use("/refresh",     refreshRouter);
-router.use("/backtest",  backtestRouter);
-router.use("/optimizer",     optimizerRouter);
-router.use("/binance-sync", binanceSyncRouter);
-router.use("/recovery",     recoveryRouter);
+router.use("/trading",    tradingRouter);
 
 export default router;

@@ -42,8 +42,20 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   tp1_price REAL NOT NULL DEFAULT 0, tp2_price REAL NOT NULL DEFAULT 0,
   pnl REAL, exit_reason TEXT, entry_time TEXT NOT NULL, exit_time TEXT,
   is_open INTEGER NOT NULL DEFAULT 1, ema_fast REAL, ema_slow REAL,
-  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live'
+  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live',
+  status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT
 )`);
+
+// Мигрируем существующие БД: добавляем status/reject_reason если их нет.
+const { rows: tradeCols } = await db.run(sql`PRAGMA table_info(trades)`);
+const tradeColNames: string[] = (tradeCols as any[]).map((r: any) => String(r.name));
+if (!tradeColNames.includes("status")) {
+  await db.run(sql`ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'open'`);
+}
+if (!tradeColNames.includes("reject_reason")) {
+  await db.run(sql`ALTER TABLE trades ADD COLUMN reject_reason TEXT`);
+}
+await db.run(sql`UPDATE trades SET status='closed' WHERE is_open=0`);
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +66,13 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   closed_at TEXT
+)`);
+
+await db.run(sql`CREATE TABLE IF NOT EXISTS trading_control (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  loss_streak INTEGER NOT NULL DEFAULT 0,
+  paused_remaining INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
 )`);
 
 console.log("Tables created");
