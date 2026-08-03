@@ -135,6 +135,27 @@ class DbReporter:
                     await asyncio.sleep(0.5)
         return False
 
+    async def get_trade(self, trade_id: int) -> Optional[dict]:
+        """Возвращает сделку по id из БД (для получения entry_time восстановленных позиций)."""
+        for attempt in range(3):
+            session = await self._get_session()
+            if session is None:
+                return None
+            try:
+                async with session.get(
+                    f"{API_URL}/trades/{trade_id}",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                self.log.debug(f"[REPORTER] get_trade attempt {attempt+1} error: {e}")
+                await self._close_session()
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+        return None
+
     async def _patch(self, data: dict) -> None:
         # Retry across API restarts: on a connection error, rebuild the
         # session (the old one holds a dead connection after the server

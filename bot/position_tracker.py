@@ -170,6 +170,33 @@ class PositionTracker:
         except Exception as e:
             self.log.debug(f"[REPORTER] report_open error: {e}")
 
+    async def _entry_time_ms(self, trade_id: Optional[int]) -> int:
+        """Возвращает время входа позиции в мс — из самого объекта, либо, для
+        восстановленных с биржи позиций (entry_timestamp=None), из записи в БД."""
+        import datetime
+        if self.position and self.position.entry_timestamp:
+            try:
+                if isinstance(self.position.entry_timestamp, str):
+                    return int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
+                return int(self.position.entry_timestamp.timestamp() * 1000)
+            except (ValueError, AttributeError):
+                pass
+        # Fallback: entry_time из БД по trade_id
+        if trade_id and self.reporter:
+            try:
+                rec = await self.reporter.get_trade(trade_id)
+                if rec and rec.get("entry_time"):
+                    et = str(rec["entry_time"]).replace("Z", "")
+                    if et.endswith("Z"):
+                        et = et[:-1]
+                    if "T" in et:
+                        return int(datetime.datetime.fromisoformat(et).timestamp() * 1000)
+                    else:
+                        return int(datetime.datetime.strptime(et, "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+            except Exception:
+                pass
+        return 0
+
     async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str) -> None:
         if not self.reporter or not self._trade_id:
             return
@@ -177,19 +204,16 @@ class PositionTracker:
             import datetime
             # Try to get real PnL from Binance to match position history
             real_pnl = None
-            if self.order_mgr and self.position and self.position.entry_timestamp:
-                try:
-                    if isinstance(self.position.entry_timestamp, str):
-                        entry_time_ms = int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
-                    else:
-                        entry_time_ms = int(self.position.entry_timestamp.timestamp() * 1000)
-                    if entry_time_ms > 0:
+            if self.order_mgr:
+                entry_time_ms = await self._entry_time_ms(self._trade_id)
+                if entry_time_ms > 0:
+                    try:
                         exit_time_ms = int(__import__("time").time() * 1000)
                         real_pnl = await self.order_mgr.get_realized_pnl(
                             self.cfg.symbol, entry_time_ms, exit_time_ms,
                         )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
             pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
             success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
@@ -229,19 +253,16 @@ class PositionTracker:
             import datetime
             # Try to get real PnL from Binance to match position history
             real_pnl = None
-            if self.order_mgr and self.position and self.position.entry_timestamp:
-                try:
-                    if isinstance(self.position.entry_timestamp, str):
-                        entry_time_ms = int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
-                    else:
-                        entry_time_ms = int(self.position.entry_timestamp.timestamp() * 1000)
-                    if entry_time_ms > 0:
+            if self.order_mgr:
+                entry_time_ms = await self._entry_time_ms(trade_id)
+                if entry_time_ms > 0:
+                    try:
                         exit_time_ms = int(__import__("time").time() * 1000)
                         real_pnl = await self.order_mgr.get_realized_pnl(
                             self.cfg.symbol, entry_time_ms, exit_time_ms,
                         )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
             pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
             success = await self.reporter.patch_trade(trade_id, {
                 "exit_price":  exit_price,

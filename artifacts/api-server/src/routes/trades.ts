@@ -242,4 +242,16 @@ router.post("/sync-closed", async (_req, res) => {
   }
 });
 
+// GET /trades/:id — получить одну сделку по id (для корректного PnL восстановленных позиций)
+router.get("/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const rows = await db.select().from(tradesTable).where(eq(tradesTable.id, id)).limit(1);
+    if (rows.length === 0) return res.status(404).json({ error: "Trade not found" });
+    res.json(rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 export default router;
