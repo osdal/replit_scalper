@@ -356,20 +356,33 @@ async def _sync_position_on_start(
         except Exception:
             pass
     # Register open trade in DB so _trade_id is set for future close handling.
-    # Clean up any stale open trades first, then create a fresh record.
+    # Если для этого символа уже есть открытая сделка в БД — ПЕРЕИСПОЛЬЗУЕМ её
+    # (это та же позиция на бирже, восстановленная после рестарта), чтобы не
+    # задваивать записи в дашборде. Новую запись создаём только если открытой
+    # сделки в БД нет.
     import requests
     try:
         api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
         existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=20", timeout=5).json()
+        existing_open = None
         for old_trade in (existing.get("trades") or []):
             if old_trade.get("is_open"):
-                requests.patch(
-                    f"{api_url}/trades/{old_trade['id']}",
-                    json={"is_open": False, "exit_reason": "UNKNOWN", "exit_time": datetime.datetime.utcnow().isoformat()},
-                    timeout=5,
-                )
-                log.info(f"[SYNC] Closed stale open trade #{old_trade['id']} for {cfg.symbol}")
-        await tracker._report_open(mock_signal, exchange_qty)
+                existing_open = old_trade
+                break
+        if existing_open and existing_open.get("id"):
+            # Переиспользуем существующую запись: обновляем цены/объём под биржу и
+            # привязываем к трекеру, чтобы закрытие патилось в правильную запись.
+            reuse_id = int(existing_open["id"])
+            requests.patch(
+                f"{api_url}/trades/{reuse_id}",
+                json={"entry_price": entry_price, "qty": exchange_qty, "exit_reason": None},
+                timeout=5,
+            )
+            tracker._trade_id = reuse_id
+            log.info(f"[SYNC] Reusing existing open trade #{reuse_id} for {cfg.symbol} (no duplicate created)")
+        else:
+            # Открытой записи нет — создаём новую
+            await tracker._report_open(mock_signal, exchange_qty)
     except Exception:
         pass
     tracker._save_state()
@@ -647,9 +660,9 @@ async def _run_live_or_paper(
                                 pnl = await tracker.apply_hit_async(hit_type, current_price, candle_time_ms)
                                 closed_qty = pos.remaining_qty
                                 if hit_type == "TP2":
-                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "qty": closed_qty, "pnl": pnl})
+                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
                                 elif hit_type == "SL":
-                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "qty": closed_qty, "pnl": pnl})
+                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
@@ -686,9 +699,10 @@ async def _run_live_or_paper(
                         # Notify TP1 hit
                         notifier.send_event("tp1_hit", {
                             "symbol": cfg.symbol,
-                            "qty": pos.remaining_qty,
+                            "direction": pos.direction,
+                            "entry_price": pos.entry_price,
+                            "exit_price": current_price,
                             "pnl": pnl,
-                            "remaining_qty": tracker.position.remaining_qty if tracker.position else 0,
                         })
                         await order_mgr.move_sl_to_breakeven(
                             pos.direction, pos.entry_price,
@@ -714,7 +728,9 @@ async def _run_live_or_paper(
                         # Notify TP2 hit
                         notifier.send_event("tp2_hit", {
                             "symbol": cfg.symbol,
-                            "qty": pos.remaining_qty,
+                            "direction": pos.direction,
+                            "entry_price": pos.entry_price,
+                            "exit_price": current_price,
                             "pnl": pnl,
                         })
                         # Отменяем оставшиеся ордера (SL если остался)
@@ -736,7 +752,9 @@ async def _run_live_or_paper(
                         # Notify SL hit
                         notifier.send_event("sl_hit", {
                             "symbol": cfg.symbol,
-                            "qty": pos.remaining_qty,
+                            "direction": pos.direction,
+                            "entry_price": pos.entry_price,
+                            "exit_price": current_price,
                             "pnl": pnl,
                         })
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
@@ -882,8 +900,7 @@ async def _run_live_or_paper(
                 notifier.send_event("position_opened", {
                     "symbol": cfg.symbol,
                     "direction": signal.direction,
-                    "qty": qty,
-                    "price": entry_price,
+                    "entry_price": entry_price,
                     "is_recovery": is_recovery,
                     "chainId": chain_id,
                 })
