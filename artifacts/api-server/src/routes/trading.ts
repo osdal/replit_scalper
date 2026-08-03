@@ -24,8 +24,8 @@ const __dirname = path.dirname(__filename);
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(__dirname, "../../../../bot/recovery_config.yaml");
 
-function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number } {
-  const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0 };
+function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number } {
+  const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
     return {
@@ -34,6 +34,9 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
       max_free_debt_usd: Number(raw.max_free_debt_usd) || def.max_free_debt_usd,
       daily_loss_limit_usd: Number(raw.daily_loss_limit_usd) || def.daily_loss_limit_usd,
+      pause_timeout_minutes: raw.pause_timeout_minutes !== undefined
+        ? Number(raw.pause_timeout_minutes)
+        : def.pause_timeout_minutes,
     };
   } catch {
     return def;
@@ -49,6 +52,31 @@ async function getControlRow() {
     .onConflictDoNothing()
     .returning();
   return created || { id: 1, loss_streak: 0, paused_remaining: 0, updated_at: now };
+}
+
+/**
+ * Автосброс паузы/счётчика убытков по времени.
+ * Если после последнего события (updated_at) прошло >= pause_timeout_minutes без
+ * новых сделок, риск-состояние "забывается": пауза и счётчик подряд убытков
+ * сбрасываются. Это не даёт паузе или накопленному счётчику "зомбироваться"
+ * через долгую тишину на рынке.
+ * Возвращает true, если произошёл сброс.
+ */
+async function autoResetStale(control: any, timeoutMinutes: number): Promise<boolean> {
+  if (timeoutMinutes <= 0) return false;
+  if (!control.updated_at) return false;
+  const updatedMs = new Date(control.updated_at).getTime();
+  if (!Number.isFinite(updatedMs)) return false;
+  const elapsedMin = (Date.now() - updatedMs) / 60000;
+  if (elapsedMin < timeoutMinutes) return false;
+  // Сброс: только если есть что сбрасывать.
+  if (control.loss_streak > 0 || control.paused_remaining > 0) {
+    await db.update(tradingControlTable)
+      .set({ loss_streak: 0, paused_remaining: 0, updated_at: new Date().toISOString() })
+      .where(eq(tradingControlTable.id, 1));
+    return true;
+  }
+  return false;
 }
 
 async function countOpenPositions(): Promise<number> {
@@ -90,6 +118,13 @@ router.post("/check", async (req, res) => {
     const control = await getControlRow();
     const positions = await countOpenPositions();
     const daily_loss = await getDailyLoss();
+
+    // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
+    const reset = await autoResetStale(control, cfg.pause_timeout_minutes);
+    if (reset) {
+      control.loss_streak = 0;
+      control.paused_remaining = 0;
+    }
 
     // Дневной лимит убытков — жёсткая остановка на день.
     if (cfg.daily_loss_limit_usd > 0 && daily_loss >= cfg.daily_loss_limit_usd) {
@@ -187,6 +222,11 @@ router.get("/status", async (_req, res) => {
   try {
     const cfg = readConfig();
     const control = await getControlRow();
+    // Автосброс устаревшей паузы/счётчика (аналогично /check).
+    if (await autoResetStale(control, cfg.pause_timeout_minutes)) {
+      control.loss_streak = 0;
+      control.paused_remaining = 0;
+    }
     const positions = await countOpenPositions();
     const daily_loss = await getDailyLoss();
     const free_debt = await getFreeDebt();
@@ -201,6 +241,7 @@ router.get("/status", async (_req, res) => {
       free_debt: Number(free_debt.toFixed(2)),
       daily_loss_limit_usd: cfg.daily_loss_limit_usd,
       daily_loss: Number(daily_loss.toFixed(2)),
+      pause_timeout_minutes: cfg.pause_timeout_minutes,
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
