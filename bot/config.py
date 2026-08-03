@@ -31,6 +31,8 @@ class Config:
     fixed_qty: float = 0.0          # Fixed position size in coins (0 = use risk_pct of balance)
     fixed_notional_usd: float = 0.0 # Fixed MARGIN (collateral) in USD; position = margin * leverage (0 = disabled)
     fixed_risk_usd: float = 0.0     # Fixed loss in USD at SL (0 = use risk_pct of balance)
+    adx_period: int = 14              # ADX период для расчёта силы тренда
+    adx_threshold: float = 0.0        # ADX порог: сигналы при adx >= threshold (0 = фильтр отключён; тип. 20–25)
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")

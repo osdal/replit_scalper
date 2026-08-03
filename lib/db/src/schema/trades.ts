@@ -22,6 +22,8 @@ export const tradesTable = sqliteTable("trades", {
   volume:       real("volume"),
   volume_ma:    real("volume_ma"),
   mode:         text("mode").notNull().default("live"),
+  status:       text("status").notNull().default("open"),  // open | closed | rejected
+  reject_reason: text("reject_reason"),                    // причина отклонения (если status='rejected')
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ id: true });

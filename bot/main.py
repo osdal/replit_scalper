@@ -658,6 +658,7 @@ async def _run_live_or_paper(
                                     log.info(f"[RECOVERY] External close on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
                                 elif pnl < 0:
                                     await recovery.report(pnl=pnl)
+                                await recovery.report_result(pnl)
                             else:
                                 # Закрыта частично (между 0% и 50% от того, что бот
                                 # считал открытым) — скорректируем remaining_qty в
@@ -704,6 +705,7 @@ async def _run_live_or_paper(
                         if real_qty > 0 and real_qty < 0.001:
                             await order_mgr.close_dust(pos.direction)
                         await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                        await recovery.report_result(pnl)
                     elif hit == "TP2":
                         # TP2: биржа закрыла остаток, бот фиксирует результат
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
@@ -725,6 +727,7 @@ async def _run_live_or_paper(
                             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                         elif pnl < 0:
                             await recovery.report(pnl=pnl)
+                        await recovery.report_result(pnl)
                     else:
                         # SL: биржа закрыла позицию
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
@@ -748,6 +751,7 @@ async def _run_live_or_paper(
                             log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
                         elif pnl < 0:
                             await recovery.report(pnl=pnl)
+                        await recovery.report_result(pnl)
                         return
 
             # Защита от открытия второй позиции по той же монете.
@@ -788,6 +792,21 @@ async def _run_live_or_paper(
             if not confirmed:
                 return
 
+            # Глобальный риск-контроль: лимит позиций + пауза после серии убытков.
+            # Проверяем ДО claim, чтобы не захватывать recovery-цепочку впустую.
+            if recovery:
+                risk_check = await recovery.can_open()
+                if not risk_check.get("allowed", True):
+                    reason = risk_check.get("reason", "risk_block")
+                    log.info(
+                        f"[RISK] Skip signal for {cfg.symbol}: reason={reason} "
+                        f"(positions={risk_check.get('positions_open')})"
+                    )
+                    notifier.send_event("signal_rejected", {"symbol": cfg.symbol, "reason": reason})
+                    if reporter is not None:
+                        await reporter.report_rejected(signal_data, f"risk:{reason}")
+                    return
+
             # Пробуем захватить свободный долг для recovery-режима
             claim = await recovery.claim()
             recovery_target = None
@@ -795,6 +814,20 @@ async def _run_live_or_paper(
             
             # Логируем полный ответ от сервера
             log.info(f"[RECOVERY] claim response: {claim}")
+
+            # Потолок долга: сервер отказывает в выдаче recovery-долга, когда
+            # суммарный free+locked долг >= max_free_debt_usd. В этом случае
+            # НЕ открываем даже обычную позицию — пропускаем сигнал, чтобы
+            # не наращивать риск дальше.
+            if claim.get("reason") == "debt_limit":
+                log.warning(
+                    f"[RISK] Debt limit reached (freeDebt={claim.get('freeDebt')})"
+                    f" — skipping signal for {cfg.symbol}"
+                )
+                notifier.send_event("signal_rejected", {"symbol": cfg.symbol, "reason": "debt_limit"})
+                if reporter is not None:
+                    await reporter.report_rejected(signal_data, "risk:debt_limit")
+                return
             
             # Сохраняем состояние recovery в глобальной переменной
             _recovery_state[cfg.symbol] = {

@@ -26,6 +26,29 @@ def calculate_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     df["ema_fast"] = df["close"].ewm(span=cfg.ema_fast, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=cfg.ema_slow, adjust=False).mean()
     df["volume_ma"] = df["volume"].rolling(window=cfg.volume_ma_period).mean()
+
+    if cfg.adx_threshold > 0:
+        tr1 = df["high"] - df["low"]
+        tr2 = (df["high"] - df["close"].shift(1)).abs()
+        tr3 = (df["low"] - df["close"].shift(1)).abs()
+        df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        df["atr"] = df["tr"].ewm(alpha=1 / cfg.adx_period, adjust=False).mean()
+
+        up_move = df["high"] - df["high"].shift(1)
+        down_move = df["low"].shift(1) - df["low"]
+
+        df["+dm"] = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        df["-dm"] = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        df["+dm_s"] = df["+dm"].ewm(alpha=1 / cfg.adx_period, adjust=False).mean()
+        df["-dm_s"] = df["-dm"].ewm(alpha=1 / cfg.adx_period, adjust=False).mean()
+
+        df["+di"] = 100 * df["+dm_s"] / df["atr"]
+        df["-di"] = 100 * df["-dm_s"] / df["atr"]
+
+        df["dx"] = 100 * (df["+di"] - df["-di"]).abs() / (df["+di"] + df["-di"])
+        df["adx"] = df["dx"].ewm(alpha=1 / cfg.adx_period, adjust=False).mean()
+
     return df
 
 
@@ -88,6 +111,10 @@ def get_signal(
 
     if not long_signal and not short_signal:
         return None
+
+    if cfg.adx_threshold > 0:
+        if pd.isna(curr.get("adx")) or curr["adx"] < cfg.adx_threshold:
+            return None
 
     direction = "LONG" if long_signal else "SHORT"
 

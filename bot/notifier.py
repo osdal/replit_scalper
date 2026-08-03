@@ -108,6 +108,9 @@ class Notifier:
             message = f"❌ SL hit | {symbol} qty={qty} pnl={pnl}"
         elif event_type == "recovery":
             message = f"🔄 Recovery | {symbol} chainId={chainId} debt={debt}"
+        elif event_type == "signal_rejected":
+            reason = details.get('reason', 'risk_block')
+            message = f"⛔ Signal rejected | {symbol} reason={reason}"
         else:
             logger.warning(f"Unknown event type: {event_type}")
             return

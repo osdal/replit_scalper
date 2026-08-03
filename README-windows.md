@@ -504,6 +504,73 @@ TELEGRAM_CHAT_ID=<id канала/чата>
 
 ---
 
+## 13. Глобальное управление рисками (август 2026)
+
+Все боты — отдельные процессы, делящие **один USDT-баланс**. Для согласованного управления рисками по всему портфелю введена единая точка контроля — API-сервер + SQLite. Реализовано 4 механизма + фиксация отклонённых сигналов.
+
+### Конфигурация (`bot/recovery_config.yaml`)
+```yaml
+# Потолок одновременно открытых позиций по всему портфелю
+max_positions: 2
+# Пауза: после N убытков подряд (общий счётчик) пропускаем M сигналов
+loss_streak_trigger: 2
+loss_pause_signals: 3
+# Потолок накопленного долга recovery (free+locked). Выше — claim() отказывает.
+max_free_debt_usd: 15.0
+# Дневной лимит убытков (USDT). При достижении боты останавливаются до конца дня.
+daily_loss_limit_usd: 8.0
+```
+
+### Механизм 1 — Лимит позиций (`max_positions`)
+- Эндпоинт `POST /api/trading/check` считает открытые позиции из таблицы `trades` (`is_open=1`).
+- Если `positions_open >= max_positions` → блокирует новый вход (`reason: "max_positions"`).
+
+### Механизм 2 — Пауза после серии убытков
+- Общий счётчик `loss_streak` (по всему портфелю, таблица `trading_control`, одна строка id=1).
+- Бот сообщает результат закрытой сделки через `POST /api/trading/result {pnl}`.
+- После `loss_streak_trigger` (2) убытков подряд включается `paused_remaining = loss_pause_signals` (3). Каждый `check` в паузе возвращает `allowed:false` и декрементирует счётчик.
+
+### Механизм 3 — Потолок долга recovery (`max_free_debt_usd`)
+- В `POST /api/recovery/claim`: перед выдачей free-цепочки считается сумма всех `free+locked` долгов.
+- Если `total_debt >= max_free_debt_usd` → `{chainId: null, reason: "debt_limit"}`.
+- Бот при `reason="debt_limit"` **пропускает сигнал целиком** (не открывает даже обычную позицию).
+
+### Механизм 4 — Дневной лимит убытков (`daily_loss_limit_usd`)
+- `POST /api/trading/check` считает сумму `pnl < 0` по закрытым сделкам за текущий UTC-день.
+- Если `daily_loss >= daily_loss_limit_usd` → `{allowed: false, reason: "daily_loss_limit"}` — боты не входят до конца дня.
+
+### Фиксация отклонённых сигналов (для статистики)
+- В таблицу `trades` добавлены колонки `status` (`open`/`closed`/`rejected`) и `reject_reason`.
+- При блокировке сигнала риск-контролем (`pause`/`max_positions`/`daily_loss_limit`/`debt_limit`) бот записывает сделку `status='rejected'`, `pnl=0`, `is_open=false` через `POST /api/trades`.
+- Отклонённые сделки **исключаются** из торговой статистики `GET /api/trades/stats` (фильтр `status != 'rejected'`), но видны в списке сделок — для анализа, сколько сигналов выкинуто защитами.
+
+### Файлы
+| Файл | Что |
+|------|-----|
+| `bot/recovery_config.yaml` | пороги всех механизмов |
+| `bot/recovery_client.py` | `can_open()`, `report_result()` |
+| `bot/main.py` | вызовы `can_open` перед входом, `report_result` при закрытии, запись отклонённых |
+| `bot/db_reporter.py` | `report_rejected()` |
+| `artifacts/api-server/src/routes/trading.ts` | `/trading/check`, `/trading/result`, `/trading/status` |
+| `artifacts/api-server/src/routes/recovery.ts` | потолок долга в `/claim` |
+| `lib/db/src/schema/trading.ts` + `trades.ts` | таблицы `trading_control`, колонки `status`/`reject_reason` |
+
+### Диагностика
+`GET /api/trading/status` возвращает текущее состояние всех механизмов:
+```
+{ positions_open, max_positions, loss_streak, loss_streak_trigger,
+  paused_remaining, loss_pause_signals, max_free_debt_usd, free_debt,
+  daily_loss_limit_usd, daily_loss }
+```
+
+### ADX-фильтр силы тренда (дополнительно)
+- `bot/strategy.py`: расчёт ADX(14) в `calculate_indicators`; в `get_signal` сигнал пропускается, если `adx < adx_threshold`.
+- `bot/config.py`: поля `adx_period: int = 14`, `adx_threshold: float = 0.0` (0 = отключён).
+- Во всех `config_*.yaml`: `adx_threshold: 20.0`.
+- ✓ Анализ 2 августа: ADX на входах был 20–47 — фильтр не отсекает вчерашние убытки (они были не из-за боковика), но защищает от будущего чопа.
+
+---
+
 ## Вопросы к автору для доработки
 
 1. **Какой алгоритм выбора монет?** Сейчас символ жестко задан в `config.yaml` (`BTCUSDT`). Планируется мульти-символьный запуск или ручной выбор?

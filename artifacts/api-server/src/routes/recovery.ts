@@ -5,7 +5,7 @@
  */
 import { Router } from "express";
 import { db, recoveryChainsTable } from "@workspace/db";
-import { eq, and, lt } from "drizzle-orm";
+import { eq, and, lt, sql } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -28,6 +28,7 @@ function readRecoveryConfig(): {
   recovery_enabled: boolean;
   recovery_bonus_pct: number;
   recovery_max_pct: number;
+  max_free_debt_usd: number;
 } {
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
@@ -36,9 +37,10 @@ function readRecoveryConfig(): {
       recovery_enabled: val === true || val === "true" || val === "True" || val === 1,
       recovery_bonus_pct: Number(raw.recovery_bonus_pct) || 0,
       recovery_max_pct: Number(raw.recovery_max_pct) || 0,
+      max_free_debt_usd: Number(raw.max_free_debt_usd) || 15.0,
     };
   } catch {
-    return { recovery_enabled: false, recovery_bonus_pct: 0, recovery_max_pct: 0 };
+    return { recovery_enabled: false, recovery_bonus_pct: 0, recovery_max_pct: 0, max_free_debt_usd: 15.0 };
   }
 }
 
@@ -84,6 +86,18 @@ router.post("/claim", async (req, res) => {
 
     const { symbol } = req.body;
     if (!symbol) return res.status(400).json({ error: "symbol is required" });
+
+    // Потолок долга: если суммарный свободный долг >= лимита, не выдаём
+    // новые recovery-позиции, чтобы не наращивать риск дальше.
+    if (config.max_free_debt_usd > 0) {
+      const [agg] = await db.select({ debt: sql<number>`COALESCE(SUM(debt_amount),0)` })
+        .from(recoveryChainsTable)
+        .where(sql`status IN ('free','locked')`);
+      const totalDebt = Number(agg?.debt || 0);
+      if (totalDebt >= config.max_free_debt_usd) {
+        return res.json({ chainId: null, debtAmount: 0, enabled: true, reason: "debt_limit", freeDebt: totalDebt });
+      }
+    }
 
     // Находим самый старый свободный долг
     const [chain] = await db.select()
