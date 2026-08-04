@@ -7,7 +7,7 @@ from binance.spot import Spot
 from config import settings
 from crypto import encrypt_text
 from storage.database import Database
-from keyboards.main import confirm_menu, back_menu, main_menu
+from keyboards.main import confirm_menu, back_menu, main_menu, reply_keyboard
 
 router = Router()
 db = Database(settings.support_bot_db)
@@ -84,12 +84,14 @@ async def connect_confirm(callback: CallbackQuery, state: FSMContext):
         iv=encrypted["iv"],
     )
     await callback.message.edit_text("Ключ сохранён. Бот готов к работе.", reply_markup=main_menu(connected=True))
+    await callback.message.answer("Меню:", reply_markup=reply_keyboard())
     await state.clear()
 
 
 @router.callback_query(ConnectStates.waiting_confirm, F.data == "connect_cancel")
 async def connect_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Подключение отменено.", reply_markup=main_menu())
+    await callback.message.answer("Меню:", reply_markup=reply_keyboard())
     await state.clear()
 
 
@@ -99,3 +101,4 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     existing = await db.get_credentials(user_id)
     await state.clear()
     await callback.message.edit_text("Главное меню:", reply_markup=main_menu(connected=bool(existing and existing.is_active)))
+    await callback.message.answer("Меню:", reply_markup=reply_keyboard())
