@@ -5,6 +5,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 
 from config import settings
 from storage.database import Database
@@ -34,6 +35,10 @@ async def main():
     dp.include_router(support_router)
 
     await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запустить бота"),
+    ])
+
     await dp.start_polling(bot)
 
 
