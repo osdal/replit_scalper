@@ -59,6 +59,8 @@ interface Trade {
   exit_time: string | null;
   is_open: boolean;
   mode: string;
+  status?: string;
+  reject_reason?: string | null;
 }
 
 interface Stats {
@@ -293,7 +295,7 @@ function StatsRow({ stats }: { stats: Stats[] }) {
 
 function PnlChart({ trades }: { trades: Trade[] }) {
   const closed = [...trades]
-    .filter((t) => !t.is_open && t.pnl != null)
+    .filter((t) => !t.is_open && t.pnl != null && t.status !== "rejected")
     .sort((a, b) => new Date(a.entry_time).getTime() - new Date(b.entry_time).getTime());
 
   let cumulative = 0;
@@ -359,10 +361,23 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                 {t.pnl == null ? "—" : `${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl, 4)}`}
               </TableCell>
               <TableCell>
-                {t.exit_reason && (
-                  <Badge variant={t.exit_reason.startsWith("TP") ? "default" : "destructive"} className="text-xs">
-                    {t.exit_reason}
-                  </Badge>
+                {t.status === "rejected" ? (
+                  <div className="flex flex-col gap-1">
+                    <Badge variant="default" className="text-xs bg-blue-600/20 text-blue-300 border-blue-500/40">
+                      ⛔ REJECTED{t.reject_reason ? ` (${t.reject_reason.split(":").pop()})` : ""}
+                    </Badge>
+                    {t.exit_reason && (
+                      <Badge variant={t.exit_reason.startsWith("TP") ? "default" : "destructive"} className="text-xs">
+                        sim: {t.exit_reason}
+                      </Badge>
+                    )}
+                  </div>
+                ) : (
+                  t.exit_reason && (
+                    <Badge variant={t.exit_reason.startsWith("TP") ? "default" : "destructive"} className="text-xs">
+                      {t.exit_reason}
+                    </Badge>
+                  )
                 )}
               </TableCell>
               <TableCell>

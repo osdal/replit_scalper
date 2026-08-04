@@ -29,6 +29,7 @@ class Config:
     htf_ema_slow: int = 21
     recovery_max_position_pct: float = 100.0
     fixed_qty: float = 0.0          # Fixed position size in coins (0 = use risk_pct of balance)
+    margin_pct: float = 0.0         # % от депозита на маржу: margin = round(balance*pct/100, 1); position = margin*leverage (0 = disabled)
     fixed_notional_usd: float = 0.0 # Fixed MARGIN (collateral) in USD; position = margin * leverage (0 = disabled)
     fixed_risk_usd: float = 0.0     # Fixed loss in USD at SL (0 = use risk_pct of balance)
     adx_period: int = 14              # ADX период для расчёта силы тренда
