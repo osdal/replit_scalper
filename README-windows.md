@@ -606,6 +606,17 @@ daily_loss_limit_usd: 8.0
 TELEGRAM_CONNECT_URL=https://t.me/your_username
 ```
 
+### Кнопка «ПОДДЕРЖКА» в Telegram
+- `bot/notifier.py`: ко всем сообщениям добавлена инлайн-кнопка **ПОДДЕРЖКА**.
+- При нажатии открывается Telegram-чат с администратором с предзаполненным текстом:
+  > `Здравствуйте! Я по поводу подключения бота для торговли на Binance`
+- Username администратора задаётся в `.env` через `TELEGRAM_SUPPORT_USERNAME`.
+- Если `TELEGRAM_SUPPORT_USERNAME` не задан — кнопка не добавляется.
+
+```env
+TELEGRAM_SUPPORT_USERNAME=your_support_username
+```
+
 ### Симуляция исхода отклонённых сигналов
 Отклонённая сделка фактически не открывалась (позиции не было), поэтому её результат **симулируется** для статистики в дашборде:
 - `bot/db_reporter.py`: `report_rejected()` возвращает `trade_id` созданной записи.
