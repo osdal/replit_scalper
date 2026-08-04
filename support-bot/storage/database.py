@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from models.user import User
-from models.api_key import ApiKey
+from models.user_credentials import UserCredentials
 
 
 class Database:
@@ -25,13 +25,11 @@ class Database:
                 )
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS api_keys (
+                CREATE TABLE IF NOT EXISTS user_credentials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    symbol TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    encrypted_key TEXT NOT NULL,
-                    encrypted_secret TEXT NOT NULL,
+                    user_id INTEGER UNIQUE NOT NULL,
+                    encrypted_api_key TEXT NOT NULL,
+                    encrypted_api_secret TEXT NOT NULL,
                     iv TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -64,32 +62,45 @@ class Database:
             await db.commit()
             return User(id=user_id, telegram_id=telegram_id, username=username, first_name=first_name, last_name=last_name, created_at=now)
 
-    async def add_api_key(self, user_id: int, symbol: str, mode: str, encrypted_key: str, encrypted_secret: str, iv: str) -> ApiKey:
+    async def upsert_credentials(self, user_id: int, encrypted_api_key: str, encrypted_api_secret: str, iv: str) -> UserCredentials:
         now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "INSERT INTO api_keys (user_id, symbol, mode, encrypted_key, encrypted_secret, iv, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-                (user_id, symbol, mode, encrypted_key, encrypted_secret, iv, now),
-            ) as cursor:
-                key_id = cursor.lastrowid
+            async with db.execute("SELECT * FROM user_credentials WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+            if row:
+                await db.execute(
+                    "UPDATE user_credentials SET encrypted_api_key=?, encrypted_api_secret=?, iv=?, is_active=1, created_at=? WHERE user_id=?",
+                    (encrypted_api_key, encrypted_api_secret, iv, now, user_id),
+                )
+                creds_id = row["id"]
+            else:
+                async with db.execute(
+                    "INSERT INTO user_credentials (user_id, encrypted_api_key, encrypted_api_secret, iv, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+                    (user_id, encrypted_api_key, encrypted_api_secret, iv, now),
+                ) as cursor:
+                    creds_id = cursor.lastrowid
             await db.commit()
-            return ApiKey(
-                id=key_id, user_id=user_id, symbol=symbol, mode=mode,
-                encrypted_key=encrypted_key, encrypted_secret=encrypted_secret, iv=iv,
+            return UserCredentials(
+                id=creds_id, user_id=user_id,
+                encrypted_api_key=encrypted_api_key, encrypted_api_secret=encrypted_api_secret, iv=iv,
                 is_active=True, created_at=now, last_used_at=None,
             )
 
-    async def get_user_keys(self, user_id: int) -> list[ApiKey]:
+    async def get_credentials(self, user_id: int) -> Optional[UserCredentials]:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM api_keys WHERE user_id = ?", (user_id,)) as cursor:
-                rows = await cursor.fetchall()
-                return [
-                    ApiKey(
-                        id=r["id"], user_id=r["user_id"], symbol=r["symbol"], mode=r["mode"],
-                        encrypted_key=r["encrypted_key"], encrypted_secret=r["encrypted_secret"], iv=r["iv"],
-                        is_active=bool(r["is_active"]), created_at=r["created_at"], last_used_at=r["last_used_at"],
-                    )
-                    for r in rows
-                ]
+            async with db.execute("SELECT * FROM user_credentials WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return UserCredentials(
+                    id=row["id"], user_id=row["user_id"],
+                    encrypted_api_key=row["encrypted_api_key"], encrypted_api_secret=row["encrypted_api_secret"], iv=row["iv"],
+                    is_active=bool(row["is_active"]), created_at=row["created_at"], last_used_at=row["last_used_at"],
+                )
+
+    async def deactivate_credentials(self, user_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE user_credentials SET is_active=0 WHERE user_id=?", (user_id,))
+            await db.commit()

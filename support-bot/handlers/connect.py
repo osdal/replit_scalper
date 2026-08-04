@@ -1,31 +1,33 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from binance_connector import Client
-from cryptography.fernet import Fernet
+from binance.spot import Spot
 
 from config import settings
 from crypto import encrypt_text
 from storage.database import Database
-from keyboards.main import mode_menu, confirm_menu, back_menu
+from keyboards.main import confirm_menu, back_menu, main_menu
 
 router = Router()
-db = Database(settings.database_path)
+db = Database(settings.support_bot_db)
 
 
 class ConnectStates(StatesGroup):
     waiting_api_key = State()
     waiting_api_secret = State()
-    waiting_symbol = State()
-    waiting_mode = State()
     waiting_confirm = State()
 
 
 @router.callback_query(F.data == "connect_start")
 async def connect_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите API-ключ Binance:", reply_markup=back_menu())
+    await state.set_state(ConnectStates.waiting_api_key)
+
+
+@router.callback_query(F.data == "connect_replace")
+async def connect_replace(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введите новый API-ключ Binance:", reply_markup=back_menu())
     await state.set_state(ConnectStates.waiting_api_key)
 
 
@@ -39,31 +41,12 @@ async def connect_api_key(message: Message, state: FSMContext):
 @router.message(ConnectStates.waiting_api_secret)
 async def connect_api_secret(message: Message, state: FSMContext):
     await state.update_data(api_secret=message.text.strip())
-    await message.answer("Введите тикер символа (например BTCUSDT):", reply_markup=back_menu())
-    await state.set_state(ConnectStates.waiting_symbol)
-
-
-@router.message(ConnectStates.waiting_symbol)
-async def connect_symbol(message: Message, state: FSMContext):
-    symbol = message.text.strip().upper()
-    await state.update_data(symbol=symbol)
-    await message.answer("Выберите режим доступа:", reply_markup=mode_menu())
-    await state.set_state(ConnectStates.waiting_mode)
-
-
-@router.callback_query(ConnectStates.waiting_mode, F.data.startswith("mode:"))
-async def connect_mode(callback: CallbackQuery, state: FSMContext):
-    mode = callback.data.split(":")[1]
-    await state.update_data(mode=mode)
     data = await state.get_data()
     api_key = data.get("api_key", "")
     api_secret = data.get("api_secret", "")
-    symbol = data.get("symbol", "")
-    await callback.message.edit_text(
-        f"Подтвердите подключение:\n\n"
-        f"Символ: {symbol}\n"
-        f"Режим: {'Только чтение' if mode == 'readonly' else 'Торговля'}\n\n"
-        f"API-ключ: {api_key[:6]}...{api_key[-4:]}",
+    masked = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else api_key
+    await message.answer(
+        f"Подтвердите подключение:\n\nAPI-ключ: {masked}",
         reply_markup=confirm_menu(),
     )
     await state.set_state(ConnectStates.waiting_confirm)
@@ -74,34 +57,33 @@ async def connect_confirm(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     api_key = data.get("api_key", "")
     api_secret = data.get("api_secret", "")
-    symbol = data.get("symbol", "")
-    mode = data.get("mode", "trade")
 
     try:
-        client = Client(api_key, api_secret, base_url="https://fapi.binance.com")
-        account = client.account()
+        client = Spot(api_key, api_secret)
+        client.account()
         await callback.message.edit_text("Ключ валиден. Сохраняем...")
-    except Exception:
-        await callback.message.edit_text("Ошибка валидации ключа. Попробуйте позже.", reply_markup=back_menu())
+    except Exception as e:
+        await callback.message.edit_text(
+            f"Ошибка валидации ключа: {e}\nПопробуйте ещё раз.",
+            reply_markup=back_menu(),
+        )
         await state.clear()
         return
 
-    encrypted = encrypt_text(settings.master_key, api_secret)
     user = await db.get_or_create_user(
         telegram_id=callback.from_user.id,
         username=callback.from_user.username,
         first_name=callback.from_user.first_name,
         last_name=callback.from_user.last_name,
     )
-    await db.add_api_key(
+    encrypted = encrypt_text(settings.master_key, api_secret)
+    await db.upsert_credentials(
         user_id=user.id,
-        symbol=symbol,
-        mode=mode,
-        encrypted_key=api_key,
-        encrypted_secret=encrypted["encrypted"],
+        encrypted_api_key=api_key,
+        encrypted_api_secret=encrypted["encrypted"],
         iv=encrypted["iv"],
     )
-    await callback.message.edit_text("Ключ сохранён. Бот готов к работе.", reply_markup=main_menu())
+    await callback.message.edit_text("Ключ сохранён. Бот готов к работе.", reply_markup=main_menu(connected=True))
     await state.clear()
 
 
@@ -113,5 +95,7 @@ async def connect_cancel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "main_menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    existing = await db.get_credentials(user_id)
     await state.clear()
-    await callback.message.edit_text("Главное меню:", reply_markup=main_menu())
+    await callback.message.edit_text("Главное меню:", reply_markup=main_menu(connected=bool(existing and existing.is_active)))
