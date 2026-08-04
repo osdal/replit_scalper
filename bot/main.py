@@ -355,11 +355,13 @@ async def _sync_position_on_start(
 
     entry_price = 0.0
     direction = "LONG"
+    entry_timestamp_ms = None
     for p in positions:
         amt = float(p.get("positionAmt", 0))
         if abs(amt) > 0:
             direction = "LONG" if amt > 0 else "SHORT"
             entry_price = float(p.get("entryPrice", 0))
+            entry_timestamp_ms = p.get("entryTime")
             break
 
     if entry_price == 0:
@@ -379,6 +381,11 @@ async def _sync_position_on_start(
         tp1_price = entry_price - tp1_dist
         tp2_price = entry_price - tp2_dist
 
+    if entry_timestamp_ms:
+        entry_timestamp = pd.Timestamp(int(entry_timestamp_ms), unit="ms")
+    else:
+        entry_timestamp = pd.Timestamp.utcnow()
+
     tracker.position = Position(
         direction=direction,
         entry_price=entry_price,
@@ -387,6 +394,7 @@ async def _sync_position_on_start(
         tp2_price=round(tp2_price, 4),
         total_qty=exchange_qty,
         remaining_qty=exchange_qty,
+        entry_timestamp=entry_timestamp,
     )
 
     import datetime
@@ -397,7 +405,7 @@ async def _sync_position_on_start(
         tp1_price=round(tp1_price, 4),
         tp2_price=round(tp2_price, 4),
         ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=entry_timestamp,
     )
     # Check for locked recovery chain to preserve recovery context
     if recovery and cfg.mode == "live":
@@ -702,17 +710,17 @@ async def _run_live_or_paper(
                             )
                             if real_qty < 0.001:
                                 # Полностью закрыта на бирже без нашего участия.
-                                # Определяем причину направление-зависимо (для SHORT
-                                # прибыль — это падение цены, не рост) и применяем
-                                # через уже проверенный apply_hit_async путь, чтобы
-                                # получить правильный знак PnL, учёт предыдущего
-                                # частичного TP1 и корректную синхронизацию с биржей —
-                                # вместо пересчёта PnL заново здесь.
-                                price_moved_favorably = (
-                                    current_price > pos.entry_price if pos.direction == "LONG"
-                                    else current_price < pos.entry_price
-                                )
-                                hit_type = "TP2" if price_moved_favorably else "SL"
+                                # Определяем причину с учётом состояния TP1:
+                                # если tp1_hit=True — остаток был уже в безубытке,
+                                # значит это закрытие остатка по TP1, а не TP2/SL.
+                                if pos.tp1_hit:
+                                    hit_type = "TP1"
+                                else:
+                                    price_moved_favorably = (
+                                        current_price > pos.entry_price if pos.direction == "LONG"
+                                        else current_price < pos.entry_price
+                                    )
+                                    hit_type = "TP2" if price_moved_favorably else "SL"
                                 events.warning(
                                     f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
                                 )
@@ -1003,14 +1011,11 @@ async def _run_live_or_paper(
                 if tracker.has_open_position():
                     pos = tracker.position
                     if pos:
-                        # Получаем актуальную информацию о позиции с биржи
                         exchange_pos = await order_mgr.get_position_info()
                         if exchange_pos:
-                            # Сравниваем количества
                             local_qty = pos.remaining_qty
                             exchange_qty = exchange_pos.get("qty", 0)
                             
-                            # Порог для сравнения (небольшие различия из-за округления допустимы)
                             diff_threshold = 0.000001
                             if abs(local_qty - exchange_qty) > diff_threshold:
                                 log.warning(
@@ -1018,23 +1023,35 @@ async def _run_live_or_paper(
                                     f"local_qty={local_qty:.6f} exchange_qty={exchange_qty:.6f} "
                                     f"direction={pos.direction}"
                                 )
-                                # Обновляем состояние
-                                pos.remaining_qty = exchange_qty
-                                tracker._save_state()
                                 
-                                # Проверяем, не закрыта ли позиция полностью
                                 if exchange_qty < diff_threshold:
                                     log.warning(
                                         f"[SYNC_WARNING] Position appears closed on exchange | "
-                                        f"updating local state"
+                                        f"closing trade in DB and handling recovery"
                                     )
-                                    pos.closed = True
-                                    tracker._clear_state()
-                            else:
-                                events.debug(
-                                    f"[SYNC_CHECK] Position state OK | "
-                                    f"qty={exchange_qty:.6f} direction={pos.direction}"
-                                )
+                                    ticker = await order_mgr.client.futures_symbol_ticker(symbol=cfg.symbol)
+                                    current_price = float(ticker.get("price", 0))
+                                    if current_price > 0:
+                                        price_moved_favorably = (
+                                            current_price > pos.entry_price if pos.direction == "LONG"
+                                            else current_price < pos.entry_price
+                                        )
+                                        hit_type = "TP2" if price_moved_favorably else "SL"
+                                    else:
+                                        hit_type = "SL"
+                                    candle_time_ms = int(__import__("time").time() * 1000)
+                                    pnl = await tracker.apply_hit_async(hit_type, current_price or pos.entry_price, candle_time_ms)
+                                    await order_mgr.cancel_all_tp_sl(pos.direction)
+                                    if pos.is_recovery:
+                                        await recovery.release(chain_id=pos.recovery_chain_id)
+                                        await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                                        log.info(f"[RECOVERY] External close on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
+                                    elif pnl < 0:
+                                        await recovery.report(pnl=pnl)
+                                    await recovery.report_result(pnl)
+                                else:
+                                    pos.remaining_qty = exchange_qty
+                                    tracker._save_state()
                         else:
                             log.warning("[SYNC_WARNING] Could not fetch position info")
             except Exception as e:
