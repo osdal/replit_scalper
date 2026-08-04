@@ -3,6 +3,7 @@ import os
 import asyncio
 import io
 import logging
+import urllib.parse
 
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from PIL import Image, ImageDraw, ImageFont
@@ -94,10 +95,11 @@ class Notifier:
     отправка игнорируется с логом WARNING (не влияет на торговлю).
     """
 
-    def __init__(self, token: str = None, chat_id: str = None, connect_url: str = None):
+    def __init__(self, token: str = None, chat_id: str = None, connect_url: str = None, support_username: str = None):
         self.token = token if token else os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id if chat_id else os.getenv("TELEGRAM_CHAT_ID")
         self.connect_url = connect_url if connect_url else os.getenv("TELEGRAM_CONNECT_URL")
+        self.support_username = support_username if support_username else os.getenv("TELEGRAM_SUPPORT_USERNAME")
         self.bot = None
         if self.token and self.chat_id:
             self.bot = Bot(token=self.token)
@@ -109,11 +111,16 @@ class Notifier:
             )
 
     def _connect_keyboard(self):
-        if not self.connect_url:
+        buttons = []
+        if self.connect_url:
+            buttons.append([InlineKeyboardButton("ПОДКЛЮЧИТЬ БОТ", url=self.connect_url)])
+        if self.support_username:
+            text = "Здравствуйте! Я по поводу подключения бота для торговли на Binance"
+            url = f"https://t.me/{self.support_username}?text={urllib.parse.quote(text)}"
+            buttons.append([InlineKeyboardButton("ПОДДЕРЖКА", url=url)])
+        if not buttons:
             return None
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("ПОДКЛЮЧИТЬ БОТ", url=self.connect_url)]
-        ])
+        return InlineKeyboardMarkup(buttons)
 
     async def _send_photo_with_retry(self, img: Image.Image, retries: int = 3, delay: int = 1):
         if not self.bot:
