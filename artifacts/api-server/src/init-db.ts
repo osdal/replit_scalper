@@ -55,7 +55,7 @@ if (!tradeColNames.includes("status")) {
 if (!tradeColNames.includes("reject_reason")) {
   await db.run(sql`ALTER TABLE trades ADD COLUMN reject_reason TEXT`);
 }
-await db.run(sql`UPDATE trades SET status='closed' WHERE is_open=0`);
+await db.run(sql`UPDATE trades SET status='closed' WHERE is_open=0 AND status != 'rejected'`);
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
