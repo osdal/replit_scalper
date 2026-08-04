@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import signal
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -36,6 +37,140 @@ _rejected_sims = []
 _REJECTED_SIM_MAX_CANDLES = 24  # максимум свечей ждём результат (24×5м = 2ч)
 
 
+def _simulate_exit(direction, entry, sl, tp1, klines):
+    """Возвращает (exit_reason, exit_price, exit_open_time_ms) по историческим свечам."""
+    direction = direction.upper()
+    for k in klines:
+        open_time = int(k[0])
+        high = float(k[2])
+        low = float(k[3])
+        if direction == "LONG":
+            if low <= sl:
+                return "SL", sl, open_time
+            if high >= tp1:
+                return "TP1", tp1, open_time
+        else:
+            if high >= sl:
+                return "SL", sl, open_time
+            if low <= tp1:
+                return "TP1", tp1, open_time
+    return None, None, None
+
+
+def _calc_simulated_pnl(direction, entry, exit_price, qty):
+    """Считает реализованный PnL для симуляции (в USDT)."""
+    if not entry or not exit_price or not qty:
+        return 0.0
+    d = direction.upper()
+    if d == "LONG":
+        return qty * (exit_price - entry)
+    return qty * (entry - exit_price)
+
+
+def _calc_simulated_qty(cfg, signal, balance):
+    """Расчёт размера позиции, который был бы открыт, если бы сигнал прошёл."""
+    if cfg.margin_pct > 0:
+        margin = round(balance * cfg.margin_pct / 100, 1)
+        raw_qty = (margin * cfg.leverage) / signal.entry_price
+    elif cfg.fixed_notional_usd > 0:
+        raw_qty = (cfg.fixed_notional_usd * cfg.leverage) / signal.entry_price
+    elif cfg.fixed_qty > 0:
+        raw_qty = cfg.fixed_qty
+    elif cfg.fixed_risk_usd > 0:
+        raw_qty = cfg.fixed_risk_usd / (signal.entry_price * cfg.sl_pct / 100)
+    else:
+        from order_manager import calc_quantity
+        raw_qty = calc_quantity(
+            balance=balance,
+            risk_pct=cfg.risk_pct,
+            sl_pct=cfg.sl_pct,
+            entry_price=signal.entry_price,
+            leverage=cfg.leverage,
+        )
+    return raw_qty
+
+
+async def _load_pending_rejected(reporter, log):
+    """Загружает из БД все отклонённые сделки без exit_reason в очередь симуляции."""
+    if reporter is None:
+        return []
+    try:
+        trades = await reporter.get_pending_rejected_trades()
+    except Exception as e:
+        log.debug(f"[REJECTED] failed to load pending trades: {e}")
+        return []
+    result = []
+    for t in trades:
+        try:
+            result.append({
+                "trade_id": t["id"],
+                "symbol": t["symbol"],
+                "direction": t.get("direction", "LONG"),
+                "entry": float(t.get("entry_price", 0) or 0),
+                "sl": float(t.get("sl_price", 0) or 0),
+                "tp1": float(t.get("tp1_price", 0) or 0),
+                "qty": float(t.get("qty", 0) or 0),
+                "entry_time": t.get("entry_time"),
+                "candles": 0,
+                "historical_checked": False,
+            })
+        except Exception as e:
+            log.debug(f"[REJECTED] skip pending trade {t.get('id')}: {e}")
+    if result:
+        log.info(f"[REJECTED] Loaded {len(result)} pending rejected trades from DB")
+    return result
+
+
+async def _simulate_rejected_background(client, reporter, log, shutdown_event):
+    """Фоновая задача: симулирует исход отклонённых сделок по историческим свечам."""
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                return
+            pending = [s for s in _rejected_sims if not s.get("historical_checked") and s.get("entry_time")]
+            if not pending:
+                continue
+            by_symbol = {}
+            for sim in pending:
+                by_symbol.setdefault(sim["symbol"], []).append(sim)
+            for symbol, sims in by_symbol.items():
+                try:
+                    earliest = min(s["entry_time"] for s in sims)
+                    dt = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
+                    start_ms = int(dt.timestamp() * 1000)
+                    klines = await get_recent_klines(client, symbol, "5m", start_ms, limit=500)
+                    if not klines:
+                        continue
+                    for sim in sims:
+                        try:
+                            exit_reason, exit_price, exit_open_time = _simulate_exit(
+                                sim["direction"], sim["entry"], sim["sl"], sim["tp1"], klines
+                            )
+                            if exit_reason:
+                                exit_time = datetime.fromtimestamp(exit_open_time / 1000, tz=timezone.utc).isoformat()
+                                qty = sim.get("qty", 0.0)
+                                pnl = _calc_simulated_pnl(sim["direction"], sim["entry"], exit_price, qty)
+                                await reporter.patch_trade(sim["trade_id"], {
+                                    "exit_price": exit_price,
+                                    "exit_reason": exit_reason,
+                                    "pnl": round(pnl, 4),
+                                    "exit_time": exit_time,
+                                })
+                                log.info(
+                                    f"[REJECTED_SIM] Trade #{sim['trade_id']} {sim['symbol']} {sim['direction']} => {exit_reason} @ {exit_price} pnl={pnl:+.4f}"
+                                )
+                                _rejected_sims.remove(sim)
+                            else:
+                                sim["historical_checked"] = True
+                        except Exception as e:
+                            log.debug(f"[REJECTED_SIM] error for trade {sim['trade_id']}: {e}")
+                except Exception as e:
+                    log.debug(f"[REJECTED_SIM] error for symbol {symbol}: {e}")
+        except Exception as e:
+            log.debug(f"[REJECTED_SIM] background error: {e}")
+
+
 async def _simulate_rejected_outcome(current_price, reporter, log):
     """Продвигает симуляцию исходов отклонённых сигналов: если цена дошла до
     SL или TP1 фиксируем результат как exit_reason/exit_price/pnl (симулируемое,
@@ -44,7 +179,11 @@ async def _simulate_rejected_outcome(current_price, reporter, log):
         return
     kept = []
     for sim in _rejected_sims:
-        sim["candles"] += 1
+        if sim.get("historical_checked") is False:
+            # Историческая симуляция выполняется в фоновой задаче.
+            kept.append(sim)
+            continue
+        sim["candles"] = sim.get("candles", 0) + 1
         direction = sim.get("direction", "LONG")
         entry = sim.get("entry")
         sl = sim.get("sl")
@@ -65,24 +204,24 @@ async def _simulate_rejected_outcome(current_price, reporter, log):
                 hit, hit_price = "TP1", current_price
 
         if hit and entry:
-            # Симулируемый PnL по цене (без плеча/количества, qty=0 → это 0; покажем % отдельно)
-            pnl = 0.0  # фактической позиции не было; результат - только факт исхода
             import datetime as _dt
             try:
+                qty = sim.get("qty", 0.0)
+                pnl = _calc_simulated_pnl(direction, entry, hit_price, qty)
                 await reporter.patch_trade(tid, {
                     "exit_price": hit_price,
                     "exit_reason": hit,
-                    "pnl": 0.0,
+                    "pnl": round(pnl, 4),
                     "exit_time": _dt.datetime.utcnow().isoformat(),
                 })
-                log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} (trade #{tid})")
+                log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} pnl={pnl:+.4f} (trade #{tid})")
             except Exception as e:
                 log.debug(f"[RISK_SIM] finalize error: {e}")
-            continue  # удаляем из очереди
+            continue
 
         if sim["candles"] >= _REJECTED_SIM_MAX_CANDLES:
             log.debug(f"[RISK_SIM] Rejected trade #{tid} expired with no TP/SL")
-            continue  # удаляем без результата
+            continue
 
         kept.append(sim)
     _rejected_sims[:] = kept
@@ -601,6 +740,10 @@ async def _run_live_or_paper(
 
     await reporter.report_heartbeat(0)
 
+    # Загружаем ранее отклонённые сделки из БД в очередь симуляции
+    loaded = await _load_pending_rejected(reporter, log)
+    _rejected_sims.extend(loaded)
+
     df_buffer: pd.DataFrame = await get_recent_klines(
         client=client, symbol=cfg.symbol, interval=cfg.timeframe,
         limit=max(cfg.ema_slow * 3, 200),
@@ -888,7 +1031,10 @@ async def _run_live_or_paper(
                         f"(positions={risk_check.get('positions_open')})"
                     )
                     if reporter is not None:
-                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}")
+                        balance = await order_mgr.get_balance() if cfg.mode == "live" else cfg.paper_balance
+                        sim_qty = _calc_simulated_qty(cfg, signal, balance)
+                        signal_data["qty"] = sim_qty
+                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}", qty=sim_qty)
                         if tid:
                             _rejected_sims.append({
                                 "trade_id": tid,
@@ -897,7 +1043,10 @@ async def _run_live_or_paper(
                                 "entry": signal_data.get("entry_price"),
                                 "sl": signal_data.get("sl_price"),
                                 "tp1": signal_data.get("tp1_price"),
+                                "qty": sim_qty,
+                                "entry_time": datetime.utcnow().isoformat(),
                                 "candles": 0,
+                                "historical_checked": False,
                             })
                     return
 
@@ -919,7 +1068,10 @@ async def _run_live_or_paper(
                     f" — skipping signal for {cfg.symbol}"
                 )
                 if reporter is not None:
-                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit")
+                    balance = await order_mgr.get_balance() if cfg.mode == "live" else cfg.paper_balance
+                    sim_qty = _calc_simulated_qty(cfg, signal, balance)
+                    signal_data["qty"] = sim_qty
+                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit", qty=sim_qty)
                     if tid:
                         _rejected_sims.append({
                             "trade_id": tid,
@@ -928,7 +1080,10 @@ async def _run_live_or_paper(
                             "entry": signal_data.get("entry_price"),
                             "sl": signal_data.get("sl_price"),
                             "tp1": signal_data.get("tp1_price"),
+                            "qty": sim_qty,
+                            "entry_time": datetime.utcnow().isoformat(),
                             "candles": 0,
+                            "historical_checked": False,
                         })
                 return
             
@@ -1059,6 +1214,7 @@ async def _run_live_or_paper(
 
     # Запускаем периодическую проверку состояния позиции в фоне
     check_task = asyncio.create_task(periodic_position_check())
+    sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, log, shutdown_event))
 
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
@@ -1071,13 +1227,14 @@ async def _run_live_or_paper(
         logger=log, poll_seconds=10, shutdown_event=shutdown_event,
     )
     
-    # Останавливаем фоновую задачу проверки позиции
-    if not check_task.done():
-        check_task.cancel()
-        try:
-            await check_task
-        except asyncio.CancelledError:
-            pass
+    # Останавливаем фоновые задачи
+    for task in (check_task, sim_task):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
