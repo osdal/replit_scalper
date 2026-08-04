@@ -4,7 +4,7 @@ import asyncio
 import io
 import logging
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
@@ -94,9 +94,10 @@ class Notifier:
     отправка игнорируется с логом WARNING (не влияет на торговлю).
     """
 
-    def __init__(self, token: str = None, chat_id: str = None):
+    def __init__(self, token: str = None, chat_id: str = None, connect_url: str = None):
         self.token = token if token else os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id if chat_id else os.getenv("TELEGRAM_CHAT_ID")
+        self.connect_url = connect_url if connect_url else os.getenv("TELEGRAM_CONNECT_URL")
         self.bot = None
         if self.token and self.chat_id:
             self.bot = Bot(token=self.token)
@@ -107,15 +108,23 @@ class Notifier:
                 "Telegram notifications will be ignored."
             )
 
+    def _connect_keyboard(self):
+        if not self.connect_url:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("ПОДКЛЮЧИТЬ БОТ", url=self.connect_url)]
+        ])
+
     async def _send_photo_with_retry(self, img: Image.Image, retries: int = 3, delay: int = 1):
         if not self.bot:
             return
         bio = io.BytesIO()
         img.save(bio, format="PNG")
         bio.seek(0)
+        kb = self._connect_keyboard()
         for attempt in range(retries):
             try:
-                await self.bot.send_photo(chat_id=self.chat_id, photo=bio)
+                await self.bot.send_photo(chat_id=self.chat_id, photo=bio, reply_markup=kb)
                 logger.debug(f"Photo sent to Telegram (attempt {attempt + 1})")
                 return
             except Exception as e:
@@ -127,9 +136,10 @@ class Notifier:
     async def _send_text_with_retry(self, text: str, retries: int = 3, delay: int = 1):
         if not self.bot:
             return
+        kb = self._connect_keyboard()
         for attempt in range(retries):
             try:
-                await self.bot.send_message(chat_id=self.chat_id, text=text)
+                await self.bot.send_message(chat_id=self.chat_id, text=text, reply_markup=kb)
                 logger.debug(f"Message sent to Telegram (attempt {attempt + 1}): {text}")
                 return
             except Exception as e:
