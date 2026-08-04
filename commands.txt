@@ -279,3 +279,7 @@ fixed_qty
 fixed_risk_usd
 recovery
 risk_pct
+
+
+sc.exe config wslservice start= auto
+cd /home/osdal/replit_scalper_linux
