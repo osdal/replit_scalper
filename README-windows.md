@@ -717,3 +717,57 @@ TELEGRAM_SUPPORT_USERNAME=your_support_username
 ---
 
 *Файл создан автоматически на основе анализа кодовой базы. Для уточнения деталей см. исходные файлы в `bot/`.*
+
+---
+
+## 16. Telegram-бот поддержки и подключения клиентов (`support-bot/`)
+
+Отдельный бот на `aiogram 3.x`, который принимает заявки от пользователей, валидирует и шифрует их Binance API-ключи, и готов к будущей интеграции с торговым движком.
+
+### Структура
+```
+support-bot/
+├── bot.py
+├── config.py
+├── crypto.py
+├── storage/database.py
+├── models/user.py
+├── models/api_key.py
+├── handlers/start.py
+├── handlers/connect.py
+├── handlers/keys.py
+├── handlers/support.py
+├── keyboards/main.py
+└── requirements.txt
+```
+
+### Сценарий
+1. Пользователь нажимает **ПОДКЛЮЧИТЬ БОТ** в публичном канале → открывается личный чат с support-ботом.
+2. `/start` → главное меню: **Подключить бота**, **Мои ключи**, **Поддержка**.
+3. **Подключить бота** → бот запрашивает API-key → API-secret → символ → режим (`readonly`/`trade`) → валидация через Binance → сохранение.
+4. **Мои ключи** → список подключённых ключей с символом и режимом.
+5. **Поддержка** → переадресация в чат с администратором с предзаполненным текстом.
+
+### Безопасность
+- Ключи хранятся в SQLite в зашифрованном виде (`AES-256-GCM`).
+- Мастер-ключ берётся из `SUPPORT_BOT_MASTER_KEY` (env, base64-строка из 32 байт).
+- При валидации ключи используются только в памяти, не логируются.
+
+### Запуск
+```bash
+cd support-bot
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python bot.py
+```
+
+### Переменные окружения
+```env
+SUPPORT_BOT_TOKEN=...
+SUPPORT_CHAT_ID=...
+SUPPORT_BOT_MASTER_KEY=...
+SUPPORT_BOT_DB=./support-bot/data/support_bot.db
+```
+
+---

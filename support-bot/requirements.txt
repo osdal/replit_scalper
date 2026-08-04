@@ -1,0 +1,6 @@
+aiogram==3.4.1
+cryptography==42.0.8
+aiosqlite==0.20.0
+python-dotenv==1.0.1
+binance-connector==1.0.22
+pydantic==2.9.2
