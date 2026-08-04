@@ -295,6 +295,17 @@ class OrderManager:
                     f"target={recovery_target:.4f} qty={raw_qty:.6f}"
                 )
                 return None
+        elif self.cfg.margin_pct > 0:
+            # margin_pct = % от депозита на маржу.
+            # margin = round(balance * pct / 100, 1)  (до 1 знака после запятой).
+            # Позиция = margin * leverage.
+            margin = round(balance * self.cfg.margin_pct / 100, 1)
+            raw_qty = (margin * self.cfg.leverage) / signal.entry_price
+            self.log.info(
+                f"[LIVE] Size by margin_pct | balance=${balance:.2f} "
+                f"margin_pct={self.cfg.margin_pct}% margin=${margin:.2f} "
+                f"notional=~${margin * self.cfg.leverage:.2f}"
+            )
         elif self.cfg.fixed_notional_usd > 0:
             # fixed_notional_usd = МАРЖА (обеспечение).
             # Позиция = margin * leverage, чтобы удовлетворять minNotional.

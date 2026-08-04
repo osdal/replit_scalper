@@ -29,6 +29,64 @@ LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
 # Глобальные переменные для отслеживания recovery-состояния
 _recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recovery": bool}}
 
+# Очередь симуляции исходов отклонённых сигналов.
+# Каждый элемент: {"trade_id": int, "direction": str, "entry": float, "sl": float,
+#                  "tp1": float, "candles": int} — закрыт по SL/TP1 либо истёк по времени.
+_rejected_sims = []
+_REJECTED_SIM_MAX_CANDLES = 24  # максимум свечей ждём результат (24×5м = 2ч)
+
+
+async def _simulate_rejected_outcome(current_price, reporter, log):
+    """Продвигает симуляцию исходов отклонённых сигналов: если цена дошла до
+    SL или TP1 фиксируем результат как exit_reason/exit_price/pnl (симулируемое,
+    позиция не открывалась). Истёкшие по времени отметки убираем без результата."""
+    if not _rejected_sims or reporter is None:
+        return
+    kept = []
+    for sim in _rejected_sims:
+        sim["candles"] += 1
+        direction = sim.get("direction", "LONG")
+        entry = sim.get("entry")
+        sl = sim.get("sl")
+        tp1 = sim.get("tp1")
+        tid = sim.get("trade_id")
+
+        hit = None
+        hit_price = None
+        if direction == "LONG":
+            if current_price <= sl:
+                hit, hit_price = "SL", current_price
+            elif current_price >= tp1:
+                hit, hit_price = "TP1", current_price
+        else:
+            if current_price >= sl:
+                hit, hit_price = "SL", current_price
+            elif current_price <= tp1:
+                hit, hit_price = "TP1", current_price
+
+        if hit and entry:
+            # Симулируемый PnL по цене (без плеча/количества, qty=0 → это 0; покажем % отдельно)
+            pnl = 0.0  # фактической позиции не было; результат - только факт исхода
+            import datetime as _dt
+            try:
+                await reporter.patch_trade(tid, {
+                    "exit_price": hit_price,
+                    "exit_reason": hit,
+                    "pnl": 0.0,
+                    "exit_time": _dt.datetime.utcnow().isoformat(),
+                })
+                log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} (trade #{tid})")
+            except Exception as e:
+                log.debug(f"[RISK_SIM] finalize error: {e}")
+            continue  # удаляем из очереди
+
+        if sim["candles"] >= _REJECTED_SIM_MAX_CANDLES:
+            log.debug(f"[RISK_SIM] Rejected trade #{tid} expired with no TP/SL")
+            continue  # удаляем без результата
+
+        kept.append(sim)
+    _rejected_sims[:] = kept
+
 
 def _lock_file(symbol: str) -> str:
     return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
@@ -568,6 +626,7 @@ async def _run_live_or_paper(
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
 
             await reporter.report_heartbeat(current_price)
+            await _simulate_rejected_outcome(current_price, reporter, log)
             if tracker.has_open_position():
                 pos = tracker.position
                 await reporter.report_position({
@@ -820,9 +879,18 @@ async def _run_live_or_paper(
                         f"[RISK] Skip signal for {cfg.symbol}: reason={reason} "
                         f"(positions={risk_check.get('positions_open')})"
                     )
-                    notifier.send_event("signal_rejected", {"symbol": cfg.symbol, "reason": reason})
                     if reporter is not None:
-                        await reporter.report_rejected(signal_data, f"risk:{reason}")
+                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}")
+                        if tid:
+                            _rejected_sims.append({
+                                "trade_id": tid,
+                                "symbol": cfg.symbol,
+                                "direction": signal_data.get("direction"),
+                                "entry": signal_data.get("entry_price"),
+                                "sl": signal_data.get("sl_price"),
+                                "tp1": signal_data.get("tp1_price"),
+                                "candles": 0,
+                            })
                     return
 
             # Пробуем захватить свободный долг для recovery-режима
@@ -842,9 +910,18 @@ async def _run_live_or_paper(
                     f"[RISK] Debt limit reached (freeDebt={claim.get('freeDebt')})"
                     f" — skipping signal for {cfg.symbol}"
                 )
-                notifier.send_event("signal_rejected", {"symbol": cfg.symbol, "reason": "debt_limit"})
                 if reporter is not None:
-                    await reporter.report_rejected(signal_data, "risk:debt_limit")
+                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit")
+                    if tid:
+                        _rejected_sims.append({
+                            "trade_id": tid,
+                            "symbol": cfg.symbol,
+                            "direction": signal_data.get("direction"),
+                            "entry": signal_data.get("entry_price"),
+                            "sl": signal_data.get("sl_price"),
+                            "tp1": signal_data.get("tp1_price"),
+                            "candles": 0,
+                        })
                 return
             
             # Сохраняем состояние recovery в глобальной переменной
@@ -897,13 +974,6 @@ async def _run_live_or_paper(
                     recovery_chain_id=chain_id,
                 )
                 events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
-                notifier.send_event("position_opened", {
-                    "symbol": cfg.symbol,
-                    "direction": signal.direction,
-                    "entry_price": entry_price,
-                    "is_recovery": is_recovery,
-                    "chainId": chain_id,
-                })
             elif chain_id is not None:
                 log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
                 await recovery.release(chain_id=chain_id)

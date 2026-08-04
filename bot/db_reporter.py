@@ -37,9 +37,10 @@ class DbReporter:
     async def report_stopped(self) -> None:
         await self._patch({"is_running": False, "position": None})
 
-    async def report_rejected(self, signal_data: dict, reason: str) -> None:
+    async def report_rejected(self, signal_data: dict, reason: str) -> Optional[int]:
         """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'
-        (для статистики). pnl=0, is_open=0 — не влияет на торговую статистику."""
+        (для статистики). pnl=0, is_open=0 — не влияет на торговую статистику.
+        Возвращает id созданной записи (для последующей симуляции TP/SL)."""
         import datetime as _dt
         payload = {
             "symbol": self.symbol,
@@ -64,13 +65,13 @@ class DbReporter:
             payload["ema_slow"] = signal_data.get("ema_slow")
             payload["volume"] = signal_data.get("volume")
             payload["volume_ma"] = signal_data.get("volume_ma")
-        await self._post_trade(payload)
+        return await self._post_trade(payload)
 
-    async def _post_trade(self, trade: dict) -> None:
+    async def _post_trade(self, trade: dict) -> Optional[int]:
         for attempt in range(3):
             session = await self._get_session()
             if session is None:
-                return
+                return None
             try:
                 async with session.post(
                     f"{API_URL}/trades",
@@ -78,14 +79,16 @@ class DbReporter:
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status in (200, 201):
-                        return
+                        data = await resp.json()
+                        return data.get("id")
                     self.log.debug(f"[REPORTER] rejected trade POST failed: {resp.status}")
-                    return
+                    return None
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
                 self.log.debug(f"[REPORTER] rejected trade attempt {attempt+1} error: {e}")
                 await self._close_session()
                 if attempt < 2:
                     await asyncio.sleep(0.5)
+        return None
 
     async def report_trade(self, trade: dict) -> Optional[int]:
         """Записывает новую сделку. Возвращает ID созданной записи."""
