@@ -37,7 +37,7 @@ class DbReporter:
     async def report_stopped(self) -> None:
         await self._patch({"is_running": False, "position": None})
 
-    async def report_rejected(self, signal_data: dict, reason: str) -> Optional[int]:
+    async def report_rejected(self, signal_data: dict, reason: str, qty: float = 0.0) -> Optional[int]:
         """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'
         (для статистики). pnl=0, is_open=0 — не влияет на торговую статистику.
         Возвращает id созданной записи (для последующей симуляции TP/SL)."""
@@ -50,7 +50,7 @@ class DbReporter:
             "sl_price": signal_data.get("sl_price", 0.0),
             "tp1_price": signal_data.get("tp1_price", 0.0),
             "tp2_price": signal_data.get("tp2_price", 0.0),
-            "qty": 0.0,
+            "qty": qty,
             "pnl": 0.0,
             "exit_reason": None,
             "entry_time": _dt.datetime.utcnow().isoformat(),
@@ -158,6 +158,26 @@ class DbReporter:
                 if attempt < 2:
                     await asyncio.sleep(0.5)
         return None
+
+    async def get_pending_rejected_trades(self) -> list[dict]:
+        """Возвращает все отклонённые сделки без exit_reason (ожидают симуляции)."""
+        session = await self._get_session()
+        if not session:
+            return []
+        try:
+            async with session.get(
+                f"{API_URL}/trades",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return [
+                        t for t in data.get("trades", [])
+                        if t.get("status") == "rejected" and not t.get("exit_reason")
+                    ]
+        except Exception as e:
+            self.log.debug(f"[REPORTER] get_pending_rejected_trades error: {e}")
+        return []
 
     async def _patch(self, data: dict) -> None:
         # Retry across API restarts: on a connection error, rebuild the
