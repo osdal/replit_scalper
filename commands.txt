@@ -228,10 +228,12 @@ Start-Process python -ArgumentList "kucoin/main_kucoin.py SOLUSDT 5m" -WorkingDi
 
 Флаг	По умолчанию	Описание
 -Symbols @("ETH","BTC")	все пары	Какие пары оптимизировать
--Trials 200	400	Число комбинаций
+-Trials 200	200	Число комбинаций
 -Jobs 4	4	Параллельные вычисления
--DaysBack 3	5	За сколько дней данные
--SyncOnly	—	Только применить CSV б
+-DaysBack 7	7	За сколько дней данные
+-Force	—	Применить даже если новый score хуже текущего
+-SyncOnly	—	Только применить CSV без запуска оптимизатора
+-CreateSchedule	—	Создать задачу в Task Scheduler (ежедневно в 3:00)
 
 
 cd bot

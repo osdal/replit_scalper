@@ -1,19 +1,22 @@
 # auto-optimize.ps1
-# Runs optimizer for each pair over the last 5 days,
-# applies the best parameters to config, and reloads bots.
+# Runs optimizer for each pair over the last N days,
+# applies the best parameters to config if improved, and reloads bots.
 #
 # Usage:
 #   .\auto-optimize.ps1
-#   .\auto-optimize.ps1 -Trials 50 -Jobs 4 -DaysBack 5
+#   .\auto-optimize.ps1 -Trials 200 -Jobs 4 -DaysBack 7
 #   .\auto-optimize.ps1 -Symbols @("ETHUSDT","BTCUSDT")
 #   .\auto-optimize.ps1 -SyncOnly (sync current CSV results without running optimizer)
+#   .\auto-optimize.ps1 -CreateSchedule (set up daily Task Scheduler job)
 
 param(
-    [int]$Trials = 400,
+    [int]$Trials = 200,
     [int]$Jobs = 4,
-    [int]$DaysBack = 5,
+    [int]$DaysBack = 7,
     [string[]]$Symbols = @(),
-    [switch]$SyncOnly
+    [switch]$SyncOnly,
+    [switch]$CreateSchedule,
+    [switch]$Force
 )
 
 $scriptDir = $PSScriptRoot
@@ -53,6 +56,15 @@ function Read-CSV-Params($symbol) {
             return $result
         } catch {}
     }
+    return $null
+}
+
+function Get-CurrentScore($symbol) {
+    try {
+        $r = Invoke-RestMethod -Uri "$API/bots/$symbol" -ErrorAction Stop
+        if ($r.best_score) { return [double]$r.best_score }
+        if ($r.config -and $r.config.score) { return [double]$r.config.score }
+    } catch {}
     return $null
 }
 
@@ -149,6 +161,20 @@ foreach ($sym in $Symbols) {
     $emaS = $bestParams["ema_slow"]
     Write-Host "  Best: score=$scoreStr EMA=$emaF/$emaS TP1=$($bestParams['tp1_pct']) SL=$($bestParams['sl_pct'])" -ForegroundColor Green
     
+    # Compare with current score
+    $currentScore = Get-CurrentScore $sym
+    $newScore = if ($scoreStr -ne "" -and $scoreStr -ne "-") { [double]$scoreStr } else { 0 }
+    
+    if ($currentScore -and (-not $Force)) {
+        $delta = $newScore - $currentScore
+        $deltaPct = if ($currentScore -ne 0) { ($delta / $currentScore * 100) } else { 100 }
+        if ($delta -le 0) {
+            Write-Host "  SKIP: current score=$currentScore is better than new=$newScore (delta=$deltaPct%)" -ForegroundColor DarkYellow
+            continue
+        }
+        Write-Host "  IMPROVE: $currentScore -> $newScore ($deltaPct%)" -ForegroundColor Green
+    }
+    
     $applied = Apply-To-Config $sym $bestParams
     if ($applied) {
         $results += "$sym (score=$scoreStr, EMA=$emaF/$emaS)"
@@ -176,6 +202,27 @@ try {
     Write-Host "Reload FAILED: $_" -ForegroundColor Red
 }
 
+# ── Create scheduled task ─────────────────────────────────────────────
+
+if ($CreateSchedule) {
+    Write-Host ""
+    Write-Host "Creating daily scheduled task..." -ForegroundColor Yellow
+    
+    $taskName = "AutoOptimizeTradingBots"
+    $scriptPath = Join-Path $scriptDir "auto-optimize.ps1"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    $trigger = New-ScheduledTaskTrigger -Daily -At 3am
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest
+    
+    try {
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+        Write-Host "Scheduled task created: $taskName (runs daily at 3am)" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to create scheduled task: $_" -ForegroundColor Red
+    }
+}
+
 # ── Report ───────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -188,4 +235,6 @@ if ($failures.Count -gt 0) {
     Write-Host "Failed  : $($failures.Count)"
     foreach ($f in $failures) { Write-Host "  $f" -ForegroundColor Red }
 }
+Write-Host ""
+Write-Host "Next run: $(if ($CreateSchedule) { 'Daily at 3am (scheduled)' } else { 'Manual' })"
 Write-Host "============================================"
