@@ -363,7 +363,7 @@ Examples:
     print_top(study, n=10)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = os.path.join(os.path.dirname(cfg.log_file), f"optimization_{timestamp}.csv")
+    csv_path = os.path.join(os.path.dirname(cfg.log_file), f"optimization_{cfg.symbol}_{timestamp}.csv")
     save_csv(study, csv_path)
 
     log.info(

@@ -37,7 +37,7 @@ Write-Host ""
 # ── Helpers ────────────────────────────────────────────────────────
 
 function Read-CSV-Params($symbol) {
-    $pattern = "optimization_*.csv"
+    $pattern = "optimization_${symbol}_*.csv"
     $files = Get-ChildItem -Path $logsDir -Filter $pattern -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending
     if (-not $files) { return $null }
@@ -111,6 +111,16 @@ function Run-Optimizer($symbol) {
     
     $proc = Start-Process -FilePath "python" -ArgumentList $args `
         -WorkingDirectory $botDir -NoNewWindow -PassThru -Wait
+    
+    # Rename latest optimization CSV to include symbol
+    try {
+        $latest = Get-ChildItem -Path $logsDir -Filter "optimization_*.csv" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latest) {
+            $newName = "optimization_$($symbol)_$($latest.LastWriteTime.ToString('yyyyMMdd_HHmmss')).csv"
+            Rename-Item -Path $latest.FullName -NewName $newName -ErrorAction SilentlyContinue
+        }
+    } catch {}
     
     return ($proc.ExitCode -eq 0)
 }
