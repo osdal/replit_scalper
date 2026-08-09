@@ -285,3 +285,11 @@ risk_pct
 
 sc.exe config wslservice start= auto
 cd /home/osdal/replit_scalper_linux
+
+снапшот
+ls C:\DATA\bots\replit_scalper\bot\logs\optimization_*20260807*.csv
+ls C:\DATA\bots\replit_scalper\bot\logs\optimization_*20260807*.csv | measure | % { "CSV: $($_.Count)/24" }; if (Test-Path C:\DATA\bots\replit_scalper\bot\walk_forward_opt.lock) { "STATUS: ещё работает" } else { "STATUS: ЗАВЕРШЁН" }
+ monitor-opt.ps1
+ Команда для запуска монитора:
+cd C:\DATA\bots\replit_scalper
+powershell -ExecutionPolicy Bypass -File auto-optimize-daily.ps1
