@@ -374,6 +374,8 @@ async def _sync_position_on_start(
                             if sync_pos and getattr(sync_pos, "recovery_chain_id", None):
                                 await recovery.release(chain_id=sync_pos.recovery_chain_id)
                                 log.info(f"[SYNC] Released locked recovery chain #{sync_pos.recovery_chain_id} for {cfg.symbol}")
+                        if notifier and notifier.bot and sync_pos:
+                            notifier.send_message(f"🔒 CLOSED (sync) {cfg.symbol} {sync_pos.direction} | Entry={sync_pos.entry_price} PnL={pnl_val:+.4f}")
             except Exception as e:
                 log.debug(f"[SYNC] Cleanup error: {e}")
             tracker.position = None
@@ -871,8 +873,13 @@ async def _run_live_or_paper(
                                 closed_qty = pos.remaining_qty
                                 if hit_type == "TP2":
                                     notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                elif hit_type == "TP1":
+                                    notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "SL":
                                     notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
                                 if pos.is_recovery:
@@ -914,6 +921,7 @@ async def _run_live_or_paper(
                             "exit_price": current_price,
                             "pnl": pnl,
                         })
+                        notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         await order_mgr.move_sl_to_breakeven(
                             pos.direction, pos.entry_price,
                             remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
@@ -928,6 +936,14 @@ async def _run_live_or_paper(
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
                         if real_qty > 0 and real_qty < 0.001:
                             await order_mgr.close_dust(pos.direction)
+                        notifier.send_event("tp1_hit", {
+                            "symbol": cfg.symbol,
+                            "direction": pos.direction,
+                            "entry_price": pos.entry_price,
+                            "exit_price": current_price,
+                            "pnl": pnl,
+                        })
+                        notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                         await recovery.report_result(pnl)
                     elif hit == "TP2":
@@ -943,6 +959,7 @@ async def _run_live_or_paper(
                             "exit_price": current_price,
                             "pnl": pnl,
                         })
+                        notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         # Отменяем оставшиеся ордера (SL если остался)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
                         # Проверяем, не осталась ли пылевая позиция
@@ -967,6 +984,7 @@ async def _run_live_or_paper(
                             "exit_price": current_price,
                             "pnl": pnl,
                         })
+                        notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
                         await order_mgr.cancel_all_tp_sl(pos.direction)
                         # Проверяем, не осталась ли пылевая позиция

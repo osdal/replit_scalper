@@ -58,7 +58,7 @@ $env:PNPM_FILTER = "@workspace/api-server"
 $env:BOT_DIR = "bot"
 $env:DATABASE_PATH = ".\data\bot.db"
 $env:PORT = "5000"
-Start-Process powershell -ArgumentList "-NoProfile -Command `$env:BOT_DIR='bot'; `$env:DATABASE_PATH='.\data\bot.db'; `$env:PORT='5000'; Set-Location '$scriptDir'; pnpm --filter @workspace/api-server run dev" -WindowStyle Hidden -WorkingDirectory $scriptDir
+Start-Process powershell -ArgumentList "-NoProfile -Command `$env:BOT_DIR='bot'; `$env:DATABASE_PATH='.\data\bot.db'; `$env:PORT='5000'; Set-Location '$scriptDir'; pnpm --filter @workspace/api-server run dev" -WindowStyle Minimized -WorkingDirectory $scriptDir
 Start-Sleep -Seconds 3
 
 # Smoke check API (up to 30 seconds)

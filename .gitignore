@@ -96,4 +96,4 @@ yarn-error.log*
 *.lock.*
 
 # Все CSV отчёты и оптимизации
-*.csv
+*.csvbot/logs/

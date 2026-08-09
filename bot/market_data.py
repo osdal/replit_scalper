@@ -66,29 +66,40 @@ async def start_kline_polling(
     logger: Optional[logging.Logger] = None,
     poll_seconds: int = 10,
     shutdown_event: Optional[asyncio.Event] = None,
+    skip_catchup: bool = True,
 ) -> None:
     """
     REST polling — checks for new closed candles every poll_seconds.
     При старте инициализирует last_seen последней закрытой свечой,
     чтобы не прокручивать старые свечи после перезапуска.
-    
+
     shutdown_event: если передан, polling выходит когда событие установлено.
+    skip_catchup: если True (по умолчанию), пропускает все закрытые свечи
+                  между last_seen и текущим моментом — бот стартует с
+                  первой следующей свечи. False — обрабатывает все
+                  пропущенные свечи по одной (полезно для backtest).
     """
     last_seen: Dict[str, pd.Timestamp] = {}
 
-    # Инициализируем last_seen до начала поллинга —
-    # берём последнюю закрытую свечу по каждому интервалу
     for interval in handlers:
         try:
             klines = await client.futures_klines(
                 symbol=symbol, interval=interval, limit=2
             )
             df = _klines_to_df(klines)
-            last_seen[interval] = df.iloc[-2].name
-            if logger:
-                logger.info(
-                    f"Polling init | {interval} last_seen={last_seen[interval]}"
-                )
+            if skip_catchup:
+                last_seen[interval] = df.iloc[-1].name
+                if logger:
+                    logger.info(
+                        f"Polling init | {interval} last_seen={last_seen[interval]} "
+                        f"(catch-up skipped, waiting for next candle)"
+                    )
+            else:
+                last_seen[interval] = df.iloc[-2].name
+                if logger:
+                    logger.info(
+                        f"Polling init | {interval} last_seen={last_seen[interval]}"
+                    )
         except Exception as e:
             if logger:
                 logger.error(f"Polling init error ({interval}): {e}")
