@@ -80,10 +80,10 @@ async function autoResetStale(control: any, timeoutMinutes: number): Promise<boo
 }
 
 async function countOpenPositions(): Promise<number> {
-  // e. Cчитаем явно открытые сделки ботов в БД.
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   const [res] = await db.select({ n: sql<number>`count(*)` })
     .from(tradesTable)
-    .where(eq(tradesTable.is_open, true));
+    .where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`);
   return Number(res?.n || 0);
 }
 
