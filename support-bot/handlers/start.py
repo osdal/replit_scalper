@@ -1,7 +1,7 @@
 import logging
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.types import Message
-from aiogram.filters import CommandStart, Text
+from aiogram.filters import CommandStart
 from keyboards.main import main_menu, reply_keyboard
 
 router = Router()
@@ -21,7 +21,7 @@ async def start_handler(message: Message):
     )
 
 
-@router.message(Text("🚀 Запустить бота"))
+@router.message(F.text == "🚀 Запустить бота")
 async def menu_button_handler(message: Message):
     await message.answer(
         "Главное меню:",
