@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import signal
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -22,7 +23,10 @@ from db_reporter import DbReporter
 from recovery_client import RecoveryClient
 from notifier import Notifier
 
-load_dotenv()
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_load = load_dotenv(os.path.join(_this_dir, "..", ".env")) or load_dotenv(os.path.join(_this_dir, ".env"))
+if not _load:
+    load_dotenv()
 
 HEARTBEAT_CANDLES = 3
 LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
@@ -323,7 +327,13 @@ async def _sync_position_on_start(
         return
 
     try:
-        positions = await client.futures_position_information(symbol=cfg.symbol)
+        positions = await asyncio.wait_for(
+            client.futures_position_information(symbol=cfg.symbol),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        log.error(f"[SYNC] Timeout fetching positions for {cfg.symbol}")
+        return
     except Exception as e:
         log.error(f"[SYNC] Failed to fetch positions: {e}")
         return
@@ -738,35 +748,48 @@ async def _run_live_or_paper(
     tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None, notifier=notifier)
     handler   = SignalHandler(cfg, log)
 
+    log.info("[STARTUP] Step 1: syncing position on start")
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log, recovery, notifier)
+    log.info("[STARTUP] Step 2: syncing done")
 
+    log.info("[STARTUP] Step 3: reporting initial heartbeat")
     await reporter.report_heartbeat(0)
+    log.info("[STARTUP] Step 4: heartbeat done")
 
     # Загружаем ранее отклонённые сделки из БД в очередь симуляции
+    log.info("[STARTUP] Step 5: loading pending rejected trades")
     loaded = await _load_pending_rejected(reporter, log)
     _rejected_sims.extend(loaded)
+    log.info(f"[STARTUP] Step 6: loaded {len(loaded)} rejected trades")
 
+    log.info("[STARTUP] Step 7: fetching klines for warm-up")
     df_buffer: pd.DataFrame = await get_recent_klines(
         client=client, symbol=cfg.symbol, interval=cfg.timeframe,
         limit=max(cfg.ema_slow * 3, 200),
     )
     df_buffer = calculate_indicators(df_buffer, cfg)
-    log.info(f"Loaded {len(df_buffer)} candles for warm-up ({cfg.timeframe})")
+    log.info(f"[STARTUP] Step 8: loaded {len(df_buffer)} candles for warm-up ({cfg.timeframe})")
 
     htf_buffer: pd.DataFrame = pd.DataFrame()
     if cfg.htf_enabled:
+        log.info("[STARTUP] Step 9: fetching HTF klines")
         htf_buffer = await get_recent_klines(
             client=client, symbol=cfg.symbol, interval=cfg.htf_timeframe,
             limit=max(cfg.htf_ema_slow * 3, 100),
         )
         htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
         trend = get_htf_trend_latest(htf_buffer)
-        log.info(f"Loaded {len(htf_buffer)} candles for HTF warm-up ({cfg.htf_timeframe}) | trend={trend}")
+        log.info(f"[STARTUP] Step 10: loaded {len(htf_buffer)} HTF candles | trend={trend}")
+    else:
+        log.info("[STARTUP] Step 9: HTF disabled")
 
+    log.info("[STARTUP] Step 11: starting candle polling")
     candle_count = [0]
+    last_candle_time = [time.time()]
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
+        last_candle_time[0] = time.time()
         _ = events  # capture events in closure
         try:
             new_row = pd.DataFrame([candle]).set_index("open_time")
@@ -1033,7 +1056,6 @@ async def _run_live_or_paper(
                 "volume_ma": signal.volume_ma,
                 "leverage": cfg.leverage,
             }
-            notifier.send_signal(signal_data)
             confirmed = await handler.confirm(signal)
             if not confirmed:
                 return
@@ -1141,6 +1163,7 @@ async def _run_live_or_paper(
                     except Exception as e:
                         log.warning(f"[RECOVERY] Position check failed ({e}) — proceeding cautiously")
 
+            notifier.send_signal(signal_data)
             result = await order_mgr.open_position(signal, recovery_target=recovery_target)
             if result is not None:
                 entry_price, qty = result[0], result[1]
@@ -1234,6 +1257,18 @@ async def _run_live_or_paper(
     check_task = asyncio.create_task(periodic_position_check())
     sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, log, shutdown_event))
 
+    async def _watchdog():
+        while not shutdown_event.is_set():
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                break
+            if time.time() - last_candle_time[0] > 900:
+                log.error("[WATCHDOG] No candles processed for 15 minutes, triggering shutdown")
+                shutdown_event.set()
+                break
+
+    watchdog_task = asyncio.create_task(_watchdog())
+
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
     handlers = {cfg.timeframe: on_candle}
@@ -1246,7 +1281,7 @@ async def _run_live_or_paper(
     )
     
     # Останавливаем фоновые задачи
-    for task in (check_task, sim_task):
+    for task in (check_task, sim_task, watchdog_task):
         if not task.done():
             task.cancel()
             try:

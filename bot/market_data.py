@@ -28,8 +28,21 @@ async def get_recent_klines(
     symbol: str,
     interval: str,
     limit: int = 200,
+    start_ms: Optional[int] = None,
 ) -> pd.DataFrame:
-    klines = await client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+    }
+    if start_ms is not None:
+        params["startTime"] = start_ms
+    try:
+        klines = await asyncio.wait_for(client.futures_klines(**params), timeout=30)
+    except asyncio.TimeoutError:
+        if logger:
+            logger.error(f"[POLL] get_recent_klines timeout for {symbol} {interval}")
+        raise
     return _klines_to_df(klines)
 
 
@@ -81,11 +94,19 @@ async def start_kline_polling(
     """
     last_seen: Dict[str, pd.Timestamp] = {}
 
+    if logger:
+        logger.info(f"[POLL] Starting init for {symbol} intervals={list(handlers.keys())}")
+
     for interval in handlers:
         try:
-            klines = await client.futures_klines(
-                symbol=symbol, interval=interval, limit=2
+            if logger:
+                logger.info(f"[POLL] Fetching init klines for {symbol} {interval}")
+            klines = await asyncio.wait_for(
+                client.futures_klines(symbol=symbol, interval=interval, limit=2),
+                timeout=30,
             )
+            if logger:
+                logger.info(f"[POLL] Got {len(klines)} klines for {symbol} {interval}")
             df = _klines_to_df(klines)
             if skip_catchup:
                 last_seen[interval] = df.iloc[-1].name
@@ -100,13 +121,17 @@ async def start_kline_polling(
                     logger.info(
                         f"Polling init | {interval} last_seen={last_seen[interval]}"
                     )
+        except asyncio.TimeoutError:
+            if logger:
+                logger.error(f"[POLL] init timeout for {symbol} {interval}")
+            raise
         except Exception as e:
             if logger:
                 logger.error(f"Polling init error ({interval}): {e}")
 
     if logger:
         logger.info(
-            f"Polling started | intervals={list(handlers.keys())} "
+            f"[POLL] Polling started | intervals={list(handlers.keys())} "
             f"every {poll_seconds}s"
         )
 
@@ -119,9 +144,14 @@ async def start_kline_polling(
         
         for interval, callback in handlers.items():
             try:
-                klines = await client.futures_klines(
-                    symbol=symbol, interval=interval, limit=2
+                if logger:
+                    logger.debug(f"[POLL] Fetching klines for {symbol} {interval}")
+                klines = await asyncio.wait_for(
+                    client.futures_klines(symbol=symbol, interval=interval, limit=2),
+                    timeout=30,
                 )
+                if logger:
+                    logger.debug(f"[POLL] Got {len(klines)} klines for {symbol} {interval}")
                 df = _klines_to_df(klines)
                 closed = df.iloc[-1]
                 candle_time = closed.name

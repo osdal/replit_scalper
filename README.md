@@ -566,6 +566,14 @@ where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`)
 ### 14.1 `monitor-opt.ps1`
 Мониторинг процесса оптимизации: проверяет, что `walk_forward_opt.py` запущен, и пишет статус.
 
+### 14.1a `monitor-bots.ps1`
+Мониторинг здоровья ботов каждые 6 часов с отчётом в Telegram:
+- Проверяет, что API (`/api/healthz`) доступен
+- Для каждой пары проверяет, что бот `is_running` и heartbeat свежий (≤15 мин)
+- **Проверяет поступление сигналов** за последние 6 часов через `/api/trades` (секция `[SIGNALS]` в отчёте)
+- **Обнаруживает зависшие боты**: сравнивает `current_price` бота с живой ценой Binance Futures (публичный API). Если цена заморожена или сильно отклоняется — бот `is_running`, но не обрабатывает свечи (секция `[Frozen price]`)
+- Scheduled task `MonitorBots`: ежедневно в 00:00, 06:00, 12:00, 18:00
+
 ### 14.2 `bot/apply_wf_results.py`
 Применяет результаты walk-forward оптимизации к `config_*.yaml` вручную (если нужно обойти `auto-optimize-daily.ps1`).
 
@@ -614,9 +622,21 @@ Daily-скрипт регистрируется в планировщике за
 - Время: ежедневно в 04:00
 - Действие: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\auto-optimize-daily.ps1"`
 
+Мониторинг ботов регистрируется в планировщике задач Windows:
+- Имя: `MonitorBots`
+- Время: ежедневно в 00:00, 06:00, 12:00, 18:00
+- Действие: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\monitor-bots.ps1"`
+
 ---
 
 ## 16. Changelog
+
+### 2026-08-11
+- **Исправлен сбой запуска ботов через API** (`bots.ts`): изменён `spawn` с `detached: true` + `proc.unref()` на `detached: false` + `stdio: ["ignore","ignore","ignore"]` + `windowsHide: true`. Раньше процесс умирал сразу после `start` (`success: true`, но 0 python-процессов). Windows-окна по-прежнему скрыты.
+- **Исправлен невалидный API-ключ Binance**: в `bot/.env` были плейсхолдеры `your_binance_api_key_here` вместо реальных ключей → боты возвращали `APIError(-2014)`. Обновлены реальные ключи в `bot/.env`.
+- **Исправлен `load_dotenv()` в `main.py`**: теперь ищет `.env` сначала в корне проекта (`../.env`), затем в `bot/.env`, а не только в рабочем каталоге.
+- **Доработан `monitor-bots.ps1`**: добавлена проверка поступления сигналов за последние 6 часов (`[SIGNALS]`) и детекция зависших ботов по «замороженной цене» (сравнение `current_price` бота с живой ценой Binance Futures). Scheduled task `MonitorBots`: 00:00/06:00/12:00/18:00.
+- Добавлены таймауты на запускные Binance-вызовы в `main.py`, `market_data.py`, `order_manager.py` (`asyncio.wait_for`, 30 сек).
 
 ### 2026-08-09
 - Добавлен `skip_catchup=True` в `market_data.py` — бот пропускает исторические свечи при старте
