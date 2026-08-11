@@ -83,7 +83,7 @@ class DbReporter:
                         return data.get("id")
                     self.log.debug(f"[REPORTER] rejected trade POST failed: {resp.status}")
                     return None
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except Exception as e:
                 self.log.debug(f"[REPORTER] rejected trade attempt {attempt+1} error: {e}")
                 await self._close_session()
                 if attempt < 2:
@@ -108,7 +108,7 @@ class DbReporter:
                     else:
                         self.log.debug(f"[REPORTER] trade POST failed: {resp.status}")
                         return None
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except Exception as e:
                 self.log.debug(f"[REPORTER] trade attempt {attempt+1} error: {e}")
                 await self._close_session()
                 if attempt < 2:
@@ -131,7 +131,7 @@ class DbReporter:
                         self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
                         return False
                     return True
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except Exception as e:
                 self.log.debug(f"[REPORTER] patch_trade attempt {attempt+1} error: {e}")
                 await self._close_session()
                 if attempt < 2:
@@ -152,7 +152,7 @@ class DbReporter:
                     if resp.status == 200:
                         return await resp.json()
                     return None
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except Exception as e:
                 self.log.debug(f"[REPORTER] get_trade attempt {attempt+1} error: {e}")
                 await self._close_session()
                 if attempt < 2:
@@ -196,7 +196,7 @@ class DbReporter:
                     if resp.status >= 400:
                         self.log.debug(f"[REPORTER] PATCH failed: {resp.status}")
                     return
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            except Exception as e:
                 self.log.debug(f"[REPORTER] PATCH attempt {attempt+1} error: {e}")
                 # Session likely stale after an API restart — drop and rebuild it.
                 await self._close_session()

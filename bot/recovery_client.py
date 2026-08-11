@@ -47,6 +47,9 @@ class RecoveryClient:
         self.symbol = symbol
         self.log = logger
         self._session: Optional["aiohttp.ClientSession"] = None
+        self.enabled = readRecoveryConfig().get("recovery_enabled", False)
+        if not self.enabled:
+            self.log.debug("[RECOVERY] Disabled via recovery_config.yaml")
 
     async def _get_session(self):
         if not HAS_AIOHTTP:
@@ -61,6 +64,8 @@ class RecoveryClient:
         Пытается захватить свободный долг перед открытием новой позиции.
         Возвращает: {"chainId": int|None, "debtAmount": float, "bonusPct": float, "enabled": bool}
         """
+        if not self.enabled:
+            return {"chainId": None, "debtAmount": 0.0, "bonusPct": 0.0, "enabled": False}
         default = {"chainId": None, "debtAmount": 0.0, "bonusPct": 0.0, "enabled": False}
         session = await self._get_session()
         if session is None:
@@ -84,6 +89,8 @@ class RecoveryClient:
 
     async def report(self, pnl: float, chain_id: Optional[int] = None) -> None:
         """Сообщает результат закрытой сделки."""
+        if not self.enabled:
+            return
         session = await self._get_session()
         if session is None:
             return
@@ -107,6 +114,8 @@ class RecoveryClient:
 
     async def release(self, chain_id: int) -> None:
         """Освобождает захваченную цепочку (переводит обратно в free)."""
+        if not self.enabled:
+            return
         session = await self._get_session()
         if session is None:
             return
@@ -130,6 +139,8 @@ class RecoveryClient:
         это значит, что в прошлой сессии бот упал между claim и открытием
         позиции (или потерял контроль), и цепочки зависли в locked.
         """
+        if not self.enabled:
+            return
         session = await self._get_session()
         if session is None:
             return

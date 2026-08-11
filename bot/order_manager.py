@@ -533,12 +533,15 @@ class OrderManager:
         try:
             g = {}
             for itype in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
-                income = await self.client.futures_income_history(
-                    symbol=symbol,
-                    incomeType=itype,
-                    startTime=entry_time_ms,
-                    endTime=exit_time_ms + 60000,
-                    limit=50,
+                income = await asyncio.wait_for(
+                    self.client.futures_income_history(
+                        symbol=symbol,
+                        incomeType=itype,
+                        startTime=entry_time_ms,
+                        endTime=exit_time_ms + 60000,
+                        limit=50,
+                    ),
+                    timeout=30,
                 )
                 if income:
                     g[itype] = sum(float(i.get("income", "0") or 0) for i in income)
@@ -552,15 +555,20 @@ class OrderManager:
                 #   net = gross + commission + funding  (both <= 0)
                 total_pnl = g["REALIZED_PNL"] + g["COMMISSION"] + g["FUNDING_FEE"]
                 return total_pnl if abs(total_pnl) > 0.0001 else 0.0
+        except asyncio.TimeoutError:
+            self.log.warning(f"[LIVE] Income API timeout for {symbol}")
         except Exception as e:
             self.log.warning(f"[LIVE] Income API error: {e}")
 
         # Fallback: parse userTrades for older trades (no income history)
         try:
-            trades = await self.client.futures_account_trades(
-                symbol=symbol,
-                startTime=entry_time_ms,
-                endTime=exit_time_ms + 60000,
+            trades = await asyncio.wait_for(
+                self.client.futures_account_trades(
+                    symbol=symbol,
+                    startTime=entry_time_ms,
+                    endTime=exit_time_ms + 60000,
+                ),
+                timeout=30,
             )
             if not trades:
                 return None
@@ -584,6 +592,9 @@ class OrderManager:
                     entry_commission += commission_usd
             total_pnl -= entry_commission
             return total_pnl if abs(total_pnl) > 0.0001 else None
+        except asyncio.TimeoutError:
+            self.log.warning(f"[LIVE] userTrades timeout for {symbol}")
+            return None
         except Exception as e:
             self.log.warning(f"[LIVE] userTrades fallback error: {e}")
             return None

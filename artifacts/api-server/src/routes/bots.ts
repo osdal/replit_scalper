@@ -268,8 +268,8 @@ router.post("/:symbol/start", async (req, res) => {
     const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === 'win32',
+      stdio: ["ignore", "ignore", "ignore"],
+      windowsHide: true,
       env: process.env,
     });
     botProcesses.set(symbol, proc);
