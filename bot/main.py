@@ -544,9 +544,9 @@ async def _sync_position_on_start(
     tracker.position = Position(
         direction=direction,
         entry_price=entry_price,
-        sl_price=round(sl_price, 4),
-        tp1_price=round(tp1_price, 4),
-        tp2_price=round(tp2_price, 4),
+        sl_price=round(sl_price, 8),
+        tp1_price=round(tp1_price, 8),
+        tp2_price=round(tp2_price, 8),
         total_qty=exchange_qty,
         remaining_qty=exchange_qty,
         entry_timestamp=entry_timestamp,
@@ -556,9 +556,9 @@ async def _sync_position_on_start(
     mock_signal = Signal(
         direction=direction,
         entry_price=entry_price,
-        sl_price=round(sl_price, 4),
-        tp1_price=round(tp1_price, 4),
-        tp2_price=round(tp2_price, 4),
+        sl_price=round(sl_price, 8),
+        tp1_price=round(tp1_price, 8),
+        tp2_price=round(tp2_price, 8),
         ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
         timestamp=entry_timestamp,
     )
@@ -1305,13 +1305,13 @@ async def _run_live_or_paper(
                         sl_dist = entry_price * sl_pct / 100
                         tp_dist = entry_price * tp_pct / 100
                         if signal.direction == "LONG":
-                            signal.sl_price = round(entry_price - sl_dist, 4)
-                            signal.tp1_price = round(entry_price + tp_dist, 4)
-                            signal.tp2_price = round(entry_price + tp_dist, 4)
+                            signal.sl_price = round(entry_price - sl_dist, 8)
+                            signal.tp1_price = round(entry_price + tp_dist, 8)
+                            signal.tp2_price = round(entry_price + tp_dist, 8)
                         else:
-                            signal.sl_price = round(entry_price + sl_dist, 4)
-                            signal.tp1_price = round(entry_price - tp_dist, 4)
-                            signal.tp2_price = round(entry_price - tp_dist, 4)
+                            signal.sl_price = round(entry_price + sl_dist, 8)
+                            signal.tp1_price = round(entry_price - tp_dist, 8)
+                            signal.tp2_price = round(entry_price - tp_dist, 8)
                         signal_data["sl_price"] = signal.sl_price
                         signal_data["tp1_price"] = signal.tp1_price
                         signal_data["tp2_price"] = signal.tp2_price
