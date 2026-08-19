@@ -78,7 +78,7 @@ class OrderManager:
 
     async def _adjust_price(self, price: float) -> float:
         if self.cfg.mode != "live":
-            return round(price, 4)
+            return round(price, 8)
         await self._get_symbol_filters()
         if self._tick_size:
             precision = max(0, round(-math.log10(self._tick_size)))
