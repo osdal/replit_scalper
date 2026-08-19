@@ -223,6 +223,7 @@ router.post("/sync-closed", async (_req, res) => {
             exit_reason: "exchange_closed",
             exit_price: exitPrice,
             pnl: pnl,
+            status: "closed",
           })
           .where(eq(tradesTable.id, trade.id));
         closed++;

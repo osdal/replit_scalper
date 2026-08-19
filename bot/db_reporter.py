@@ -65,6 +65,15 @@ class DbReporter:
             payload["ema_slow"] = signal_data.get("ema_slow")
             payload["volume"] = signal_data.get("volume")
             payload["volume_ma"] = signal_data.get("volume_ma")
+        payload["preset"] = signal_data.get("preset")
+        payload["rsi"] = signal_data.get("rsi")
+        payload["macd"] = signal_data.get("macd")
+        payload["macd_signal"] = signal_data.get("macd_signal")
+        payload["macd_hist"] = signal_data.get("macd_hist")
+        payload["bb_upper"] = signal_data.get("bb_upper")
+        payload["bb_middle"] = signal_data.get("bb_middle")
+        payload["bb_lower"] = signal_data.get("bb_lower")
+        payload["atr"] = signal_data.get("atr")
         return await self._post_trade(payload)
 
     async def _post_trade(self, trade: dict) -> Optional[int]:
@@ -73,9 +82,20 @@ class DbReporter:
             if session is None:
                 return None
             try:
+                payload = dict(trade)
+                payload.setdefault("symbol", self.symbol)
+                payload.setdefault("rsi", trade.get("rsi"))
+                payload.setdefault("macd", trade.get("macd"))
+                payload.setdefault("macd_signal", trade.get("macd_signal"))
+                payload.setdefault("macd_hist", trade.get("macd_hist"))
+                payload.setdefault("bb_upper", trade.get("bb_upper"))
+                payload.setdefault("bb_middle", trade.get("bb_middle"))
+                payload.setdefault("bb_lower", trade.get("bb_lower"))
+                payload.setdefault("atr", trade.get("atr"))
+                payload.setdefault("preset", trade.get("preset"))
                 async with session.post(
                     f"{API_URL}/trades",
-                    json=trade,
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status in (200, 201):
@@ -97,9 +117,19 @@ class DbReporter:
             if session is None:
                 return None
             try:
+                payload = dict(trade)
+                payload.setdefault("rsi", trade.get("rsi"))
+                payload.setdefault("macd", trade.get("macd"))
+                payload.setdefault("macd_signal", trade.get("macd_signal"))
+                payload.setdefault("macd_hist", trade.get("macd_hist"))
+                payload.setdefault("bb_upper", trade.get("bb_upper"))
+                payload.setdefault("bb_middle", trade.get("bb_middle"))
+                payload.setdefault("bb_lower", trade.get("bb_lower"))
+                payload.setdefault("atr", trade.get("atr"))
+                payload.setdefault("preset", trade.get("preset"))
                 async with session.post(
                     f"{API_URL}/trades",
-                    json=trade,
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status in (200, 201):

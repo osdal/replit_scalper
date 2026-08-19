@@ -97,6 +97,7 @@ router.post("/", async (_req, res) => {
                 exit_reason: pos.is_open ? null : pos.exit_reason,
                 exit_time: pos.exit_time,
                 is_open: pos.is_open,
+                status: pos.is_open ? "open" : "closed",
               })
               .where(eq(tradesTable.id, match.id));
             updated++;
@@ -193,6 +194,7 @@ function groupPositions(trades: any[], symbol: string) {
           entry_time:  new Date(entryTime).toISOString(),
           exit_time:   new Date(exitTime).toISOString(),
           is_open:     false,
+          status:      "closed",
           mode:        "live",
         });
         openQty  = 0;
@@ -224,6 +226,7 @@ function groupPositions(trades: any[], symbol: string) {
       entry_time:  new Date(entryTime).toISOString(),
       exit_time:   null,
       is_open:     true,
+      status:      "open",
       mode:        "live",
     });
   }

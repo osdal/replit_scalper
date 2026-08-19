@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 from config import load_config
 from logger import get_logger, get_events_logger
 from market_data import get_recent_klines, start_kline_polling
-from strategy import calculate_indicators, calculate_htf_indicators, get_signal, get_htf_trend_latest, Signal
+from strategy import calculate_indicators, calculate_htf_indicators, get_all_signals, get_htf_trend_latest, Signal
+from preset_config import get_preset_config
 from signal_handler import SignalHandler
 from order_manager import OrderManager
 from position_tracker import PositionTracker, Position
@@ -374,6 +375,7 @@ async def _sync_position_on_start(
                             "exit_reason": "SL",
                             "pnl": round(pnl_val, 4),
                             "exit_time": datetime.datetime.utcnow().isoformat(),
+                            "status": "closed",
                         }, timeout=5)
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
@@ -426,6 +428,7 @@ async def _sync_position_on_start(
                             "pnl": round(pnl_val, 4),
                             "exit_reason": "SL",
                             "exit_time": datetime.datetime.utcnow().isoformat(),
+                            "status": "closed",
                         }, timeout=5)
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
@@ -467,6 +470,7 @@ async def _sync_position_on_start(
                                     "is_open": False, "exit_reason": "SL",
                                     "pnl": round(pnl_val, 4),
                                     "exit_time": datetime.datetime.utcnow().isoformat(),
+                                    "status": "closed",
                                 }, timeout=5)
                                 log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
                                 if pnl_val < 0 and recovery:
@@ -786,6 +790,17 @@ async def _run_live_or_paper(
     log.info("[STARTUP] Step 11: starting candle polling")
     candle_count = [0]
     last_candle_time = [time.time()]
+    _recent_open_times = []
+    _last_signal_time = {}
+    _preset_open_counts: dict[str, int] = {}
+
+    def _on_position_opened(preset: str):
+        _preset_open_counts[preset] = _preset_open_counts.get(preset, 0) + 1
+
+    def _on_position_closed(preset: str):
+        cnt = _preset_open_counts.get(preset, 0)
+        if cnt > 0:
+            _preset_open_counts[preset] = cnt - 1
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
@@ -894,14 +909,17 @@ async def _run_live_or_paper(
                                 )
                                 pnl = await tracker.apply_hit_async(hit_type, current_price, candle_time_ms)
                                 closed_qty = pos.remaining_qty
+                                preset_before = pos.preset if hasattr(pos, 'preset') else None
+                                if preset_before and tracker.position is None:
+                                    _on_position_closed(preset_before)
                                 if hit_type == "TP2":
-                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
                                     notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "TP1":
-                                    notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
                                     notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "SL":
-                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl})
+                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
                                     notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction)
@@ -933,7 +951,10 @@ async def _run_live_or_paper(
                     if hit == "TP1" and not pos.is_recovery:
                         # TP1: биржа закрыла часть, бот только обновляет стейт и переносит SL
                         events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
+                        preset_before = getattr(pos, 'preset', None)
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+                        if preset_before and tracker.position is None:
+                            _on_position_closed(preset_before)
                         new_sl = tracker.position.sl_price if tracker.position else 'N/A'
                         events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
                         # Notify TP1 hit
@@ -943,17 +964,24 @@ async def _run_live_or_paper(
                             "entry_price": pos.entry_price,
                             "exit_price": current_price,
                             "pnl": pnl,
+                            "qty": pos.total_qty,
                         })
                         notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-                        await order_mgr.move_sl_to_breakeven(
-                            pos.direction, pos.entry_price,
-                            remaining_qty=tracker.position.remaining_qty if tracker.position else 0.0,
-                            tp2_price=pos.tp2_price,
-                        )
+                        # При полном закрытии по TP1 (tp1_close_pct=100, позиция уже
+                        # очищена) SL переносить некуда — только остаток переносим в breakeven.
+                        if tracker.position is not None and tracker.position.remaining_qty > 0.000001:
+                            await order_mgr.move_sl_to_breakeven(
+                                pos.direction, pos.entry_price,
+                                remaining_qty=tracker.position.remaining_qty,
+                                tp2_price=pos.tp2_price,
+                            )
                     elif hit == "TP1" and pos.is_recovery:
                         # Recovery TP1: закрытие 100% позиции, отмена ордеров, репорт
                         events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
+                        preset_before = getattr(pos, 'preset', None)
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+                        if preset_before and tracker.position is None:
+                            _on_position_closed(preset_before)
                         events.info(f"TP1_APPLY_RECOVERY | pnl={pnl}")
                         await order_mgr.cancel_all_tp_sl(pos.direction)
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
@@ -965,14 +993,17 @@ async def _run_live_or_paper(
                             "entry_price": pos.entry_price,
                             "exit_price": current_price,
                             "pnl": pnl,
+                            "qty": pos.total_qty,
                         })
                         notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                         await recovery.report_result(pnl)
                     elif hit == "TP2":
-                        # TP2: биржа закрыла остаток, бот фиксирует результат
                         events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
+                        preset_before = getattr(pos, 'preset', None)
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+                        if preset_before and tracker.position is None:
+                            _on_position_closed(preset_before)
                         events.info(f"TP2_APPLY | pnl={pnl}")
                         # Notify TP2 hit
                         notifier.send_event("tp2_hit", {
@@ -981,6 +1012,7 @@ async def _run_live_or_paper(
                             "entry_price": pos.entry_price,
                             "exit_price": current_price,
                             "pnl": pnl,
+                            "qty": pos.total_qty,
                         })
                         notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         # Отменяем оставшиеся ордера (SL если остался)
@@ -997,7 +1029,10 @@ async def _run_live_or_paper(
                     else:
                         # SL: биржа закрыла позицию
                         events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
+                        preset_before = getattr(pos, 'preset', None)
                         pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+                        if preset_before and tracker.position is None:
+                            _on_position_closed(preset_before)
                         events.info(f"SL_APPLY | pnl={pnl}")
                         # Notify SL hit
                         notifier.send_event("sl_hit", {
@@ -1006,6 +1041,7 @@ async def _run_live_or_paper(
                             "entry_price": pos.entry_price,
                             "exit_price": current_price,
                             "pnl": pnl,
+                            "qty": pos.total_qty,
                         })
                         notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                         # Отменяем оставшиеся ордера (TP1/TP2 если остались)
@@ -1032,15 +1068,36 @@ async def _run_live_or_paper(
                 log.debug(f"[GUARD] Position still open for {cfg.symbol} — skip new signal")
                 return
 
-            raw_signal = get_signal(df_buffer, cfg)
-            if raw_signal is None:
+            htf_trend = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else None
+            signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets)
+            if not signals:
                 return
 
-            if cfg.htf_enabled:
-                htf_trend = get_htf_trend_latest(htf_buffer)
-                if htf_trend is not None and raw_signal.direction != htf_trend:
-                    log.info(f"Signal {raw_signal.direction} BLOCKED by HTF | htf_trend={htf_trend}")
+            # Pick best signal by volume (strongest conviction)
+            signals.sort(key=lambda s: s.volume, reverse=True)
+            raw_signal = signals[0]
+
+            now = time.time()
+            if cfg.signal_cooldown_min > 0:
+                last_sig = _last_signal_time.get(cfg.symbol, 0)
+                if now - last_sig < cfg.signal_cooldown_min * 60:
+                    log.debug(f"[COOLDOWN] Skip signal for {cfg.symbol}: {now - last_sig:.0f}s < {cfg.signal_cooldown_min}m")
                     return
+
+            if cfg.max_open_per_cycle > 0:
+                cutoff = now - 3600
+                _recent_open_times[:] = [t for t in _recent_open_times if t > cutoff]
+                if len(_recent_open_times) >= cfg.max_open_per_cycle:
+                    log.debug(f"[CYCLE_LIMIT] Skip signal for {cfg.symbol}: {len(_recent_open_times)} opens in last 1h >= max_open_per_cycle={cfg.max_open_per_cycle}")
+                    return
+
+            # Per-preset limit check
+            preset_cfg = get_preset_config(raw_signal.preset)
+            max_per_preset = preset_cfg.get("max_per_preset", 3)
+            current_preset_count = _preset_open_counts.get(raw_signal.preset, 0)
+            if max_per_preset > 0 and current_preset_count >= max_per_preset:
+                log.debug(f"[PRESET_LIMIT] Skip {raw_signal.preset} for {cfg.symbol}: {current_preset_count} >= max_per_preset={max_per_preset}")
+                return
 
             signal = raw_signal
             signal_data = {
@@ -1050,12 +1107,79 @@ async def _run_live_or_paper(
                 "sl_price": signal.sl_price,
                 "tp1_price": signal.tp1_price,
                 "tp2_price": signal.tp2_price,
+                "preset": signal.preset,
                 "ema_fast": signal.ema_fast,
                 "ema_slow": signal.ema_slow,
                 "volume": signal.volume,
                 "volume_ma": signal.volume_ma,
+                "rsi": signal.rsi,
+                "macd": signal.macd,
+                "macd_signal": signal.macd_signal,
+                "macd_hist": signal.macd_hist,
+                "bb_upper": signal.bb_upper,
+                "bb_middle": signal.bb_middle,
+                "bb_lower": signal.bb_lower,
+                "atr": signal.atr,
                 "leverage": cfg.leverage,
             }
+
+            # Optional LLM validation
+            if getattr(cfg, "llm_enabled", False):
+                try:
+                    from llm_client import LLMClient, LLMConfig
+                    llm_cfg = LLMConfig(
+                        enabled=True,
+                        mock=getattr(cfg, "llm_mock", False),
+                        api_key=getattr(cfg, "llm_api_key", ""),
+                        model=getattr(cfg, "llm_model", "llama-3.1-70b-versatile"),
+                        fallback_models=getattr(cfg, "llm_fallback_models", ""),
+                        gemini_api_key=getattr(cfg, "gemini_api_key", ""),
+                        gemini_model=getattr(cfg, "gemini_model", "gemini-2.0-flash-exp"),
+                        groq_api_key=getattr(cfg, "groq_api_key", ""),
+                        groq_model=getattr(cfg, "groq_model", "groq/compound-mini"),
+                        confidence_threshold=getattr(cfg, "llm_confidence_threshold", 0.7),
+                        calls_per_min=getattr(cfg, "llm_calls_per_min", 20),
+                        per_symbol_cooldown_min=getattr(cfg, "llm_per_symbol_cooldown_min", 5),
+                        backoff_sec=getattr(cfg, "llm_backoff_sec", 60.0),
+                        short_backoff_sec=getattr(cfg, "llm_short_backoff_sec", 5.0),
+                        provider_retry_delay_sec=getattr(cfg, "llm_provider_retry_delay_sec", 1.0),
+                    )
+                    llm = LLMClient(llm_cfg)
+                    indicators = {
+                        "rsi": signal.rsi,
+                        "macd": signal.macd,
+                        "macd_hist": signal.macd_hist,
+                        "atr": signal.atr,
+                        "bb_lower": signal.bb_lower,
+                        "bb_upper": signal.bb_upper,
+                        "bb_middle": signal.bb_middle,
+                        "volume": signal.volume,
+                        "volume_ma": signal.volume_ma,
+                        "ema_fast": signal.ema_fast,
+                        "ema_slow": signal.ema_slow,
+                    }
+                    llm_result = await llm.validate(
+                        symbol=cfg.symbol,
+                        direction=signal.direction,
+                        preset=signal.preset,
+                        entry_price=signal.entry_price,
+                        sl_price=signal.sl_price,
+                        tp_price=signal.tp1_price,
+                        indicators=indicators,
+                    )
+                    if llm_result is False:
+                        log.info(f"[LLM] Signal REJECTED for {cfg.symbol} {signal.preset}")
+                        signal_data["reject_reason"] = "llm_reject"
+                        if reporter is not None:
+                            await reporter.report_rejected(signal_data, "llm_reject")
+                        return
+                    elif llm_result is True:
+                        log.info(f"[LLM] Signal APPROVED for {cfg.symbol} {signal.preset}")
+                    else:
+                        log.debug(f"[LLM] Signal SKIPPED (no providers) for {cfg.symbol} {signal.preset}")
+                except Exception as e:
+                    log.warning(f"[LLM] Validation error: {e} — proceeding without LLM")
+
             confirmed = await handler.confirm(signal)
             if not confirmed:
                 return
@@ -1163,21 +1287,44 @@ async def _run_live_or_paper(
                     except Exception as e:
                         log.warning(f"[RECOVERY] Position check failed ({e}) — proceeding cautiously")
 
-            notifier.send_signal(signal_data)
             result = await order_mgr.open_position(signal, recovery_target=recovery_target)
             if result is not None:
                 entry_price, qty = result[0], result[1]
+                signal_data["qty"] = qty
                 signal.entry_price = entry_price
                 is_recovery = recovery_target is not None
                 if is_recovery and len(result) > 2:
                     signal.tp1_price = result[2]
                     signal.tp2_price = result[2]  # no TP2 for recovery
+                # Apply per-preset TP/SL overrides (recovery keeps its own levels)
+                if not is_recovery:
+                    preset_cfg = get_preset_config(signal.preset)
+                    if preset_cfg.get("tp"):
+                        tp_pct = preset_cfg["tp"]
+                        sl_pct = preset_cfg.get("sl", cfg.sl_pct)
+                        sl_dist = entry_price * sl_pct / 100
+                        tp_dist = entry_price * tp_pct / 100
+                        if signal.direction == "LONG":
+                            signal.sl_price = round(entry_price - sl_dist, 4)
+                            signal.tp1_price = round(entry_price + tp_dist, 4)
+                            signal.tp2_price = round(entry_price + tp_dist, 4)
+                        else:
+                            signal.sl_price = round(entry_price + sl_dist, 4)
+                            signal.tp1_price = round(entry_price - tp_dist, 4)
+                            signal.tp2_price = round(entry_price - tp_dist, 4)
+                        signal_data["sl_price"] = signal.sl_price
+                        signal_data["tp1_price"] = signal.tp1_price
+                        signal_data["tp2_price"] = signal.tp2_price
                 await tracker.open_async(
                     signal, qty=qty,
                     is_recovery=is_recovery,
                     recovery_chain_id=chain_id,
                 )
-                events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
+                events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
+                notifier.send_signal(signal_data)
+                _recent_open_times.append(now)
+                _last_signal_time[cfg.symbol] = now
+                _on_position_opened(signal.preset)
             elif chain_id is not None:
                 log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
                 await recovery.release(chain_id=chain_id)
@@ -1236,7 +1383,10 @@ async def _run_live_or_paper(
                                     else:
                                         hit_type = "SL"
                                     candle_time_ms = int(__import__("time").time() * 1000)
+                                    preset_before = getattr(pos, 'preset', None)
                                     pnl = await tracker.apply_hit_async(hit_type, current_price or pos.entry_price, candle_time_ms)
+                                    if preset_before and tracker.position is None:
+                                        _on_position_closed(preset_before)
                                     await order_mgr.cancel_all_tp_sl(pos.direction)
                                     if pos.is_recovery:
                                         await recovery.release(chain_id=pos.recovery_chain_id)
@@ -1269,6 +1419,76 @@ async def _run_live_or_paper(
 
     watchdog_task = asyncio.create_task(_watchdog())
 
+    async def _time_profit_close_check():
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.sleep(1800)
+                if shutdown_event.is_set():
+                    break
+                if cfg.time_profit_close_hours <= 0:
+                    continue
+                if not tracker.has_open_position():
+                    continue
+                pos = tracker.position
+                if not pos or pos.closed or not pos.opened_at:
+                    continue
+                try:
+                    ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
+                    current_price = float(ticker.get("price", 0))
+                except Exception:
+                    continue
+                if current_price <= 0:
+                    continue
+                unrealized_pnl = pos.unrealized_pnl(current_price)
+                if unrealized_pnl <= 0:
+                    continue
+                try:
+                    opened_dt = datetime.datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                    age_hours = (datetime.datetime.now(datetime.timezone.utc) - opened_dt).total_seconds() / 3600
+                except (ValueError, AttributeError):
+                    continue
+                if age_hours < cfg.time_profit_close_hours:
+                    continue
+                log.info(
+                    f"[TIME_PROFIT] Closing profitable position | age={age_hours:.1f}h "
+                    f"pnl={unrealized_pnl:.4f} entry={pos.entry_price} price={current_price}"
+                )
+                if order_mgr:
+                    try:
+                        await order_mgr.cancel_all_tp_sl(pos.direction)
+                    except Exception:
+                        pass
+                    if cfg.mode == "live":
+                        try:
+                            await order_mgr.close_position_market(pos.direction)
+                        except Exception as e:
+                            log.warning(f"[TIME_PROFIT] Live close failed: {e}")
+                trade_id_before = tracker._trade_id
+                preset_before = getattr(pos, 'preset', None)
+                pnl = await tracker.apply_hit_async("TP2", current_price, int(time.time() * 1000))
+                if preset_before and tracker.position is None:
+                    _on_position_closed(preset_before)
+                if trade_id_before and reporter:
+                    try:
+                        await reporter.patch_trade(trade_id_before, {"exit_reason": "TIME_PROFIT"})
+                    except Exception:
+                        pass
+                if recovery:
+                    if pos.is_recovery:
+                        await recovery.release(chain_id=pos.recovery_chain_id)
+                        await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                    elif pnl < 0:
+                        await recovery.report(pnl=pnl)
+                    await recovery.report_result(pnl)
+                notifier.send_message(
+                    f"⏰ TIME_PROFIT {cfg.symbol} {pos.direction} | "
+                    f"Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}"
+                )
+            except Exception as e:
+                log.error(f"[TIME_PROFIT] Check error: {e}", exc_info=True)
+
+    time_profit_task = asyncio.create_task(_time_profit_close_check())
+
     log.info(f"Listening for candles | {cfg.symbol} {cfg.timeframe} ...")
 
     handlers = {cfg.timeframe: on_candle}
@@ -1281,7 +1501,7 @@ async def _run_live_or_paper(
     )
     
     # Останавливаем фоновые задачи
-    for task in (check_task, sim_task, watchdog_task):
+    for task in (check_task, sim_task, watchdog_task, time_profit_task):
         if not task.done():
             task.cancel()
             try:

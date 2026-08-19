@@ -293,3 +293,10 @@ ls C:\DATA\bots\replit_scalper\bot\logs\optimization_*20260807*.csv | measure | 
  Команда для запуска монитора:
 cd C:\DATA\bots\replit_scalper
 powershell -ExecutionPolicy Bypass -File auto-optimize-daily.ps1
+
+Рекомендация по порядку работ
+Сначала — TIME_PROFIT_CLOSE_HOURS (решает проблему зависших позиций)
+Потом — MAX_OPEN_PER_CYCLE + SIGNAL_COOLDOWN_MIN (3 строки конфига, много дают)
+Потом — новые индикаторы (RSI + MACD + BB + ATR) в strategy.py
+Потом — per-preset архитектура + свечные паттерны
+Опционально — LLM-фильтр

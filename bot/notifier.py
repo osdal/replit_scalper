@@ -186,16 +186,19 @@ class Notifier:
         tp1_price = signal_data.get('tp1_price', 'N/A')
         tp2_price = signal_data.get('tp2_price', 'N/A')
         leverage = signal_data.get('leverage', 'N/A')
+        qty = signal_data.get('qty', 'N/A')
 
         arrow = "▲" if direction == "LONG" else "▼"
         title = f"{arrow} {symbol} {direction}"
-        img = _build_base_card(title, [
+        rows = [
             ("Entry", entry_price),
             ("SL", sl_price),
             ("TP1", tp1_price),
             ("TP2", tp2_price),
             ("Leverage", f"{leverage}x"),
-        ])
+            ("Volume", qty),
+        ]
+        img = _build_base_card(title, rows)
         asyncio.create_task(self._send_photo_with_retry(img))
 
     def send_event(self, event_type: str, details: dict):
@@ -222,6 +225,9 @@ class Notifier:
             emoji = "❌" if event_type == "sl_hit" else "🎯"
             pct = self._price_pct(entry_price, exit_price, direction)
             pnl_str = f"{pct:+.2f}%" if pct is not None else "N/A"
+            pnl_dollars = details.get('pnl', 'N/A')
+            qty = details.get('qty', 'N/A')
+            pnl_dollars_str = f"{pnl_dollars:+.4f}" if isinstance(pnl_dollars, (int, float)) else str(pnl_dollars)
             # PnL: большой зелёный при прибыли, маленький красный при убытке
             is_profit = pct is not None and pct >= 0
             pnl_font = _font(52, bold=True) if is_profit else _font(34, bold=True)
@@ -230,10 +236,11 @@ class Notifier:
                 ("Direction", direction, None, ACCENT),
                 ("Entry", entry_price),
                 ("Exit", exit_price),
+                ("Volume", qty),
             ])
             # нарисуем крупный PnL ниже
             d = ImageDraw.Draw(img)
-            ptext = f"PnL {pnl_str}"
+            ptext = f"PnL {pnl_str} | ${pnl_dollars_str}"
             pb = d.textbbox((0, 0), ptext, font=pnl_font)
             pw = pb[2] - pb[0]
             d.text((WIDTH / 2 - pw / 2, 300), ptext, font=pnl_font, fill=pnl_color)

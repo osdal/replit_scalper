@@ -1,6 +1,6 @@
 # Trading Bot — документация
 
-Краткое описание: автоматический торговый бот для Binance Futures (USDT-M) и KuCoin Futures, реализующий стратегию EMA-кроссов с фильтром объёма, HTF-трендом и ADX. Поддерживает три режима работы (live, paper, backtest), систему компенсации убытков (recovery), оптимизацию параметров и веб-дашборд.
+Краткое описание: автоматический торговый бот для Binance Futures (USDT-M) и KuCoin Futures, реализующий мультипресетную стратегию (46 пресетов: EMA/SMA кроссы, RSI, MACD, Bollinger, Stochastic, VWAP, ATR, Supertrend, ADX, Ichimoku, свечные паттерны) с HTF-трендом, опциональным LLM-фильтром сигналов (Groq/Gemini/OpenRouter) и скриптом анализа результатов. Поддерживает три режима работы (live, paper, backtest), систему компенсации убытков (recovery), оптимизацию параметров и веб-дашборд.
 
 ---
 
@@ -12,10 +12,13 @@ replit_scalper/
 │   ├── main.py                   # Точка входа, главный цикл, on_candle
 │   ├── config.py                 # Config dataclass + YAML load/validation
 │   ├── market_data.py            # Загрузка свечей (REST polling каждые 10с)
-│   ├── strategy.py               # EMA cross + volume + HTF + ADX фильтры
+│   ├── strategy.py               # Signal + индикаторы + 46 пресетов
+│   ├── preset_config.py          # Per-preset TP/SL/лимиты (fallback-логика)
 │   ├── signal_handler.py         # Подтверждение сигналов (auto/semi-auto)
 │   ├── order_manager.py          # Расчёт qty, размещение ордеров, SL/TP, PnL sync
 │   ├── position_tracker.py       # Состояние позиции, хиты SL/TP, persistence
+│   ├── llm_client.py             # Опциональный LLM-фильтр (Groq/Gemini/OpenRouter)
+│   ├── analyze_trades.py         # Скрипт анализа результатов (ANALYTICS.md)
 │   ├── recovery_client.py        # HTTP клиент к recovery API (aiohttp)
 │   ├── backtester.py             # Движок бэктеста
 │   ├── optimizer.py              # Optuna-оптимизация параметров
@@ -126,6 +129,38 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 - **live** — реальная торговля на Binance Futures (USDT-M perpetual).
 - **paper** — симуляция без реальных ордеров (используется `paper_balance`).
 - **backtest** — прогон на исторических данных через `backtester.py`.
+
+### 2.7 Мультипресетная система
+
+Каждый бот может использовать **несколько пресетов** одновременно. Пресет — это независимая торговая стратегия со своими TP/SL и лимитами.
+
+- Список пресетов задаётся в `enabled_presets` в `config_<symbol>.yaml`.
+- Конфигурация пресетов — в `preset_config.py` (`PRESET_CONFIG`), всего **46 пресетов**:
+  - `ema_cross_long/short`, `sma_cross_long/short`
+  - `rsi_bounce_long/short`, `rsi_divergence_long/short`
+  - `macd_momentum_long/short`, `macd_hist_trend_long/short`
+  - `bb_bounce_long/short`, `bb_squeeze_breakout_long/short`
+  - `stoch_bounce_long/short`, `stoch_obos_long/short`
+  - `vwap_return_long/short`, `vwap_band_long/short`
+  - `atr_breakout_long/short`, `atr_trailing_long/short`
+  - `volume_spike_long/short`, `volume_trend_long/short`
+  - `supertrend_long/short`, `supertrend_reentry_long/short`
+  - `adx_trend_long/short`, `ichimoku_long/short`, `ichimoku_tk_cross_long/short`
+  - `morning_star`, `evening_star`, `engulfing_long/short`
+- `get_preset_config(name)` ищет конфиг: точное совпадение → fallback `name+_long/_short` → глобальные дефолты.
+- На каждой свече бот выбирает лучший сработавший пресет (по score), применяет его TP/SL.
+
+### 2.8 LLM-фильтр сигналов (опционально)
+
+При `llm_enabled: true` каждый сигнал перед подтверждением отправляется на проверку LLM.
+
+- **Провайдеры** (в порядке приоритета): Groq → Gemini → OpenRouter (с fallback-моделями).
+- **Circuit breaker**: после 429/ошибки провайдер блокируется на `llm_backoff_sec` (60с) или `llm_short_backoff_sec` (5с для 429).
+- **Rate limiter**: глобальный `llm_calls_per_min` (20/мин).
+- **Per-symbol cooldown**: `llm_per_symbol_cooldown_min` (5 мин) — не дёргать LLM по одной паре чаще.
+- **Mock-режим**: `llm_mock: true` всегда возвращает `approve`.
+- Результат: `True` — сигнал одобрен, `False` — отклонён (записывается как `rejected` с `reject_reason=llm_reject`), `None` — пропуск (провайдеры недоступны/cooldown), сигнал проходит.
+- Ошибки LLM не роняют бота — логируются, сигнал пропускается.
 
 ---
 
@@ -429,22 +464,22 @@ Stop-Process -Name node -ErrorAction SilentlyContinue
 
 ```yaml
 symbol: "BTCUSDT"
-timeframe: "5m"
+timeframe: "1m"              # основной таймфрейм (1m | 5m | 15m ...)
 leverage: 10
 risk_pct: 2.0
-sl_pct: 0.8
-tp1_pct: 0.4
-tp1_close_pct: 50          # % позиции для закрытия на TP1
-tp2_pct: 1.2
+sl_pct: 0.5                 # SL в % от entry (текущее значение)
+tp1_pct: 1.0                # TP1 в % от entry (текущее значение)
+tp1_close_pct: 100          # % позиции для закрытия на TP1
+tp2_pct: 1.0                # TP2 (>= tp1_pct)
 ema_fast: 12
 ema_slow: 26
 volume_ma_period: 20
 volume_multiplier: 1.5
 mode: "paper"               # live | paper | backtest
-auto_mode: false            # true = без подтверждения
+auto_mode: true             # true = без подтверждения
 backtest_start: "2026-01-01"
 backtest_end: "2026-06-01"
-paper_balance: 10000.0
+paper_balance: 1000.0
 log_file: "logs/bot.log"
 htf_enabled: true
 htf_timeframe: "1h"
@@ -457,15 +492,37 @@ fixed_notional_usd: 0.0
 fixed_risk_usd: 0.0
 adx_period: 14
 adx_threshold: 0.0          # 0 = отключён
+max_open_per_cycle: 0       # 0 = без лимита новых позиций за цикл
+signal_cooldown_min: 0      # кулдаун между сигналами (мин), 0 = выкл
+enabled_presets:            # активные пресеты (46 доступно)
+  - ema_cross_long
+  - ema_cross_short
+  # ... остальные пресеты
+# ── LLM-фильтр (опционально) ──────────────────────────────
+llm_enabled: false          # включить проверку сигналов LLM
+llm_mock: false             # true = всегда approve (тест)
+llm_api_key: ""             # OpenRouter
+llm_model: "llama-3.1-70b-versatile"
+llm_fallback_models: ""
+llm_confidence_threshold: 0.7
+llm_calls_per_min: 20
+llm_per_symbol_cooldown_min: 5
+llm_backoff_sec: 60.0
+llm_short_backoff_sec: 5.0
+llm_provider_retry_delay_sec: 1.0
+gemini_api_key: ""
+gemini_model: "gemini-2.0-flash-exp"
+groq_api_key: ""
+groq_model: "groq/compound-mini"
 ```
 
 ### 10.2 Recovery конфиг (`bot/recovery_config.yaml`)
 
 ```yaml
-recovery_enabled: true
+recovery_enabled: false     # текущее состояние
 recovery_bonus_pct: 50
 recovery_max_pct: 50
-max_positions: 2
+max_positions: 100000       # глобальный лимит позиций (большое число = без лимита; 0 НЕ работает — сервер падает в дефолт 2)
 loss_streak_trigger: 2
 loss_pause_signals: 3
 pause_timeout_minutes: 120
@@ -563,10 +620,26 @@ where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`)
 
 ## 14. Вспомогательные скрипты
 
-### 14.1 `monitor-opt.ps1`
+### 14.1 `bot/analyze_trades.py`
+Скрипт анализа результатов: читает сделки из SQLite (`data/bot.db`) и генерирует отчёт в `ANALYTICS.md`.
+
+```powershell
+cd C:\DATA\bots\replit_scalper\bot
+python analyze_trades.py
+```
+
+Разделы отчёта:
+- **Overall Statistics** — Win Rate, PnL, Profit Factor, Max Drawdown, consecutive wins/losses
+- **Per Coin Statistics** — по каждой монете: trades, wins, losses, win%, PnL, rejected
+- **Per Preset Statistics** — по каждому пресету: WR, PnL, avg win/loss, best/worst, avg hold
+- **Per Preset Configuration vs Performance** — настроенный TP/SL vs факт, статус `[OK]/[WARN]/[POOR]`
+- **Hourly Distribution** и **Preset Performance by Hour** — производительность по часам
+- **LLM Statistics** — отклонения по пресетам
+
+### 14.2 `monitor-opt.ps1`
 Мониторинг процесса оптимизации: проверяет, что `walk_forward_opt.py` запущен, и пишет статус.
 
-### 14.1a `monitor-bots.ps1`
+### 14.2a `monitor-bots.ps1`
 Мониторинг здоровья ботов каждые 6 часов с отчётом в Telegram:
 - Проверяет, что API (`/api/healthz`) доступен
 - Для каждой пары проверяет, что бот `is_running` и heartbeat свежий (≤15 мин)
@@ -574,16 +647,16 @@ where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`)
 - **Обнаруживает зависшие боты**: сравнивает `current_price` бота с живой ценой Binance Futures (публичный API). Если цена заморожена или сильно отклоняется — бот `is_running`, но не обрабатывает свечи (секция `[Frozen price]`)
 - Scheduled task `MonitorBots`: ежедневно в 00:00, 06:00, 12:00, 18:00
 
-### 14.2 `bot/apply_wf_results.py`
+### 14.3 `bot/apply_wf_results.py`
 Применяет результаты walk-forward оптимизации к `config_*.yaml` вручную (если нужно обойти `auto-optimize-daily.ps1`).
 
-### 14.3 `bot/apply_all_opt.py`
+### 14.4 `bot/apply_all_opt.py`
 Массовое применение оптимизации ко всем парам.
 
-### 14.4 `bot/apply_margin_pct.py`
+### 14.5 `bot/apply_margin_pct.py`
 Применяет `margin_pct` к конфигам.
 
-### 14.5 `scripts/check_positions.py`
+### 14.6 `scripts/check_positions.py`
 Проверяет открытые позиции на бирже и сравнивает с состоянием бота.
 
 ### 14.6 `scripts/check_signals_now.py`
@@ -630,6 +703,15 @@ Daily-скрипт регистрируется в планировщике за
 ---
 
 ## 16. Changelog
+
+### 2026-08-19
+- **Добавлен LLM-фильтр сигналов** (`llm_client.py`): провайдеры Groq/Gemini/OpenRouter (с fallback-моделями), circuit breaker (429/ошибки), rate limiter, per-symbol cooldown, mock-режим. Интегрирован в `main.py` после лимитов и до `confirm()`. Поля `llm_*` добавлены в `Config` и все `config_*.yaml` (по умолчанию `llm_enabled: false`).
+- **Добавлен скрипт анализа** (`analyze_trades.py`): читает `data/bot.db`, генерирует `ANALYTICS.md` — overall/per-coin/per-preset статистика, hourly distribution, LLM-статистика.
+- **Добавлена колонка `preset`** в таблицу `trades`; `db_reporter.py` и `position_tracker.py` теперь пишут `preset` и индикаторы (rsi/macd/bb/atr) в сделки, включая rejected.
+- **Включены все 46 пресетов** во всех `config_*.yaml` (`enabled_presets`).
+- **TP=1%, SL=0.5%** установлены во всех конфигах (`tp1_pct`, `tp2_pct`, `sl_pct`). Исправлены `config_bnb/btc/eth.yaml`, где `tp2_pct < tp1_pct` ломал валидацию.
+- **Сняты лимиты на количество сделок**: `max_open_per_cycle: 0` (без лимита), `max_per_preset: 0` в `preset_config.py`, `max_positions: 100000` в `recovery_config.yaml` (0 не работает — сервер падает в дефолт 2).
+- **Основной таймфрейм переключён на `1m`** во всех конфигах (был `5m`); HTF остался `1h`.
 
 ### 2026-08-11
 - **Исправлен сбой запуска ботов через API** (`bots.ts`): изменён `spawn` с `detached: true` + `proc.unref()` на `detached: false` + `stdio: ["ignore","ignore","ignore"]` + `windowsHide: true`. Раньше процесс умирал сразу после `start` (`success: true`, но 0 python-процессов). Windows-окна по-прежнему скрыты.

@@ -35,6 +35,33 @@ class Config:
     fixed_risk_usd: float = 0.0     # Fixed loss in USD at SL (0 = use risk_pct of balance)
     adx_period: int = 14              # ADX период для расчёта силы тренда
     adx_threshold: float = 0.0        # ADX порог: сигналы при adx >= threshold (0 = фильтр отключён; тип. 20–25)
+    time_profit_close_hours: float = 0.0  # Принудительно закрыть прибыльную позицию старше N часов (0 = выкл)
+    max_open_per_cycle: int = 1       # Макс. новых позиций за цикл (0 = без лимита)
+    signal_cooldown_min: int = 0      # Кулдаун между сигналами на один символ в минутах (0 = выкл)
+    rsi_period: int = 14              # RSI период (0 = выкл)
+    rsi_low: int = 30                 # RSI low threshold для LONG
+    rsi_high: int = 70                # RSI high threshold для SHORT
+    macd_fast: int = 12               # MACD fast EMA
+    macd_slow: int = 26               # MACD slow EMA
+    macd_signal: int = 9              # MACD signal line
+    bb_period: int = 20               # Bollinger Bands период
+    bb_std: float = 2.0               # Bollinger Bands стандартное отклонение
+    enabled_presets: list[str] = None  # Список активных пресетов (None = только ema_cross)
+    llm_enabled: bool = False         # Включить LLM проверку сигналов
+    llm_mock: bool = False            # Мок-режим LLM (возвращает True всегда)
+    llm_api_key: str = ""             # API ключ OpenRouter (основной)
+    llm_model: str = "llama-3.1-70b-versatile"
+    llm_fallback_models: str = ""
+    llm_confidence_threshold: float = 0.7
+    llm_calls_per_min: int = 20
+    llm_per_symbol_cooldown_min: int = 5
+    llm_backoff_sec: float = 60.0
+    llm_short_backoff_sec: float = 5.0
+    llm_provider_retry_delay_sec: float = 1.0
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash-exp"
+    groq_api_key: str = ""
+    groq_model: str = "groq/compound-mini"
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")
@@ -54,6 +81,8 @@ class Config:
             raise ValueError("ema_fast must be less than ema_slow")
         if self.htf_enabled and self.htf_ema_fast >= self.htf_ema_slow:
             raise ValueError("htf_ema_fast must be less than htf_ema_slow")
+        if self.enabled_presets is None:
+            self.enabled_presets = ["ema_cross_long", "ema_cross_short"]
 
 
 def load_config(path: str = "config.yaml") -> Config:

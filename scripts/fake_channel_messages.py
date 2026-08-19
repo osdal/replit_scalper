@@ -27,6 +27,7 @@ async def main():
             "tp1_price": 66000.0,
             "tp2_price": 67000.0,
             "leverage": 10,
+            "qty": 0.005,
         }),
         ("event", {
             "event_type": "tp1_hit",
@@ -35,6 +36,7 @@ async def main():
             "entry_price": 65000.0,
             "exit_price": 66000.0,
             "pnl": 1.54,
+            "qty": 0.005,
         }),
         ("signal", {
             "symbol": "ETHUSDT",
@@ -44,6 +46,7 @@ async def main():
             "tp1_price": 2400.0,
             "tp2_price": 2300.0,
             "leverage": 5,
+            "qty": 0.02,
         }),
         ("event", {
             "event_type": "tp2_hit",
@@ -52,6 +55,7 @@ async def main():
             "entry_price": 2500.0,
             "exit_price": 2300.0,
             "pnl": 8.0,
+            "qty": 0.02,
         }),
         ("signal", {
             "symbol": "SOLUSDT",
@@ -61,6 +65,7 @@ async def main():
             "tp1_price": 150.0,
             "tp2_price": 155.0,
             "leverage": 10,
+            "qty": 1.0,
         }),
         ("event", {
             "event_type": "tp1_hit",
@@ -69,6 +74,7 @@ async def main():
             "entry_price": 145.0,
             "exit_price": 150.0,
             "pnl": 3.45,
+            "qty": 1.0,
         }),
         ("signal", {
             "symbol": "BNBUSDT",
@@ -78,6 +84,7 @@ async def main():
             "tp1_price": 595.0,
             "tp2_price": 610.0,
             "leverage": 5,
+            "qty": 0.5,
         }),
         ("event", {
             "event_type": "tp1_hit",
@@ -86,6 +93,7 @@ async def main():
             "entry_price": 580.0,
             "exit_price": 595.0,
             "pnl": 2.59,
+            "qty": 0.5,
         }),
         ("signal", {
             "symbol": "XRPUSDT",
@@ -95,6 +103,7 @@ async def main():
             "tp1_price": 0.60,
             "tp2_price": 0.58,
             "leverage": 10,
+            "qty": 1000.0,
         }),
         ("event", {
             "event_type": "tp1_hit",
@@ -103,6 +112,7 @@ async def main():
             "entry_price": 0.62,
             "exit_price": 0.60,
             "pnl": 3.23,
+            "qty": 1000.0,
         }),
         # Negative trades
         ("signal", {
@@ -113,6 +123,7 @@ async def main():
             "tp1_price": 0.078,
             "tp2_price": 0.081,
             "leverage": 10,
+            "qty": 500.0,
         }),
         ("event", {
             "event_type": "sl_hit",
@@ -121,6 +132,7 @@ async def main():
             "entry_price": 0.075,
             "exit_price": 0.073,
             "pnl": -2.67,
+            "qty": 500.0,
         }),
         ("signal", {
             "symbol": "KASUSDT",
@@ -130,6 +142,7 @@ async def main():
             "tp1_price": 0.115,
             "tp2_price": 0.11,
             "leverage": 5,
+            "qty": 2000.0,
         }),
         ("event", {
             "event_type": "sl_hit",
@@ -138,6 +151,7 @@ async def main():
             "entry_price": 0.12,
             "exit_price": 0.122,
             "pnl": -1.67,
+            "qty": 2000.0,
         }),
         ("signal", {
             "symbol": "SUIUSDT",
@@ -147,6 +161,7 @@ async def main():
             "tp1_price": 1.08,
             "tp2_price": 1.12,
             "leverage": 5,
+            "qty": 100.0,
         }),
         ("event", {
             "event_type": "sl_hit",
@@ -155,6 +170,7 @@ async def main():
             "entry_price": 1.05,
             "exit_price": 1.03,
             "pnl": -1.90,
+            "qty": 100.0,
         }),
         ("signal", {
             "symbol": "AVAXUSDT",
@@ -164,6 +180,7 @@ async def main():
             "tp1_price": 32.0,
             "tp2_price": 30.0,
             "leverage": 5,
+            "qty": 5.0,
         }),
         ("event", {
             "event_type": "sl_hit",
@@ -172,6 +189,7 @@ async def main():
             "entry_price": 35.0,
             "exit_price": 36.0,
             "pnl": -2.86,
+            "qty": 5.0,
         }),
     ]
 

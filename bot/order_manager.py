@@ -472,6 +472,32 @@ class OrderManager:
             self.log.warning(f"[LIVE] Could not close dust: {e}")
             return False
 
+    async def close_position_market(self, direction: str) -> bool:
+        """Закрывает позицию рыночным ордером (reduceOnly)."""
+        if self.cfg.mode != "live" or not self.client:
+            return False
+        try:
+            real_qty = await self._get_real_position_qty(direction)
+            if real_qty <= 0.000001:
+                return False
+            await self.cancel_all_tp_sl(direction)
+            await asyncio.sleep(1.0)
+            side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+            step_size = self._step_size if self._step_size else 0.001
+            qty = _round_step(real_qty, step_size)
+            await self.client.futures_create_order(
+                symbol=self.cfg.symbol,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+                reduceOnly=True,
+            )
+            self.log.info(f"[LIVE] Force closed | {direction} qty={qty}")
+            return True
+        except Exception as e:
+            self.log.warning(f"[LIVE] Force close failed: {e}")
+            return False
+
     async def move_sl_to_breakeven(
         self, direction: str, entry_price: float,
         remaining_qty: float = 0.0, tp2_price: float = 0.0

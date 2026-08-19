@@ -299,16 +299,22 @@ def run_backtest(pair: str, params: dict, start: str, end: str) -> dict:
         "htf_ema_slow": int(params.get("htf_ema_slow", base_config.get("htf_ema_slow", 31))),
         "ema_fast": int(params.get("ema_fast", base_config.get("ema_fast", 10))),
         "ema_slow": int(params.get("ema_slow", base_config.get("ema_slow", 30))),
-        "sl_pct": float(params.get("sl_pct", base_config.get("sl_pct", 1.0))),
-        "tp1_pct": float(params.get("tp1_pct", base_config.get("tp1_pct", 0.5))),
-        "tp2_pct": float(params.get("tp2_pct", base_config.get("tp2_pct", 1.0))),
-        "volume_multiplier": float(params.get("volume_multiplier", base_config.get("volume_multiplier", 1.5))),
-        "tp1_close_pct": float(params.get("tp1_close_pct", base_config.get("tp1_close_pct", 50))),
-        "risk_pct": float(params.get("risk_pct", base_config.get("risk_pct", 3.0))),
         "adx_period": base_config.get("adx_period", 14),
         "adx_threshold": base_config.get("adx_threshold", 20.0),
         "recovery_max_position_pct": base_config.get("recovery_max_position_pct", 100.0),
     }
+    # TP = 2x SL single-level scheme, full close at TP1 (must match apply_params_to_config
+    # and the live bots). Deriving tp1/tp2 from sl guarantees the backtest is optimised
+    # under the SAME RR 2:1 that is actually applied to configs.
+    wf_sl = float(params.get("sl_pct", base_config.get("sl_pct", 1.0)))
+    wf_tp = round(min(wf_sl * 2, 3.0), 2)
+    config_overrides["sl_pct"] = wf_sl
+    config_overrides["tp1_pct"] = wf_tp
+    config_overrides["tp2_pct"] = wf_tp
+    config_overrides["tp1_close_pct"] = 100
+    # volume_multiplier / risk_pct still taken from params
+    config_overrides["volume_multiplier"] = float(params.get("volume_multiplier", base_config.get("volume_multiplier", 1.5)))
+    config_overrides["risk_pct"] = float(params.get("risk_pct", base_config.get("risk_pct", 3.0)))
 
     payload = {
         "symbol": pair,
@@ -511,15 +517,22 @@ def apply_params_to_config(pair: str, params: dict):
 
     content = config_path.read_text(encoding="utf-8")
 
+    # TP = 2x SL single-level scheme (full close at TP1, no TP1/TP2 split).
+    # sl_pct is optimized independently; tp1/tp2 are derived so the take-profit
+    # is always exactly twice the stop-loss and closes 100% at once. This keeps
+    # the scheme consistent across daily re-optimizations.
+    sl_pct = float(params.get('sl_pct', '1.0'))
+    tp_pct = round(min(sl_pct * 2, 3.0), 2)  # TP = 2 * SL, cap 3%
+
     # Update numeric params
     replacements = {
         r"ema_fast: \d+": f"ema_fast: {params.get('ema_fast', '11')}",
         r"ema_slow: \d+": f"ema_slow: {params.get('ema_slow', '15')}",
-        r"sl_pct: [\d.]+": f"sl_pct: {params.get('sl_pct', '1.0')}",
-        r"tp1_pct: [\d.]+": f"tp1_pct: {params.get('tp1_pct', '0.5')}",
-        r"tp2_pct: [\d.]+": f"tp2_pct: {params.get('tp2_pct', '1.0')}",
+        r"sl_pct: [\d.]+": f"sl_pct: {sl_pct}",
+        r"tp1_pct: [\d.]+": f"tp1_pct: {tp_pct}",
+        r"tp2_pct: [\d.]+": f"tp2_pct: {tp_pct}",
         r"volume_multiplier: [\d.]+": f"volume_multiplier: {params.get('volume_multiplier', '1.5')}",
-        r"tp1_close_pct: \d+": f"tp1_close_pct: {params.get('tp1_close_pct', '50')}",
+        r"tp1_close_pct: \d+": "tp1_close_pct: 100",
         r"risk_pct: [\d.]+": f"risk_pct: {params.get('risk_pct', '3.0')}",
     }
 
