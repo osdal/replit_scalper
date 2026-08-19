@@ -1,28 +1,101 @@
+max_open_per_cycle: 0
+enabled_presets:
+  - ema_cross_long
+  - ema_cross_short
+  - sma_cross_long
+  - sma_cross_short
+  - rsi_bounce_long
+  - rsi_bounce_short
+  - rsi_divergence_long
+  - rsi_divergence_short
+  - macd_momentum_long
+  - macd_momentum_short
+  - macd_hist_trend_long
+  - macd_hist_trend_short
+  - bb_bounce_long
+  - bb_bounce_short
+  - bb_squeeze_breakout_long
+  - bb_squeeze_breakout_short
+  - stoch_bounce_long
+  - stoch_bounce_short
+  - stoch_obos_long
+  - stoch_obos_short
+  - vwap_return_long
+  - vwap_return_short
+  - vwap_band_long
+  - vwap_band_short
+  - atr_breakout_long
+  - atr_breakout_short
+  - atr_trailing_long
+  - atr_trailing_short
+  - volume_spike_long
+  - volume_spike_short
+  - volume_trend_long
+  - volume_trend_short
+  - supertrend_long
+  - supertrend_short
+  - supertrend_reentry_long
+  - supertrend_reentry_short
+  - adx_trend_long
+  - adx_trend_short
+  - ichimoku_long
+  - ichimoku_short
+  - ichimoku_tk_cross_long
+  - ichimoku_tk_cross_short
+  - morning_star
+  - evening_star
+  - engulfing_long
+  - engulfing_short
+rsi_period: 14
+rsi_low: 30
+rsi_high: 70
+macd_fast: 12
+macd_slow: 26
+macd_signal: 9
+bb_period: 20
+bb_std: 2.0
+signal_cooldown_min: 0
+time_profit_close_hours: 0
 adx_threshold: 20.0
 auto_mode: true
 backtest_end: '2026-06-08'
 backtest_start: '2026-05-01'
-ema_fast: 7
-ema_slow: 24
+ema_fast: 15
+ema_slow: 44
 fixed_notional_usd: 0
 fixed_qty: 0.0
-fixed_risk_usd: 0
-htf_ema_fast: 7
-htf_ema_slow: 24
+fixed_risk_usd: 0.5
+htf_ema_fast: 15
+htf_ema_slow: 44
 htf_enabled: true
 htf_timeframe: 1h
 leverage: 100
 log_file: logs/xrp.log
-margin_pct: 10
-mode: live
+margin_pct: 0
+mode: paper
 paper_balance: 1000.0
 risk_pct: 3.0
-sl_pct: 0.6000000000000001
+sl_pct: 0.5
 symbol: XRPUSDT
-timeframe: 5m
-tp1_close_pct: 40
-tp1_pct: 0.65
-tp2_pct: 2.2
+timeframe: 1m
+tp1_close_pct: 100
+tp1_pct: 1.0
+tp2_pct: 1.0
 volume_ma_period: 20
 volume_multiplier: 1.2
-
+# LLM filter (optional)
+llm_enabled: false
+llm_mock: false
+llm_api_key: ""
+llm_model: "llama-3.1-70b-versatile"
+llm_fallback_models: ""
+llm_confidence_threshold: 0.7
+llm_calls_per_min: 20
+llm_per_symbol_cooldown_min: 5
+llm_backoff_sec: 60.0
+llm_short_backoff_sec: 5.0
+llm_provider_retry_delay_sec: 1.0
+gemini_api_key: ""
+gemini_model: "gemini-2.0-flash-exp"
+groq_api_key: ""
+groq_model: "groq/compound-mini"

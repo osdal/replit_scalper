@@ -39,8 +39,15 @@ class Position:
     entry_ema_slow: float = 0.0
     entry_volume: float = 0.0
     entry_volume_ma: float = 0.0
+    entry_rsi: float = 0.0
+    entry_macd_hist: float = 0.0
+    entry_bb_lower: float = 0.0
+    entry_bb_upper: float = 0.0
+    entry_atr: float = 0.0
+    preset: str = "ema_cross"
     is_recovery: bool = False       # True если это компенсирующая сделка
     recovery_chain_id: Optional[int] = None
+    opened_at: Optional[str] = None  # ISO timestamp when position was opened (for TIME_PROFIT_CLOSE_HOURS)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -84,9 +91,16 @@ class PositionTracker:
             "entry_ema_slow":  p.entry_ema_slow,
             "entry_volume":    p.entry_volume,
             "entry_volume_ma": p.entry_volume_ma,
+            "entry_rsi": p.entry_rsi,
+            "entry_macd_hist": p.entry_macd_hist,
+            "entry_bb_lower": p.entry_bb_lower,
+            "entry_bb_upper": p.entry_bb_upper,
+            "entry_atr": p.entry_atr,
+            "preset": p.preset,
             "is_recovery":     p.is_recovery,
             "recovery_chain_id": p.recovery_chain_id,
             "trade_id":        self._trade_id,
+            "opened_at":       p.opened_at,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -122,8 +136,15 @@ class PositionTracker:
                 entry_ema_slow=data.get("entry_ema_slow", 0.0),
                 entry_volume=data.get("entry_volume", 0.0),
                 entry_volume_ma=data.get("entry_volume_ma", 0.0),
+                entry_rsi=data.get("entry_rsi", 0.0),
+                entry_macd_hist=data.get("entry_macd_hist", 0.0),
+                entry_bb_lower=data.get("entry_bb_lower", 0.0),
+                entry_bb_upper=data.get("entry_bb_upper", 0.0),
+                entry_atr=data.get("entry_atr", 0.0),
+                preset=data.get("preset", "ema_cross"),
                 is_recovery=data.get("is_recovery", False),
                 recovery_chain_id=data.get("recovery_chain_id"),
+                opened_at=data.get("opened_at"),
             )
             self._trade_id = data.get("trade_id")
             self.log.info(
@@ -163,6 +184,15 @@ class PositionTracker:
                 "ema_slow":    signal.ema_slow,
                 "volume":      signal.volume,
                 "volume_ma":   signal.volume_ma,
+                "rsi":         signal.rsi,
+                "macd":        signal.macd,
+                "macd_signal": signal.macd_signal,
+                "macd_hist":   signal.macd_hist,
+                "bb_upper":    signal.bb_upper,
+                "bb_middle":   signal.bb_middle,
+                "bb_lower":    signal.bb_lower,
+                "atr":         signal.atr,
+                "preset":      signal.preset,
             }
             trade_id = await self.reporter.report_trade(trade_data)
             if trade_id:
@@ -222,6 +252,7 @@ class PositionTracker:
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
+                "status":      "closed",
             })
             if not success:
                 # Запись не найдена (например после очистки БД) — создаём новую
@@ -238,6 +269,7 @@ class PositionTracker:
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
                     "is_open":     False,
+                    "status":      "closed",
                     "mode":        self.cfg.mode,
                 }
                 await self.reporter.report_trade(new_trade)
@@ -271,6 +303,7 @@ class PositionTracker:
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
+                "status":      "closed",
             })
             if not success:
                 # Запись не найдена (например после очистки БД) — создаём новую
@@ -287,6 +320,7 @@ class PositionTracker:
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
                     "is_open":     False,
+                    "status":      "closed",
                     "mode":        self.cfg.mode,
                 }
                 await self.reporter.report_trade(new_trade)
@@ -320,8 +354,15 @@ class PositionTracker:
             entry_ema_slow=signal.ema_slow,
             entry_volume=signal.volume,
             entry_volume_ma=signal.volume_ma,
+            entry_rsi=signal.rsi,
+            entry_macd_hist=signal.macd_hist,
+            entry_bb_lower=signal.bb_lower,
+            entry_bb_upper=signal.bb_upper,
+            entry_atr=signal.atr,
+            preset=signal.preset,
             is_recovery=is_recovery,
             recovery_chain_id=recovery_chain_id,
+            opened_at=datetime.datetime.utcnow().isoformat() if signal.timestamp is None else str(signal.timestamp).replace(" ", "T"),
         )
         self._trade_id = None
         self._save_state()
@@ -330,7 +371,9 @@ class PositionTracker:
             f"Position opened{tag} | {signal.direction} | entry={signal.entry_price} "
             f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} qty={qty} | "
             f"indicators: ema_fast={signal.ema_fast} ema_slow={signal.ema_slow} "
-            f"volume={signal.volume} volume_ma={signal.volume_ma}"
+            f"volume={signal.volume} volume_ma={signal.volume_ma} "
+            f"rsi={signal.rsi:.1f} macd_hist={signal.macd_hist:.6f} "
+            f"bb=[{signal.bb_lower:.4f}..{signal.bb_upper:.4f}] atr={signal.atr:.6f}"
         )
 
     async def open_async(
@@ -353,7 +396,9 @@ class PositionTracker:
         p.closed = True
         indicators_str = (
             f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
-            f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
+            f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma} "
+            f"entry_rsi={p.entry_rsi:.1f} entry_macd_hist={p.entry_macd_hist:.6f} "
+            f"entry_bb=[{p.entry_bb_lower:.4f}..{p.entry_bb_upper:.4f}] entry_atr={p.entry_atr:.6f}"
         )
         self.log.warning(
             f"SL hit (exchange stop) | reason={reason} price={close_price} "
@@ -390,7 +435,9 @@ class PositionTracker:
                 return 0.0, None
             indicators_str = (
                 f"entry_ema_fast={p.entry_ema_fast} entry_ema_slow={p.entry_ema_slow} "
-                f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma}"
+                f"entry_volume={p.entry_volume} entry_volume_ma={p.entry_volume_ma} "
+                f"entry_rsi={p.entry_rsi:.1f} entry_macd_hist={p.entry_macd_hist:.6f} "
+                f"entry_bb=[{p.entry_bb_lower:.4f}..{p.entry_bb_upper:.4f}] entry_atr={p.entry_atr:.6f}"
             )
                     
             if hit == "SL":
@@ -510,7 +557,26 @@ class PositionTracker:
             await self._report_close(close_price, remaining_before, pnl_to_use, "TP1")
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
         elif hit == "TP1":
-            self._save_state()
+            # Полное закрытие по TP1 (tp1_close_pct=100, схема TP=2xSL без разделения):
+            # позиция закрывается целиком. Обрабатываем как полное закрытие —
+            # реальный PnL с биржи + закрытие сделки в БД + очистка состояния.
+            # Иначе check() на следующей свече вернёт "TP2" с остаточной qty=0 →
+            # лишнее сообщение TP2 после TP1.
+            fully_closed = self.position is not None and self.position.remaining_qty <= 0.000001
+            if fully_closed:
+                await self._verify_position_closed(p.direction, 10)
+                real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+                pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
+                if trade_id_before:
+                    qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
+                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1")
+                await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
+                if real_pnl is not None:
+                    total_trade_pnl = real_pnl
+                self.position = None
+                self._clear_state()
+            else:
+                self._save_state()
         elif hit in ("SL", "TP2"):
             exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
             await self._verify_position_closed(p.direction, 10)
