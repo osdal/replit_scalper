@@ -51,6 +51,33 @@ def _sim_commission(entry, exit_price, qty):
     return (abs(entry) + abs(exit_price)) * abs(qty) * fee
 
 
+async def _track_skipped_signal(reporter, signal, cfg, reason):
+    """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
+    reject_reason 'skip:*' (не симулируется, только статистика). Не блокирует цикл."""
+    if reporter is None or signal is None:
+        return
+    try:
+        import asyncio as _asyncio
+        payload = {
+            "direction": getattr(signal, "direction", "LONG"),
+            "entry_price": getattr(signal, "entry_price", 0.0),
+            "sl_price": getattr(signal, "sl_price", 0.0),
+            "tp1_price": getattr(signal, "tp1_price", 0.0),
+            "tp2_price": getattr(signal, "tp2_price", 0.0),
+            "preset": getattr(signal, "preset", None),
+            "ema_fast": getattr(signal, "ema_fast", None),
+            "ema_slow": getattr(signal, "ema_slow", None),
+            "volume": getattr(signal, "volume", None),
+            "volume_ma": getattr(signal, "volume_ma", None),
+            "rsi": getattr(signal, "rsi", None),
+            "macd": getattr(signal, "macd", None),
+            "atr": getattr(signal, "atr", None),
+        }
+        _asyncio.create_task(reporter.report_rejected(payload, reason))
+    except Exception:
+        pass
+
+
 def _simulate_exit(direction, entry, sl, tp1, klines):
     """Возвращает (exit_reason, exit_price, exit_open_time_ms) по историческим свечам."""
     direction = direction.upper()
@@ -1097,6 +1124,7 @@ async def _run_live_or_paper(
                 last_sig = _last_signal_time.get(cfg.symbol, 0)
                 if now - last_sig < cfg.signal_cooldown_min * 60:
                     log.debug(f"[COOLDOWN] Skip signal for {cfg.symbol}: {now - last_sig:.0f}s < {cfg.signal_cooldown_min}m")
+                    await _track_skipped_signal(reporter, raw_signal, cfg, "skip:cooldown")
                     return
 
             if cfg.max_open_per_cycle > 0:
@@ -1104,6 +1132,7 @@ async def _run_live_or_paper(
                 _recent_open_times[:] = [t for t in _recent_open_times if t > cutoff]
                 if len(_recent_open_times) >= cfg.max_open_per_cycle:
                     log.debug(f"[CYCLE_LIMIT] Skip signal for {cfg.symbol}: {len(_recent_open_times)} opens in last 1h >= max_open_per_cycle={cfg.max_open_per_cycle}")
+                    await _track_skipped_signal(reporter, raw_signal, cfg, "skip:cycle_limit")
                     return
 
             # Per-preset limit check
@@ -1112,6 +1141,7 @@ async def _run_live_or_paper(
             current_preset_count = _preset_open_counts.get(raw_signal.preset, 0)
             if max_per_preset > 0 and current_preset_count >= max_per_preset:
                 log.debug(f"[PRESET_LIMIT] Skip {raw_signal.preset} for {cfg.symbol}: {current_preset_count} >= max_per_preset={max_per_preset}")
+                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:preset_limit")
                 return
 
             signal = raw_signal

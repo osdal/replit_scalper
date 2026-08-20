@@ -1,43 +1,43 @@
-## Analysis Report - 2026-08-20 22:37:50
+## Analysis Report - 2026-08-20 22:44:46
 
 ### Overall Statistics
 
 | Metric | Value |
 |---|---|
-| Total Opens | 407 |
-| Total Closes | 352 |
+| Total Opens | 410 |
+| Total Closes | 353 |
 | Total Rejected | 0 |
-| Long Opens | 407 |
+| Long Opens | 410 |
 | Short Opens | 0 |
-| Long Closes | 352 |
+| Long Closes | 353 |
 | Short Closes | 0 |
-| Win Rate | 45.74% |
-| Total PnL (Net) | 21.51 |
-| Total Commission | 35.09 |
-| Total PnL (Gross) | 56.60 |
+| Win Rate | 45.89% |
+| Total PnL (Net) | 22.17 |
+| Total Commission | 35.19 |
+| Total PnL (Gross) | 57.36 |
 | Avg PnL per Trade | 0.06 |
 | Profit Factor | 1.17 |
 | Max Drawdown | 32.84 |
 | Max Consecutive Losses | 22 |
 | Max Consecutive Wins | 12 |
-| Long Win Rate | 45.74% |
+| Long Win Rate | 45.89% |
 | Short Win Rate | 0.00% |
-| TP Closes | 161 |
+| TP Closes | 162 |
 | SL Closes | 191 |
 | Time Profit Closes | 0 |
-| Avg Hold Time | 32.9 min |
-| Avg Hold (TP) | 42.7 min |
+| Avg Hold Time | 32.8 min |
+| Avg Hold (TP) | 42.5 min |
 | Avg Hold (SL) | 24.7 min |
 
 ### Position Sizing
 
 | Metric | Value |
 |---|---|
-| Trades | 352 |
+| Trades | 353 |
 | Avg Notional (Entry Value, USDT) | 99.61 |
 | Min Notional (USDT) | 71.58 |
 | Max Notional (USDT) | 100.99 |
-| Avg Qty | 2364.07 |
+| Avg Qty | 2357.61 |
 | Min Qty | 0.00 |
 | Max Qty | 32273.68 |
 
@@ -76,7 +76,35 @@
 | TRXUSDT | 100.00 | 1 |
 | UNIUSDT | 100.00 | 18 |
 | WIFUSDT | 100.00 | 18 |
-| XRPUSDT | 100.00 | 18 |
+| XRPUSDT | 100.00 | 19 |
+
+### Day-of-Week Distribution
+
+| Day | Trades | Wins | Win% | PnL |
+|---|---|---|---|---|
+| Mon | 0 | 0 | 0.00% | 0.00 |
+| Tue | 0 | 0 | 0.00% | 0.00 |
+| Wed | 0 | 0 | 0.00% | 0.00 |
+| Thu | 353 | 162 | 45.89% | 22.17 |
+| Fri | 0 | 0 | 0.00% | 0.00 |
+| Sat | 0 | 0 | 0.00% | 0.00 |
+| Sun | 0 | 0 | 0.00% | 0.00 |
+
+### ATR (Volatility) vs PnL
+
+| Metric | Value |
+|---|---|
+| ATR-PnL Correlation (Pearson) | 0.04 |
+| Avg Commission % of Notional | 0.10% |
+| Max Concurrent Open Positions | 58 |
+| Avg Concurrent Open Positions | 22.53 |
+
+| ATR% Bucket | Trades | PnL |
+|---|---|---|
+| 0.00% | 70 | -0.35 |
+| 0.10% | 221 | 16.22 |
+| 0.20% | 55 | 6.39 |
+| 0.30% | 7 | -0.09 |
 
 ### Per Coin Statistics
 
@@ -115,7 +143,7 @@
 | TRXUSDT | 1 | 1 | 0 | 100.00% | 1.06 | 0 |
 | UNIUSDT | 18 | 6 | 12 | 33.33% | -1.96 | 0 |
 | WIFUSDT | 18 | 7 | 11 | 38.89% | 0.18 | 0 |
-| XRPUSDT | 18 | 13 | 5 | 72.22% | 9.99 | 0 |
+| XRPUSDT | 19 | 14 | 5 | 73.68% | 10.66 | 0 |
 
 ### Per Preset Statistics
 
@@ -132,7 +160,7 @@
 | rsi_bounce_long | 6 | 4 | 2 | 66.67% | 2.08 | 0.60 | 0.81 | -0.58 | 0.86 | -0.60 | 42.7 min |
 | rsi_divergence_long | 2 | 0 | 2 | 0.00% | -1.52 | 0.20 | 0.00 | -0.76 | 0.00 | -0.87 | 4.6 min |
 | sma_cross_long | 4 | 1 | 3 | 25.00% | -0.99 | 0.40 | 0.92 | -0.64 | 0.92 | -0.67 | 22.4 min |
-| stoch_bounce_long | 97 | 43 | 54 | 44.33% | 1.00 | 9.65 | 0.71 | -0.55 | 1.05 | -1.34 | 22.2 min |
+| stoch_bounce_long | 98 | 44 | 54 | 44.90% | 1.66 | 9.75 | 0.71 | -0.55 | 1.05 | -1.34 | 22.1 min |
 | stoch_obos_long | 4 | 1 | 3 | 25.00% | -0.76 | 0.40 | 0.94 | -0.57 | 0.94 | -0.62 | 22.2 min |
 | supertrend_long | 5 | 2 | 3 | 40.00% | -0.33 | 0.50 | 1.23 | -0.93 | 1.24 | -1.09 | 41.8 min |
 | volume_spike_long | 3 | 1 | 2 | 33.33% | -0.28 | 0.30 | 1.00 | -0.64 | 1.00 | -0.64 | 77.5 min |
@@ -173,7 +201,7 @@
 | rsi_divergence_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
 | sma_cross_long | 1.00% | 0.50% | unlimited | 25.00% | -0.99 | [POOR] |
 | sma_cross_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
-| stoch_bounce_long | 0.70% | 0.35% | unlimited | 44.33% | 1.00 | [POOR] |
+| stoch_bounce_long | 0.70% | 0.35% | unlimited | 44.90% | 1.66 | [POOR] |
 | stoch_bounce_short | 0.70% | 0.35% | unlimited | 0.00% | 0.00 | [POOR] |
 | stoch_obos_long | 0.80% | 0.40% | unlimited | 25.00% | -0.76 | [POOR] |
 | stoch_obos_short | 0.80% | 0.40% | unlimited | 0.00% | 0.00 | [POOR] |
@@ -189,6 +217,16 @@
 | vwap_band_short | 0.90% | 0.45% | unlimited | 0.00% | 0.00 | [POOR] |
 | vwap_return_long | 0.90% | 0.45% | unlimited | 100.00% | 0.84 | [OK] |
 | vwap_return_short | 0.90% | 0.45% | unlimited | 0.00% | 0.00 | [POOR] |
+
+### Signal Funnel
+
+| Outcome | Signals |
+|---|---|
+| Opened | 410 |
+| Risk Rejected | 0 |
+| LLM Rejected | 0 |
+| Skipped (throttle/limit) | 0 |
+| **Total Signals** | 410 |
 
 ### LLM Statistics
 
@@ -210,7 +248,7 @@
 | 16:00 | 47 | 33 | 70.21% | 21.42 |
 | 17:00 | 25 | 14 | 56.00% | 4.23 |
 | 18:00 | 40 | 3 | 7.50% | -23.04 |
-| 19:00 | 11 | 0 | 0.00% | -6.92 |
+| 19:00 | 12 | 1 | 8.33% | -6.25 |
 
 ### Preset Performance by Hour
 
@@ -227,7 +265,7 @@
 | rsi_bounce_long |-|-|100%/0.77%|100%/0.76%|100%/0.86%|-|100%/0.85%|-|-|0%/-0.60%|0%/-0.56%|
 | rsi_divergence_long |-|-|-|0%/-0.65%|-|-|-|-|-|-|0%/-0.87%|
 | sma_cross_long |-|-|-|-|-|-|100%/0.92%|0%/-1.27%|0%/-0.64%|-|-|
-| stoch_bounce_long |0%/-1.04%|33%/-0.32%|42%/-0.15%|42%/-0.61%|67%/2.42%|8%/-5.87%|100%/5.22%|81%/7.85%|44%/0.50%|10%/-5.16%|0%/-1.84%|
+| stoch_bounce_long |0%/-1.04%|33%/-0.32%|42%/-0.15%|42%/-0.61%|67%/2.42%|8%/-5.87%|100%/5.22%|81%/7.85%|44%/0.50%|10%/-5.16%|20%/-1.17%|
 | stoch_obos_long |-|-|-|50%/0.44%|-|0%/-0.58%|-|-|0%/-0.62%|-|-|
 | supertrend_long |-|-|100%/1.24%|-|-|-|0%/-0.90%|100%/1.22%|-|0%/-1.90%|-|
 | volume_spike_long |-|-|-|-|-|-|50%/0.35%|-|-|0%/-0.63%|-|
