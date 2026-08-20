@@ -77,17 +77,21 @@ def analyze_trades(trades=None, excluded_presets=None):
 
     # Preset stats
     preset_stats = defaultdict(lambda: {
-        "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+        "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "commission": 0.0,
         "avg_win": 0.0, "avg_loss": 0.0, "best_trade": 0.0, "worst_trade": 0.0,
         "wins_list": [], "losses_list": [], "hold_times": [],
     })
 
+    total_commission = 0.0
     for t in closes:
         preset = t.get("preset") or "unknown"
         pnl = float(t.get("pnl") or 0.0)
+        commission = float(t.get("commission") or 0.0)
+        total_commission += commission
         s = preset_stats[preset]
         s["trades"] += 1
         s["pnl"] += pnl
+        s["commission"] += commission
         if pnl > 0:
             s["wins"] += 1
             s["wins_list"].append(pnl)
@@ -261,6 +265,7 @@ def analyze_trades(trades=None, excluded_presets=None):
         "short_closes": short_closes,
         "win_rate": win_rate,
         "total_pnl": total_pnl,
+        "total_commission": total_commission,
         "avg_pnl_per_trade": avg_pnl_per_trade,
         "profit_factor": profit_factor,
         "max_drawdown": max_drawdown,
@@ -316,7 +321,9 @@ def generate_report(stats):
     if stats.get("excluded_presets"):
         report.append(f"| Excluded Presets | {', '.join(stats['excluded_presets'])} |")
     report.append(f"| Win Rate | {format_number(stats['win_rate'])}% |")
-    report.append(f"| Total PnL | {format_number(stats['total_pnl'])} |")
+    report.append(f"| Total PnL (Net) | {format_number(stats['total_pnl'])} |")
+    report.append(f"| Total Commission | {format_number(stats['total_commission'])} |")
+    report.append(f"| Total PnL (Gross) | {format_number(stats['total_pnl'] + stats['total_commission'])} |")
     report.append(f"| Avg PnL per Trade | {format_number(stats['avg_pnl_per_trade'])} |")
     report.append(f"| Profit Factor | {format_number(stats['profit_factor'])} |")
     report.append(f"| Max Drawdown | {format_number(stats['max_drawdown'])} |")
@@ -344,13 +351,13 @@ def generate_report(stats):
     report.append("")
     report.append("### Per Preset Statistics")
     report.append("")
-    report.append("| Preset | Trades | Wins | Losses | Win% | PnL | AvgWin | AvgLoss | Best | Worst | AvgHold |")
-    report.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    report.append("| Preset | Trades | Wins | Losses | Win% | PnL | Commission | AvgWin | AvgLoss | Best | Worst | AvgHold |")
+    report.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for preset, data in sorted(stats["preset_stats"].items()):
         win_rate = (data["wins"] / data["trades"] * 100) if data["trades"] > 0 else 0.0
         report.append(
             f"| {preset} | {data['trades']} | {data['wins']} | {data['losses']} | "
-            f"{format_number(win_rate)}% | {format_number(data['pnl'])} | "
+            f"{format_number(win_rate)}% | {format_number(data['pnl'])} | {format_number(data.get('commission', 0.0))} | "
             f"{format_number(data['avg_win'])} | {format_number(data['avg_loss'])} | "
             f"{format_number(data['best_trade'])} | {format_number(data['worst_trade'])} | "
             f"{format_number(data.get('avg_hold_time', 0), 1)} min |"

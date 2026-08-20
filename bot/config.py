@@ -62,6 +62,7 @@ class Config:
     gemini_model: str = "gemini-2.0-flash-exp"
     groq_api_key: str = ""
     groq_model: str = "groq/compound-mini"
+    commission_pct: float = 0.05   # Симулируемая комиссия (Taker) в %, применяется к PnL в paper/backtest
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")

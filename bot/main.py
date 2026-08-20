@@ -40,6 +40,15 @@ _recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recov
 #                  "tp1": float, "candles": int} — закрыт по SL/TP1 либо истёк по времени.
 _rejected_sims = []
 _REJECTED_SIM_MAX_CANDLES = 24  # максимум свечей ждём результат (24×5м = 2ч)
+SIM_COMMISSION_PCT = 0.05  # симулируемая комиссия Taker (%) для отклонённых сделок
+
+
+def _sim_commission(entry, exit_price, qty):
+    """Комиссия для симуляции в USDT (0.05% на вход и выход)."""
+    if not entry or not exit_price or not qty:
+        return 0.0
+    fee = SIM_COMMISSION_PCT / 100.0
+    return (abs(entry) + abs(exit_price)) * abs(qty) * fee
 
 
 def _simulate_exit(direction, entry, sl, tp1, klines):
@@ -156,10 +165,13 @@ async def _simulate_rejected_background(client, reporter, log, shutdown_event):
                                 exit_time = datetime.fromtimestamp(exit_open_time / 1000, tz=timezone.utc).isoformat()
                                 qty = sim.get("qty", 0.0)
                                 pnl = _calc_simulated_pnl(sim["direction"], sim["entry"], exit_price, qty)
+                                commission = _sim_commission(sim["entry"], exit_price, qty)
+                                net_pnl = pnl - commission
                                 await reporter.patch_trade(sim["trade_id"], {
                                     "exit_price": exit_price,
                                     "exit_reason": exit_reason,
-                                    "pnl": round(pnl, 4),
+                                    "pnl": round(net_pnl, 4),
+                                    "commission": round(commission, 8),
                                     "exit_time": exit_time,
                                 })
                                 log.info(
@@ -213,10 +225,13 @@ async def _simulate_rejected_outcome(current_price, reporter, log):
             try:
                 qty = sim.get("qty", 0.0)
                 pnl = _calc_simulated_pnl(direction, entry, hit_price, qty)
+                commission = _sim_commission(entry, hit_price, qty)
+                net_pnl = pnl - commission
                 await reporter.patch_trade(tid, {
                     "exit_price": hit_price,
                     "exit_reason": hit,
-                    "pnl": round(pnl, 4),
+                    "pnl": round(net_pnl, 4),
+                    "commission": round(commission, 8),
                     "exit_time": _dt.datetime.utcnow().isoformat(),
                 })
                 log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} pnl={pnl:+.4f} (trade #{tid})")
