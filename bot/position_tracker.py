@@ -227,11 +227,12 @@ class PositionTracker:
                 pass
         return 0
 
-    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str) -> None:
+    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0) -> None:
         if not self.reporter or not self._trade_id:
             return
         try:
             import datetime
+            commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
             # Try to get real PnL from Binance to match position history
             real_pnl = None
             if self.order_mgr:
@@ -244,11 +245,15 @@ class PositionTracker:
                         )
                     except Exception:
                         pass
-            pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
+            if real_pnl is not None and abs(real_pnl) > 0.0001:
+                pnl_to_use = real_pnl
+                # В live-режиме комиссия уже учтена в реальном PnL, показываем её как расчётную.
+                commission = self._estimated_commission(entry_price, exit_price, qty)
             success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl_to_use,
+                "commission":  commission,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -261,10 +266,11 @@ class PositionTracker:
                 new_trade = {
                     "symbol":      self.cfg.symbol,
                     "direction":   p.direction if p else "LONG",
-                    "entry_price": p.entry_price if p else exit_price,
+                    "entry_price": p.entry_price if p else (entry_price or exit_price),
                     "exit_price":  exit_price,
                     "qty":         qty,
                     "pnl":         pnl_to_use,
+                    "commission":  commission,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -277,12 +283,13 @@ class PositionTracker:
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close error: {e}")
 
-    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str) -> None:
+    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0) -> None:
         """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
         try:
             import datetime
+            commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
             # Try to get real PnL from Binance to match position history
             real_pnl = None
             if self.order_mgr:
@@ -295,11 +302,14 @@ class PositionTracker:
                         )
                     except Exception:
                         pass
-            pnl_to_use = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else pnl
+            if real_pnl is not None and abs(real_pnl) > 0.0001:
+                pnl_to_use = real_pnl
+                commission = self._estimated_commission(entry_price, exit_price, qty)
             success = await self.reporter.patch_trade(trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl_to_use,
+                "commission":  commission,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -312,10 +322,11 @@ class PositionTracker:
                 new_trade = {
                     "symbol":      self.cfg.symbol,
                     "direction":   p.direction if p else "LONG",
-                    "entry_price": p.entry_price if p else exit_price,
+                    "entry_price": p.entry_price if p else (entry_price or exit_price),
                     "exit_price":  exit_price,
                     "qty":         qty,
                     "pnl":         pnl_to_use,
+                    "commission":  commission,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -326,6 +337,18 @@ class PositionTracker:
                 await self.reporter.report_trade(new_trade)
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close_with_id error: {e}")
+
+    def _estimated_commission(self, entry_price: float, exit_price: float, qty: float) -> float:
+        """Расчётная (симулируемая) комиссия Taker для сделки в USDT."""
+        if self.cfg.mode == "live":
+            return 0.0  # В live комиссия берётся с биржи, в БД не пишем расчётную
+        fee = self.cfg.commission_pct / 100.0
+        return round((abs(entry_price) + abs(exit_price)) * abs(qty) * fee, 8)
+
+    def _apply_commission(self, entry_price: float, exit_price: float, qty: float, pnl: float) -> tuple[float, float]:
+        """Возвращает (commission, net_pnl): вычитает симулируемую комиссию из PnL."""
+        commission = self._estimated_commission(entry_price, exit_price, qty)
+        return commission, pnl - commission
 
     async def _report_tp1(self, exit_price: float, qty: float, pnl: float) -> None:
         """TP1 — частичное закрытие. НЕ записываем в БД, только обновляем состояние."""
@@ -536,6 +559,7 @@ class PositionTracker:
         remaining_before = p.remaining_qty if p else 0
         total_qty_before = p.total_qty if p else 0.0
         tp1_hit_before = p.tp1_hit if p else False
+        entry_price_before = p.entry_price if p else close_price
         # entry_timestamp может быть строкой из JSON или datetime объектом
         entry_time_ms = 0
         if p and p.entry_timestamp:
@@ -554,7 +578,7 @@ class PositionTracker:
             await self._verify_position_closed(p.direction, 10)
             real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
-            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1")
+            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1", entry_price_before)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
         elif hit == "TP1":
             # Полное закрытие по TP1 (tp1_close_pct=100, схема TP=2xSL без разделения):
@@ -569,7 +593,7 @@ class PositionTracker:
                 pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
                 if trade_id_before:
                     qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1")
+                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1", entry_price_before)
                 await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
                 if real_pnl is not None:
                     total_trade_pnl = real_pnl
@@ -586,7 +610,7 @@ class PositionTracker:
                 # qty для БД: если remaining уже 0 (позиция полностью закрыта
                 # TP1 на 100%), сохраняем исходный объём позиции, а не 0.
                 qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason)
+                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
             # Update local PnL with real value for return
             if real_pnl is not None:

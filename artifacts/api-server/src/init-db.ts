@@ -46,7 +46,7 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT,
   rsi REAL, macd REAL, macd_signal REAL, macd_hist REAL,
   bb_upper REAL, bb_middle REAL, bb_lower REAL, atr REAL,
-  preset TEXT
+  preset TEXT, commission REAL
 )`);
 
 // Мигрируем существующие БД: добавляем status/reject_reason и индикаторы/пресет, если их нет.
@@ -64,6 +64,7 @@ const tradeExtraCols: Array<[string, string]> = [
   ["bb_lower", "REAL"],
   ["atr", "REAL"],
   ["preset", "TEXT"],
+  ["commission", "REAL"],
 ];
 for (const [col, ddl] of tradeExtraCols) {
   if (!tradeColNames.includes(col)) {
