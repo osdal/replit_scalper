@@ -442,10 +442,10 @@ def main():
     print(report)
 
     analytics_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANALYTICS.md")
-    with open(analytics_path, "a", encoding="utf-8") as f:
-        f.write("\n")
+    with open(analytics_path, "w", encoding="utf-8") as f:
         f.write(report)
-    print(f"\nReport appended to {analytics_path}")
+        f.write("\n")
+    print(f"\nReport written to {analytics_path}")
 
 
 if __name__ == "__main__":
