@@ -24,6 +24,15 @@ export const tradesTable = sqliteTable("trades", {
   mode:         text("mode").notNull().default("live"),
   status:       text("status").notNull().default("open"),  // open | closed | rejected
   reject_reason: text("reject_reason"),                    // причина отклонения (если status='rejected')
+  rsi:          real("rsi"),
+  macd:         real("macd"),
+  macd_signal:  real("macd_signal"),
+  macd_hist:    real("macd_hist"),
+  bb_upper:     real("bb_upper"),
+  bb_middle:    real("bb_middle"),
+  bb_lower:     real("bb_lower"),
+  atr:          real("atr"),
+  preset:       text("preset"),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ id: true });

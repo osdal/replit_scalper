@@ -43,17 +43,33 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   pnl REAL, exit_reason TEXT, entry_time TEXT NOT NULL, exit_time TEXT,
   is_open INTEGER NOT NULL DEFAULT 1, ema_fast REAL, ema_slow REAL,
   volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live',
-  status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT
+  status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT,
+  rsi REAL, macd REAL, macd_signal REAL, macd_hist REAL,
+  bb_upper REAL, bb_middle REAL, bb_lower REAL, atr REAL,
+  preset TEXT
 )`);
 
-// Мигрируем существующие БД: добавляем status/reject_reason если их нет.
+// Мигрируем существующие БД: добавляем status/reject_reason и индикаторы/пресет, если их нет.
 const { rows: tradeCols } = await db.run(sql`PRAGMA table_info(trades)`);
 const tradeColNames: string[] = (tradeCols as any[]).map((r: any) => String(r.name));
-if (!tradeColNames.includes("status")) {
-  await db.run(sql`ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'open'`);
-}
-if (!tradeColNames.includes("reject_reason")) {
-  await db.run(sql`ALTER TABLE trades ADD COLUMN reject_reason TEXT`);
+const tradeExtraCols: Array<[string, string]> = [
+  ["status", "TEXT NOT NULL DEFAULT 'open'"],
+  ["reject_reason", "TEXT"],
+  ["rsi", "REAL"],
+  ["macd", "REAL"],
+  ["macd_signal", "REAL"],
+  ["macd_hist", "REAL"],
+  ["bb_upper", "REAL"],
+  ["bb_middle", "REAL"],
+  ["bb_lower", "REAL"],
+  ["atr", "REAL"],
+  ["preset", "TEXT"],
+];
+for (const [col, ddl] of tradeExtraCols) {
+  if (!tradeColNames.includes(col)) {
+    await db.run(sql`ALTER TABLE trades ADD COLUMN ${sql.raw(col)} ${sql.raw(ddl)}`);
+    console.log(`  Added column trades.${col}`);
+  }
 }
 await db.run(sql`UPDATE trades SET status='closed' WHERE is_open=0 AND status != 'rejected'`);
 
