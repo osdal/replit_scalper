@@ -204,6 +204,7 @@ class DbReporter:
                     return [
                         t for t in data.get("trades", [])
                         if t.get("status") == "rejected" and not t.get("exit_reason")
+                        and not str(t.get("reject_reason") or "").startswith("skip:")
                     ]
         except Exception as e:
             self.log.debug(f"[REPORTER] get_pending_rejected_trades error: {e}")

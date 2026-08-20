@@ -197,6 +197,22 @@ def analyze_trades(trades=None, excluded_presets=None):
         preset = t.get("preset") or "unknown"
         llm_rejected_by_preset[preset] += 1
 
+    # Signal funnel: opened vs risk-rejected vs llm-rejected vs throttled skips
+    risk_rejected = [t for t in rejected if (t.get("reject_reason") or "").startswith("risk:")]
+    skipped_signals = [t for t in rejected if (t.get("reject_reason") or "").startswith("skip:")]
+    signal_funnel = {
+        "opened": len(trades) - len(rejected),  # все открытые сделки (open + closed) = не отклонённые
+        "risk_rejected": len(risk_rejected),
+        "llm_rejected": len(llm_rejected),
+        "skipped": len(skipped_signals),
+    }
+    skipped_by_preset = defaultdict(int)
+    for t in skipped_signals:
+        skipped_by_preset[t.get("preset") or "unknown"] += 1
+    risk_rejected_by_preset = defaultdict(int)
+    for t in risk_rejected:
+        risk_rejected_by_preset[t.get("preset") or "unknown"] += 1
+
     # Exit reasons
     tp_closes = [t for t in closes if "TP" in (t.get("exit_reason") or "")]
     sl_closes = [t for t in closes if "SL" in (t.get("exit_reason") or "")]
@@ -282,6 +298,95 @@ def analyze_trades(trades=None, excluded_presets=None):
         "by_symbol": {s: (round(sum(ns) / len(ns), 2), len(ns)) for s, ns in pos_by_sym.items()},
     }
 
+    # Day-of-week PnL distribution
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    dow_stats = {}
+    for t in closes:
+        ts = parse_timestamp(t.get("exit_time", "")) or parse_timestamp(t.get("entry_time", ""))
+        if not ts:
+            continue
+        d = dow_names[ts.weekday()]
+        s = dow_stats.setdefault(d, {"trades": 0, "wins": 0, "pnl": 0.0})
+        s["trades"] += 1
+        p = float(t.get("pnl") or 0.0)
+        s["pnl"] += p
+        if p > 0:
+            s["wins"] += 1
+    for d in dow_names:
+        dow_stats.setdefault(d, {"trades": 0, "wins": 0, "pnl": 0.0})
+
+    # ATR vs PnL correlation (волатильность на входе)
+    atr_pairs = []
+    for t in closes:
+        try:
+            atr = float(t.get("atr") or 0.0)
+            pnl = float(t.get("pnl") or 0.0)
+            entry = float(t.get("entry_price") or 0.0)
+            if atr > 0 and entry > 0:
+                atr_pairs.append((atr / entry, pnl))  # относительный ATR в %
+        except Exception:
+            continue
+    atr_corr = _pearson([a for a, _ in atr_pairs], [p for _, p in atr_pairs]) if len(atr_pairs) >= 2 else None
+    atr_buckets = {}
+    if atr_pairs:
+        for rel, pnl in atr_pairs:
+            pct = round(rel * 100, 3)
+            bucket = (pct // 0.1) * 0.1
+            b = atr_buckets.setdefault(bucket, {"trades": 0, "pnl": 0.0})
+            b["trades"] += 1
+            b["pnl"] += pnl
+
+    # Commission % по сделкам (commission / notional)
+    comm_pcts = []
+    for t in closes:
+        try:
+            comm = float(t.get("commission") or 0.0)
+            notional = abs(float(t.get("qty") or 0.0)) * abs(float(t.get("entry_price") or 0.0))
+            if notional > 0:
+                comm_pcts.append((comm / notional) * 100)
+        except Exception:
+            continue
+    avg_comm_pct = (sum(comm_pcts) / len(comm_pcts)) if comm_pcts else 0.0
+
+    # Одновременно открытые позиции: sweep по событиям open/close
+    events = []
+    for t in trades:
+        try:
+            ot = parse_timestamp(t.get("entry_time", ""))
+            if ot:
+                events.append((ot.timestamp(), 1))
+            ct = parse_timestamp(t.get("exit_time", ""))
+            if ct:
+                events.append((ct.timestamp(), -1))
+        except Exception:
+            continue
+    events.sort(key=lambda x: (x[0], x[1]))
+    cur_open = 0
+    max_open = 0
+    total_open_time = 0.0
+    prev_ts = None
+    concurrency_entries = []
+    for ts, delta in events:
+        if prev_ts is not None:
+            span = ts - prev_ts
+            if span > 0:
+                total_open_time += span * max(cur_open, 0)
+                concurrency_entries.append((cur_open, span))
+        cur_open += delta
+        prev_ts = ts
+        if cur_open > max_open:
+            max_open = cur_open
+    total_span = (prev_ts - events[0][0]) if events and prev_ts else 0.0
+    avg_open = total_open_time / total_span if total_span > 0 else 0.0
+
+    metrics = {
+        "dow_stats": dow_stats,
+        "atr_corr": atr_corr,
+        "atr_buckets": atr_buckets,
+        "avg_comm_pct": avg_comm_pct,
+        "concurrency": {"max": max_open, "avg": avg_open, "samples": len(events)},
+    }
+
     return {
         "total_opens": total_opens,
         "total_closes": total_closes,
@@ -303,6 +408,9 @@ def analyze_trades(trades=None, excluded_presets=None):
         "preset_stats": dict(preset_stats),
         "llm_rejected": len(llm_rejected),
         "llm_rejected_by_preset": dict(llm_rejected_by_preset),
+        "signal_funnel": signal_funnel,
+        "skipped_by_preset": dict(skipped_by_preset),
+        "risk_rejected_by_preset": dict(risk_rejected_by_preset),
         "time_closes": len(time_closes),
         "tp_closes": len(tp_closes),
         "sl_closes": len(sl_closes),
@@ -313,6 +421,7 @@ def analyze_trades(trades=None, excluded_presets=None):
         "preset_hourly_stats": {p: dict(hours) for p, hours in preset_hourly_stats.items()},
         "coin_stats": coin_stats,
         "pos_stats": pos_stats,
+        "metrics": metrics,
         "excluded_presets": sorted(excluded_presets),
     }
 
@@ -328,6 +437,20 @@ def format_max_pos(value):
     if value in (0, 0.0, None, "0"):
         return "unlimited"
     return str(value)
+
+
+def _pearson(xs, ys):
+    n = len(xs)
+    if n < 2:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = sum((x - mx) ** 2 for x in xs) ** 0.5
+    dy = sum((y - my) ** 2 for y in ys) ** 0.5
+    if dx == 0 or dy == 0:
+        return None
+    return num / (dx * dy)
 
 
 def generate_report(stats):
@@ -385,6 +508,33 @@ def generate_report(stats):
         avg_n, cnt = pos["by_symbol"][sym]
         report.append(f"| {sym} | {format_number(avg_n)} | {cnt} |")
     report.append("")
+
+    metr = stats.get("metrics", {})
+    report.append("### Day-of-Week Distribution")
+    report.append("")
+    report.append("| Day | Trades | Wins | Win% | PnL |")
+    report.append("|---|---|---|---|---|")
+    for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
+        s = metr.get("dow_stats", {}).get(d, {"trades": 0, "wins": 0, "pnl": 0.0})
+        wr = (s["wins"] / s["trades"] * 100) if s["trades"] > 0 else 0.0
+        report.append(f"| {d} | {s['trades']} | {s['wins']} | {format_number(wr)}% | {format_number(s['pnl'])} |")
+    report.append("")
+    report.append("### ATR (Volatility) vs PnL")
+    report.append("")
+    report.append("| Metric | Value |")
+    report.append("|---|---|")
+    corr = metr.get("atr_corr")
+    report.append(f"| ATR-PnL Correlation (Pearson) | {format_number(corr) if corr is not None else 'N/A'} |")
+    report.append(f"| Avg Commission % of Notional | {format_number(metr.get('avg_comm_pct', 0.0))}% |")
+    report.append(f"| Max Concurrent Open Positions | {metr.get('concurrency', {}).get('max', 0)} |")
+    report.append(f"| Avg Concurrent Open Positions | {format_number(metr.get('concurrency', {}).get('avg', 0.0), 2)} |")
+    report.append("")
+    report.append("| ATR% Bucket | Trades | PnL |")
+    report.append("|---|---|---|")
+    for b in sorted(metr.get("atr_buckets", {}).keys()):
+        d = metr["atr_buckets"][b]
+        report.append(f"| {format_number(b, 2)}% | {d['trades']} | {format_number(d['pnl'])} |")
+    report.append("")
     report.append("### Per Coin Statistics")
     report.append("")
     report.append("| Symbol | Trades | Wins | Losses | Win% | PnL | Rejected |")
@@ -429,6 +579,28 @@ def generate_report(stats):
             f"{format_number(actual_wr)}% | {format_number(actual_pnl)} | {status} |"
         )
     report.append("")
+
+    funnel = stats.get("signal_funnel", {})
+    report.append("### Signal Funnel")
+    report.append("")
+    report.append("| Outcome | Signals |")
+    report.append("|---|---|")
+    report.append(f"| Opened | {funnel.get('opened', 0)} |")
+    report.append(f"| Risk Rejected | {funnel.get('risk_rejected', 0)} |")
+    report.append(f"| LLM Rejected | {funnel.get('llm_rejected', 0)} |")
+    report.append(f"| Skipped (throttle/limit) | {funnel.get('skipped', 0)} |")
+    report.append(f"| **Total Signals** | {funnel.get('opened', 0) + funnel.get('risk_rejected', 0) + funnel.get('llm_rejected', 0) + funnel.get('skipped', 0)} |")
+    report.append("")
+    skipped_by_p = stats.get("skipped_by_preset", {})
+    if skipped_by_p:
+        report.append("### Skipped Signals by Preset")
+        report.append("")
+        report.append("| Preset | Skipped |")
+        report.append("|---|---|")
+        for preset, count in sorted(skipped_by_p.items()):
+            report.append(f"| {preset} | {count} |")
+        report.append("")
+
     report.append("### LLM Statistics")
     report.append("")
     report.append("| Metric | Value |")
