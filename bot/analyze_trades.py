@@ -52,7 +52,7 @@ def analyze_trades(trades=None, excluded_presets=None):
     closes = [t for t in trades if t.get("status") == "closed"]
     rejected = [t for t in trades if t.get("status") == "rejected"]
 
-    total_opens = len(opens)
+    total_opens = len(trades)
     total_closes = len(closes)
     total_rejected = len(rejected)
 
@@ -67,9 +67,9 @@ def analyze_trades(trades=None, excluded_presets=None):
     for t in rejected:
         rejected_by_sym[t["symbol"]].append(t)
 
-    # Direction stats
-    long_opens = len([t for t in opens if t.get("direction") == "LONG"])
-    short_opens = len([t for t in opens if t.get("direction") == "SHORT"])
+    # Direction stats (за всё время, открыто+закрыто+отклонено)
+    long_opens = len([t for t in trades if t.get("direction") == "LONG"])
+    short_opens = len([t for t in trades if t.get("direction") == "SHORT"])
     long_closes = len([t for t in closes if t.get("direction") == "LONG"])
     short_closes = len([t for t in closes if t.get("direction") == "SHORT"])
 
