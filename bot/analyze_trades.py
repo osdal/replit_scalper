@@ -21,10 +21,12 @@ def parse_timestamp(ts_str):
     if not ts_str:
         return None
     try:
-        ts_str = ts_str.replace("Z", "").split(".")[0]
+        # База хранит ISO как '2026-08-20T09:41:00[.ffffff]'; приводим 'T' к пробелу.
+        ts_str = ts_str.replace("Z", "").replace("T", " ").split(".")[0]
         return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
     except Exception:
         try:
+            ts_str = ts_str.replace("Z", "").replace("T", " ")
             return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
         except Exception:
             return None
@@ -103,7 +105,7 @@ def analyze_trades(trades=None, excluded_presets=None):
         s["avg_hold_time"] = 0.0
         s["hold_count"] = 0
 
-    # Hold times
+    # Hold times — для каждой закрытой сделки: exit_time - entry_time из одной записи
     avg_hold_time = 0.0
     avg_hold_tp = 0.0
     avg_hold_sl = 0.0
@@ -111,31 +113,28 @@ def analyze_trades(trades=None, excluded_presets=None):
     hold_sl_count = 0
     hold_time_count = 0
 
-    for sym, open_t in opens_by_sym.items():
-        close_list = closes_by_sym.get(sym, [])
-        if not close_list:
-            continue
-        close_t = close_list[0]
+    for close_t in closes:
         try:
-            ot = parse_timestamp(open_t.get("entry_time", ""))
+            ot = parse_timestamp(close_t.get("entry_time", ""))
             ct = parse_timestamp(close_t.get("exit_time", ""))
-            if ot and ct:
-                hold_minutes = (ct - ot).total_seconds() / 60.0
-                preset = open_t.get("preset") or close_t.get("preset") or "unknown"
-                pstats = preset_stats.get(preset)
-                if pstats is not None:
-                    pstats["hold_times"].append(hold_minutes)
-                    pstats["hold_count"] += 1
-                    pstats["avg_hold_time"] = sum(pstats["hold_times"]) / len(pstats["hold_times"])
-                avg_hold_time += hold_minutes
-                hold_time_count += 1
-                reason = close_t.get("exit_reason", "")
-                if "TP" in reason:
-                    avg_hold_tp += hold_minutes
-                    hold_tp_count += 1
-                elif "SL" in reason:
-                    avg_hold_sl += hold_minutes
-                    hold_sl_count += 1
+            if not (ot and ct):
+                continue
+            hold_minutes = (ct - ot).total_seconds() / 60.0
+            preset = close_t.get("preset") or "unknown"
+            pstats = preset_stats.get(preset)
+            if pstats is not None:
+                pstats["hold_times"].append(hold_minutes)
+                pstats["hold_count"] += 1
+                pstats["avg_hold_time"] = sum(pstats["hold_times"]) / len(pstats["hold_times"])
+            avg_hold_time += hold_minutes
+            hold_time_count += 1
+            reason = close_t.get("exit_reason", "")
+            if "TP" in reason:
+                avg_hold_tp += hold_minutes
+                hold_tp_count += 1
+            elif "SL" in reason:
+                avg_hold_sl += hold_minutes
+                hold_sl_count += 1
         except Exception:
             continue
 
