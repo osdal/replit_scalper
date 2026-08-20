@@ -255,6 +255,33 @@ def analyze_trades(trades=None, excluded_presets=None):
             "open_preset": (sym_opens.get("preset") if isinstance(sym_opens, dict) else "unknown"),
         }
 
+    # Position sizing stats — рассчитывается по закрытым сделкам (qty × entry_price)
+    pos_notionals = []
+    pos_qtys = []
+    pos_by_sym = defaultdict(list)
+    for t in closes:
+        try:
+            qty = float(t.get("qty") or 0.0)
+            entry = float(t.get("entry_price") or 0.0)
+            notional = abs(qty) * abs(entry)
+        except Exception:
+            continue
+        if notional <= 0:
+            continue
+        pos_notionals.append(notional)
+        pos_qtys.append(abs(qty))
+        pos_by_sym[t.get("symbol", "?")].append(notional)
+    pos_stats = {
+        "count": len(pos_notionals),
+        "avg_notional": (sum(pos_notionals) / len(pos_notionals)) if pos_notionals else 0.0,
+        "min_notional": min(pos_notionals) if pos_notionals else 0.0,
+        "max_notional": max(pos_notionals) if pos_notionals else 0.0,
+        "avg_qty": (sum(pos_qtys) / len(pos_qtys)) if pos_qtys else 0.0,
+        "min_qty": min(pos_qtys) if pos_qtys else 0.0,
+        "max_qty": max(pos_qtys) if pos_qtys else 0.0,
+        "by_symbol": {s: (round(sum(ns) / len(ns), 2), len(ns)) for s, ns in pos_by_sym.items()},
+    }
+
     return {
         "total_opens": total_opens,
         "total_closes": total_closes,
@@ -285,6 +312,7 @@ def analyze_trades(trades=None, excluded_presets=None):
         "hourly_stats": dict(hourly_stats),
         "preset_hourly_stats": {p: dict(hours) for p, hours in preset_hourly_stats.items()},
         "coin_stats": coin_stats,
+        "pos_stats": pos_stats,
         "excluded_presets": sorted(excluded_presets),
     }
 
@@ -337,6 +365,25 @@ def generate_report(stats):
     report.append(f"| Avg Hold Time | {format_number(stats['avg_hold_time'], 1)} min |")
     report.append(f"| Avg Hold (TP) | {format_number(stats['avg_hold_tp'], 1)} min |")
     report.append(f"| Avg Hold (SL) | {format_number(stats['avg_hold_sl'], 1)} min |")
+    report.append("")
+    pos = stats.get("pos_stats", {})
+    report.append("### Position Sizing")
+    report.append("")
+    report.append("| Metric | Value |")
+    report.append("|---|---|")
+    report.append(f"| Trades | {pos.get('count', 0)} |")
+    report.append(f"| Avg Notional (Entry Value, USDT) | {format_number(pos.get('avg_notional', 0.0))} |")
+    report.append(f"| Min Notional (USDT) | {format_number(pos.get('min_notional', 0.0))} |")
+    report.append(f"| Max Notional (USDT) | {format_number(pos.get('max_notional', 0.0))} |")
+    report.append(f"| Avg Qty | {format_number(pos.get('avg_qty', 0.0))} |")
+    report.append(f"| Min Qty | {format_number(pos.get('min_qty', 0.0))} |")
+    report.append(f"| Max Qty | {format_number(pos.get('max_qty', 0.0))} |")
+    report.append("")
+    report.append("| Symbol | Avg Notional (USDT) | Trades |")
+    report.append("|---|---|---|")
+    for sym in sorted(pos.get("by_symbol", {}).keys()):
+        avg_n, cnt = pos["by_symbol"][sym]
+        report.append(f"| {sym} | {format_number(avg_n)} | {cnt} |")
     report.append("")
     report.append("### Per Coin Statistics")
     report.append("")

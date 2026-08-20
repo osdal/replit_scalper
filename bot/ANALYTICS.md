@@ -1,33 +1,82 @@
-## Analysis Report - 2026-08-20 22:30:42
+## Analysis Report - 2026-08-20 22:37:50
 
 ### Overall Statistics
 
 | Metric | Value |
 |---|---|
-| Total Opens | 393 |
-| Total Closes | 349 |
+| Total Opens | 407 |
+| Total Closes | 352 |
 | Total Rejected | 0 |
-| Long Opens | 393 |
+| Long Opens | 407 |
 | Short Opens | 0 |
-| Long Closes | 349 |
+| Long Closes | 352 |
 | Short Closes | 0 |
-| Win Rate | 46.13% |
-| Total PnL (Net) | 23.16 |
-| Total Commission | 34.79 |
-| Total PnL (Gross) | 57.95 |
-| Avg PnL per Trade | 0.07 |
-| Profit Factor | 1.18 |
-| Max Drawdown | 31.19 |
+| Win Rate | 45.74% |
+| Total PnL (Net) | 21.51 |
+| Total Commission | 35.09 |
+| Total PnL (Gross) | 56.60 |
+| Avg PnL per Trade | 0.06 |
+| Profit Factor | 1.17 |
+| Max Drawdown | 32.84 |
 | Max Consecutive Losses | 22 |
 | Max Consecutive Wins | 12 |
-| Long Win Rate | 46.13% |
+| Long Win Rate | 45.74% |
 | Short Win Rate | 0.00% |
 | TP Closes | 161 |
-| SL Closes | 188 |
+| SL Closes | 191 |
 | Time Profit Closes | 0 |
-| Avg Hold Time | 33.2 min |
+| Avg Hold Time | 32.9 min |
 | Avg Hold (TP) | 42.7 min |
-| Avg Hold (SL) | 25.0 min |
+| Avg Hold (SL) | 24.7 min |
+
+### Position Sizing
+
+| Metric | Value |
+|---|---|
+| Trades | 352 |
+| Avg Notional (Entry Value, USDT) | 99.61 |
+| Min Notional (USDT) | 71.58 |
+| Max Notional (USDT) | 100.99 |
+| Avg Qty | 2364.07 |
+| Min Qty | 0.00 |
+| Max Qty | 32273.68 |
+
+| Symbol | Avg Notional (USDT) | Trades |
+|---|---|---|
+| 1000PEPEUSDT | 100.00 | 21 |
+| AAVEUSDT | 99.99 | 4 |
+| ADAUSDT | 100.00 | 16 |
+| APTUSDT | 100.00 | 9 |
+| ARBUSDT | 100.00 | 10 |
+| ATOMUSDT | 100.00 | 6 |
+| AVAXUSDT | 100.00 | 12 |
+| BCHUSDT | 99.98 | 9 |
+| BNBUSDT | 99.87 | 3 |
+| BTCUSDT | 72.02 | 5 |
+| DOGEUSDT | 100.00 | 17 |
+| DOTUSDT | 100.00 | 6 |
+| ETHUSDT | 100.19 | 10 |
+| FETUSDT | 100.00 | 13 |
+| FILUSDT | 100.00 | 15 |
+| HBARUSDT | 100.00 | 13 |
+| IMXUSDT | 100.00 | 8 |
+| INJUSDT | 100.00 | 13 |
+| KASUSDT | 100.00 | 8 |
+| LINKUSDT | 100.00 | 11 |
+| LTCUSDT | 100.01 | 4 |
+| NEARUSDT | 100.00 | 9 |
+| ONTUSDT | 100.00 | 8 |
+| OPUSDT | 100.00 | 11 |
+| POLUSDT | 100.00 | 4 |
+| RENDERUSDT | 100.00 | 8 |
+| SOLUSDT | 100.00 | 6 |
+| SUIUSDT | 100.00 | 13 |
+| TAOUSDT | 100.01 | 13 |
+| TIAUSDT | 100.00 | 12 |
+| TRXUSDT | 100.00 | 1 |
+| UNIUSDT | 100.00 | 18 |
+| WIFUSDT | 100.00 | 18 |
+| XRPUSDT | 100.00 | 18 |
 
 ### Per Coin Statistics
 
@@ -39,8 +88,8 @@
 | APTUSDT | 9 | 3 | 6 | 33.33% | -1.20 | 0 |
 | ARBUSDT | 10 | 4 | 6 | 40.00% | 0.24 | 0 |
 | ATOMUSDT | 6 | 2 | 4 | 33.33% | -0.51 | 0 |
-| AVAXUSDT | 11 | 5 | 6 | 45.45% | 0.91 | 0 |
-| BCHUSDT | 8 | 4 | 4 | 50.00% | 0.97 | 0 |
+| AVAXUSDT | 12 | 5 | 7 | 41.67% | 0.45 | 0 |
+| BCHUSDT | 9 | 4 | 5 | 44.44% | 0.35 | 0 |
 | BNBUSDT | 3 | 2 | 1 | 66.67% | 1.04 | 0 |
 | BTCUSDT | 5 | 2 | 3 | 40.00% | 0.02 | 0 |
 | DOGEUSDT | 17 | 9 | 8 | 52.94% | 3.14 | 0 |
@@ -60,7 +109,7 @@
 | POLUSDT | 4 | 2 | 2 | 50.00% | -0.84 | 0 |
 | RENDERUSDT | 8 | 3 | 5 | 37.50% | -1.19 | 0 |
 | SOLUSDT | 6 | 2 | 4 | 33.33% | -0.74 | 0 |
-| SUIUSDT | 12 | 5 | 7 | 41.67% | -0.13 | 0 |
+| SUIUSDT | 13 | 5 | 8 | 38.46% | -0.70 | 0 |
 | TAOUSDT | 13 | 6 | 7 | 46.15% | 0.66 | 0 |
 | TIAUSDT | 12 | 6 | 6 | 50.00% | 1.56 | 0 |
 | TRXUSDT | 1 | 1 | 0 | 100.00% | 1.06 | 0 |
@@ -78,12 +127,12 @@
 | ema_cross_long | 2 | 2 | 0 | 100.00% | 1.92 | 0.20 | 0.96 | 0.00 | 1.02 | 0.00 | 146.6 min |
 | ichimoku_long | 30 | 11 | 19 | 36.67% | -1.28 | 2.95 | 1.13 | -0.72 | 1.62 | -0.97 | 49.0 min |
 | ichimoku_tk_cross_long | 8 | 5 | 3 | 62.50% | 3.13 | 0.80 | 1.04 | -0.69 | 1.16 | -0.70 | 46.0 min |
-| macd_hist_trend_long | 88 | 44 | 44 | 50.00% | 10.60 | 8.81 | 0.99 | -0.75 | 1.33 | -1.88 | 40.8 min |
+| macd_hist_trend_long | 89 | 44 | 45 | 49.44% | 9.99 | 8.91 | 0.99 | -0.75 | 1.33 | -1.88 | 40.4 min |
 | macd_momentum_long | 19 | 10 | 9 | 52.63% | 4.74 | 1.90 | 1.14 | -0.73 | 1.36 | -0.96 | 20.6 min |
 | rsi_bounce_long | 6 | 4 | 2 | 66.67% | 2.08 | 0.60 | 0.81 | -0.58 | 0.86 | -0.60 | 42.7 min |
 | rsi_divergence_long | 2 | 0 | 2 | 0.00% | -1.52 | 0.20 | 0.00 | -0.76 | 0.00 | -0.87 | 4.6 min |
 | sma_cross_long | 4 | 1 | 3 | 25.00% | -0.99 | 0.40 | 0.92 | -0.64 | 0.92 | -0.67 | 22.4 min |
-| stoch_bounce_long | 95 | 43 | 52 | 45.26% | 2.03 | 9.45 | 0.71 | -0.55 | 1.05 | -1.34 | 22.6 min |
+| stoch_bounce_long | 97 | 43 | 54 | 44.33% | 1.00 | 9.65 | 0.71 | -0.55 | 1.05 | -1.34 | 22.2 min |
 | stoch_obos_long | 4 | 1 | 3 | 25.00% | -0.76 | 0.40 | 0.94 | -0.57 | 0.94 | -0.62 | 22.2 min |
 | supertrend_long | 5 | 2 | 3 | 40.00% | -0.33 | 0.50 | 1.23 | -0.93 | 1.24 | -1.09 | 41.8 min |
 | volume_spike_long | 3 | 1 | 2 | 33.33% | -0.28 | 0.30 | 1.00 | -0.64 | 1.00 | -0.64 | 77.5 min |
@@ -113,7 +162,7 @@
 | ichimoku_short | 1.10% | 0.55% | unlimited | 0.00% | 0.00 | [POOR] |
 | ichimoku_tk_cross_long | 1.00% | 0.50% | unlimited | 62.50% | 3.13 | [OK] |
 | ichimoku_tk_cross_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
-| macd_hist_trend_long | 1.00% | 0.50% | unlimited | 50.00% | 10.60 | [WARN] |
+| macd_hist_trend_long | 1.00% | 0.50% | unlimited | 49.44% | 9.99 | [WARN] |
 | macd_hist_trend_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
 | macd_momentum_long | 1.10% | 0.55% | unlimited | 52.63% | 4.74 | [OK] |
 | macd_momentum_short | 1.10% | 0.55% | unlimited | 0.00% | 0.00 | [POOR] |
@@ -124,7 +173,7 @@
 | rsi_divergence_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
 | sma_cross_long | 1.00% | 0.50% | unlimited | 25.00% | -0.99 | [POOR] |
 | sma_cross_short | 1.00% | 0.50% | unlimited | 0.00% | 0.00 | [POOR] |
-| stoch_bounce_long | 0.70% | 0.35% | unlimited | 45.26% | 2.03 | [WARN] |
+| stoch_bounce_long | 0.70% | 0.35% | unlimited | 44.33% | 1.00 | [POOR] |
 | stoch_bounce_short | 0.70% | 0.35% | unlimited | 0.00% | 0.00 | [POOR] |
 | stoch_obos_long | 0.80% | 0.40% | unlimited | 25.00% | -0.76 | [POOR] |
 | stoch_obos_short | 0.80% | 0.40% | unlimited | 0.00% | 0.00 | [POOR] |
@@ -161,7 +210,7 @@
 | 16:00 | 47 | 33 | 70.21% | 21.42 |
 | 17:00 | 25 | 14 | 56.00% | 4.23 |
 | 18:00 | 40 | 3 | 7.50% | -23.04 |
-| 19:00 | 8 | 0 | 0.00% | -5.27 |
+| 19:00 | 11 | 0 | 0.00% | -6.92 |
 
 ### Preset Performance by Hour
 
@@ -173,12 +222,12 @@
 | ema_cross_long |-|-|100%/1.02%|-|-|-|-|-|100%/0.91%|-|-|
 | ichimoku_long |0%/-3.61%|100%/2.09%|25%/-0.93%|25%/-0.78%|0%/-3.90%|-|100%/4.76%|100%/2.10%|100%/1.04%|0%/-2.06%|-|
 | ichimoku_tk_cross_long |0%/-0.70%|-|-|0%/-0.70%|50%/0.25%|100%/0.92%|100%/2.27%|100%/1.10%|-|-|-|
-| macd_hist_trend_long |0%/-3.67%|33%/-0.34%|71%/3.22%|0%/-2.99%|31%/-2.89%|33%/-0.76%|78%/11.37%|71%/7.12%|88%/4.86%|12%/-3.69%|0%/-1.63%|
+| macd_hist_trend_long |0%/-3.67%|33%/-0.34%|71%/3.22%|0%/-2.99%|31%/-2.89%|33%/-0.76%|78%/11.37%|71%/7.12%|88%/4.86%|12%/-3.69%|0%/-2.25%|
 | macd_momentum_long |0%/-0.65%|100%/3.42%|100%/1.36%|0%/-1.63%|33%/-0.22%|100%/2.23%|100%/2.13%|0%/-0.65%|50%/0.34%|0%/-0.92%|0%/-0.66%|
 | rsi_bounce_long |-|-|100%/0.77%|100%/0.76%|100%/0.86%|-|100%/0.85%|-|-|0%/-0.60%|0%/-0.56%|
 | rsi_divergence_long |-|-|-|0%/-0.65%|-|-|-|-|-|-|0%/-0.87%|
 | sma_cross_long |-|-|-|-|-|-|100%/0.92%|0%/-1.27%|0%/-0.64%|-|-|
-| stoch_bounce_long |0%/-1.04%|33%/-0.32%|42%/-0.15%|42%/-0.61%|67%/2.42%|8%/-5.87%|100%/5.22%|81%/7.85%|44%/0.50%|10%/-5.16%|0%/-0.81%|
+| stoch_bounce_long |0%/-1.04%|33%/-0.32%|42%/-0.15%|42%/-0.61%|67%/2.42%|8%/-5.87%|100%/5.22%|81%/7.85%|44%/0.50%|10%/-5.16%|0%/-1.84%|
 | stoch_obos_long |-|-|-|50%/0.44%|-|0%/-0.58%|-|-|0%/-0.62%|-|-|
 | supertrend_long |-|-|100%/1.24%|-|-|-|0%/-0.90%|100%/1.22%|-|0%/-1.90%|-|
 | volume_spike_long |-|-|-|-|-|-|50%/0.35%|-|-|0%/-0.63%|-|
