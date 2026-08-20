@@ -291,6 +291,13 @@ def format_number(value, decimals=2):
     return f"{value:.{decimals}f}"
 
 
+def format_max_pos(value):
+    # max_per_preset=0 означает "без ограничения" (лимиты отключены).
+    if value in (0, 0.0, None, "0"):
+        return "unlimited"
+    return str(value)
+
+
 def generate_report(stats):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report = []
@@ -358,7 +365,7 @@ def generate_report(stats):
         cfg = PRESET_CONFIG[preset]
         tp = cfg.get("tp", 1.0)
         sl = cfg.get("sl", 0.5)
-        max_pos = cfg.get("max_per_preset", "N/A")
+        max_pos = format_max_pos(cfg.get("max_per_preset", "N/A"))
         base_preset = preset.rsplit("_", 1)[0]
         actual = stats["preset_stats"].get(preset, stats["preset_stats"].get(base_preset, {}))
         actual_wr = (actual.get("wins", 0) / actual.get("trades", 1) * 100) if actual.get("trades", 0) > 0 else 0.0
@@ -427,7 +434,7 @@ def generate_report(stats):
         cfg = PRESET_CONFIG[preset]
         tp = cfg.get("tp", 1.0)
         sl = cfg.get("sl", 0.5)
-        max_pos = cfg.get("max_per_preset", "N/A")
+        max_pos = format_max_pos(cfg.get("max_per_preset", "N/A"))
         report.append(f"| {preset} | {format_number(tp)}% | {format_number(sl)}% | {max_pos} |")
     report.append("")
     report.append("---")
