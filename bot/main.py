@@ -428,7 +428,7 @@ async def _sync_position_on_start(
                             if sync_pos and getattr(sync_pos, "recovery_chain_id", None):
                                 await recovery.release(chain_id=sync_pos.recovery_chain_id)
                                 log.info(f"[SYNC] Released locked recovery chain #{sync_pos.recovery_chain_id} for {cfg.symbol}")
-                        if notifier and notifier.bot and sync_pos:
+                        if notifier and notifier.bot and sync_pos and ((sync_pos.mode if sync_pos else None) or cfg.mode) == "live":
                             notifier.send_message(f"🔒 CLOSED (sync) {cfg.symbol} {sync_pos.direction} | Entry={sync_pos.entry_price} PnL={pnl_val:+.4f}")
             except Exception as e:
                 log.debug(f"[SYNC] Cleanup error: {e}")
@@ -592,6 +592,7 @@ async def _sync_position_on_start(
         total_qty=exchange_qty,
         remaining_qty=exchange_qty,
         entry_timestamp=entry_timestamp,
+        mode="live",
     )
 
     import datetime
@@ -603,6 +604,7 @@ async def _sync_position_on_start(
         tp2_price=round(tp2_price, 8),
         ema_fast=0, ema_slow=0, volume=0, volume_ma=0,
         timestamp=entry_timestamp,
+        mode="live",
     )
     # Check for locked recovery chain to preserve recovery context
     if recovery and cfg.mode == "live":
@@ -790,8 +792,8 @@ async def _run_live_or_paper(
     events: logging.Logger,
     notifier: Notifier,
 ):
-    order_mgr = OrderManager(cfg, log, client=client if cfg.mode == "live" else None)
-    tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr if cfg.mode == "live" else None, notifier=notifier)
+    order_mgr = OrderManager(cfg, log, client=client)
+    tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr, notifier=notifier)
     handler   = SignalHandler(cfg, log)
 
     log.info("[STARTUP] Step 1: syncing position on start")
@@ -844,6 +846,117 @@ async def _run_live_or_paper(
         if cnt > 0:
             _preset_open_counts[preset] = cnt - 1
 
+    async def process_hit(hit: str, current_price: float, candle_time_ms: int):
+        pos = tracker.position
+        pos_mode = (pos.mode if pos else None) or cfg.mode
+        is_live_close = (pos_mode == "live")
+        is_live = (pos_mode == "live")
+        if hit == "TP1" and not pos.is_recovery:
+            events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
+            preset_before = getattr(pos, 'preset', None)
+            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+            if preset_before and tracker.position is None:
+                _on_position_closed(preset_before)
+            new_sl = tracker.position.sl_price if tracker.position else 'N/A'
+            events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
+            if is_live:
+                notifier.send_event("tp1_hit", {
+                    "symbol": cfg.symbol,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "exit_price": current_price,
+                    "pnl": pnl,
+                    "qty": pos.total_qty,
+                })
+                notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+            if tracker.position is not None and tracker.position.remaining_qty > 0.000001:
+                await order_mgr.move_sl_to_breakeven(
+                    pos.direction, pos.entry_price,
+                    remaining_qty=tracker.position.remaining_qty,
+                    tp2_price=pos.tp2_price,
+                    mode=pos_mode,
+                )
+        elif hit == "TP1" and pos.is_recovery:
+            events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
+            preset_before = getattr(pos, 'preset', None)
+            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+            if preset_before and tracker.position is None:
+                _on_position_closed(preset_before)
+            events.info(f"TP1_APPLY_RECOVERY | pnl={pnl}")
+            await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+            if is_live_close:
+                real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                if real_qty > 0 and real_qty < 0.001:
+                    await order_mgr.close_dust(pos.direction, mode=pos_mode)
+            if is_live:
+                notifier.send_event("tp1_hit", {
+                    "symbol": cfg.symbol,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "exit_price": current_price,
+                    "pnl": pnl,
+                    "qty": pos.total_qty,
+                })
+                notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+            await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+            await recovery.report_result(pnl)
+        elif hit == "TP2":
+            events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
+            preset_before = getattr(pos, 'preset', None)
+            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+            if preset_before and tracker.position is None:
+                _on_position_closed(preset_before)
+            events.info(f"TP2_APPLY | pnl={pnl}")
+            if is_live:
+                notifier.send_event("tp2_hit", {
+                    "symbol": cfg.symbol,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "exit_price": current_price,
+                    "pnl": pnl,
+                    "qty": pos.total_qty,
+                })
+                notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+            await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+            if is_live_close:
+                real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                if real_qty > 0 and real_qty < 0.001:
+                    await order_mgr.close_dust(pos.direction, mode=pos_mode)
+            if pos.is_recovery:
+                await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+            elif pnl < 0:
+                await recovery.report(pnl=pnl)
+            await recovery.report_result(pnl)
+        else:
+            events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
+            preset_before = getattr(pos, 'preset', None)
+            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+            if preset_before and tracker.position is None:
+                _on_position_closed(preset_before)
+            events.info(f"SL_APPLY | pnl={pnl}")
+            if is_live:
+                notifier.send_event("sl_hit", {
+                    "symbol": cfg.symbol,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "exit_price": current_price,
+                    "pnl": pnl,
+                    "qty": pos.total_qty,
+                })
+                notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+            await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+            if is_live_close:
+                real_qty = await order_mgr._get_real_position_qty(pos.direction)
+                if real_qty > 0 and real_qty < 0.001:
+                    await order_mgr.close_dust(pos.direction, mode=pos_mode)
+            if pos.is_recovery:
+                await recovery.release(chain_id=pos.recovery_chain_id)
+                await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
+                log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
+            elif pnl < 0:
+                await recovery.report(pnl=pnl)
+            await recovery.report_result(pnl)
+
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
         last_candle_time[0] = time.time()
@@ -880,7 +993,7 @@ async def _run_live_or_paper(
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
                 log.info(f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} htf_trend={htf_trend_now}")
                 # Синхронизируем unrealized PnL с биржей для открытых позиций
-                if cfg.mode == "live" and tracker.has_open_position():
+                if tracker.has_open_position() and ((tracker.position.mode if tracker.position else None) or cfg.mode) == "live":
                     await tracker.sync_unrealized_pnl()
 
             # Check for dust positions and stale orders on exchange every 12 candles
@@ -922,7 +1035,7 @@ async def _run_live_or_paper(
             if tracker.has_open_position():
                 # Проверяем реальный объём позиции на бирже (раз в 12 свечей ~ 1 минута)
                 pos = tracker.position
-                if pos and candle_count[0] % 12 == 0 and cfg.mode == "live":
+                if pos and candle_count[0] % 12 == 0 and ((pos.mode if pos else None) or cfg.mode) == "live":
                     try:
                         real_qty = await order_mgr._get_real_position_qty(pos.direction)
                         if real_qty < 0:
@@ -955,22 +1068,25 @@ async def _run_live_or_paper(
                                 if preset_before and tracker.position is None:
                                     _on_position_closed(preset_before)
                                 if hit_type == "TP2":
-                                    notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                    notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                    if (pos.mode if pos else None) == "live" or cfg.mode == "live":
+                                        notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
+                                        notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "TP1":
-                                    notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                    notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                    if (pos.mode if pos else None) == "live" or cfg.mode == "live":
+                                        notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
+                                        notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "SL":
-                                    notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                    notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                    if (pos.mode if pos else None) == "live" or cfg.mode == "live":
+                                        notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
+                                        notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 # Отменяем оставшиеся ордера на бирже
-                                await order_mgr.cancel_all_tp_sl(pos.direction)
+                                await order_mgr.cancel_all_tp_sl(pos.direction, mode=(pos.mode if pos else None) or cfg.mode)
                                 if pos.is_recovery:
                                     await recovery.release(chain_id=pos.recovery_chain_id)
                                     await recovery.report(pnl=pnl)
                                     log.info(f"[RECOVERY] External close on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
                                 elif pnl < 0:
-                                    await recovery.report(pnl=pnl)
+                                        await recovery.report(pnl=pnl)
                                 await recovery.report_result(pnl)
                             else:
                                 # Закрыта частично (между 0% и 50% от того, что бот
@@ -989,117 +1105,7 @@ async def _run_live_or_paper(
 
                 hit = tracker.check(current_price)
                 if hit:
-                    pos = tracker.position
-                    if hit == "TP1" and not pos.is_recovery:
-                        # TP1: биржа закрыла часть, бот только обновляет стейт и переносит SL
-                        events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
-                        preset_before = getattr(pos, 'preset', None)
-                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
-                        if preset_before and tracker.position is None:
-                            _on_position_closed(preset_before)
-                        new_sl = tracker.position.sl_price if tracker.position else 'N/A'
-                        events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
-                        # Notify TP1 hit
-                        notifier.send_event("tp1_hit", {
-                            "symbol": cfg.symbol,
-                            "direction": pos.direction,
-                            "entry_price": pos.entry_price,
-                            "exit_price": current_price,
-                            "pnl": pnl,
-                            "qty": pos.total_qty,
-                        })
-                        notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-                        # При полном закрытии по TP1 (tp1_close_pct=100, позиция уже
-                        # очищена) SL переносить некуда — только остаток переносим в breakeven.
-                        if tracker.position is not None and tracker.position.remaining_qty > 0.000001:
-                            await order_mgr.move_sl_to_breakeven(
-                                pos.direction, pos.entry_price,
-                                remaining_qty=tracker.position.remaining_qty,
-                                tp2_price=pos.tp2_price,
-                            )
-                    elif hit == "TP1" and pos.is_recovery:
-                        # Recovery TP1: закрытие 100% позиции, отмена ордеров, репорт
-                        events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
-                        preset_before = getattr(pos, 'preset', None)
-                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
-                        if preset_before and tracker.position is None:
-                            _on_position_closed(preset_before)
-                        events.info(f"TP1_APPLY_RECOVERY | pnl={pnl}")
-                        await order_mgr.cancel_all_tp_sl(pos.direction)
-                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                        if real_qty > 0 and real_qty < 0.001:
-                            await order_mgr.close_dust(pos.direction)
-                        notifier.send_event("tp1_hit", {
-                            "symbol": cfg.symbol,
-                            "direction": pos.direction,
-                            "entry_price": pos.entry_price,
-                            "exit_price": current_price,
-                            "pnl": pnl,
-                            "qty": pos.total_qty,
-                        })
-                        notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-                        await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
-                        await recovery.report_result(pnl)
-                    elif hit == "TP2":
-                        events.info(f"TP2_HIT | price={current_price} qty={pos.remaining_qty}")
-                        preset_before = getattr(pos, 'preset', None)
-                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
-                        if preset_before and tracker.position is None:
-                            _on_position_closed(preset_before)
-                        events.info(f"TP2_APPLY | pnl={pnl}")
-                        # Notify TP2 hit
-                        notifier.send_event("tp2_hit", {
-                            "symbol": cfg.symbol,
-                            "direction": pos.direction,
-                            "entry_price": pos.entry_price,
-                            "exit_price": current_price,
-                            "pnl": pnl,
-                            "qty": pos.total_qty,
-                        })
-                        notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-                        # Отменяем оставшиеся ордера (SL если остался)
-                        await order_mgr.cancel_all_tp_sl(pos.direction)
-                        # Проверяем, не осталась ли пылевая позиция
-                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                        if real_qty > 0 and real_qty < 0.001:
-                            await order_mgr.close_dust(pos.direction)
-                        if pos.is_recovery:
-                            await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
-                        elif pnl < 0:
-                            await recovery.report(pnl=pnl)
-                        await recovery.report_result(pnl)
-                    else:
-                        # SL: биржа закрыла позицию
-                        events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
-                        preset_before = getattr(pos, 'preset', None)
-                        pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
-                        if preset_before and tracker.position is None:
-                            _on_position_closed(preset_before)
-                        events.info(f"SL_APPLY | pnl={pnl}")
-                        # Notify SL hit
-                        notifier.send_event("sl_hit", {
-                            "symbol": cfg.symbol,
-                            "direction": pos.direction,
-                            "entry_price": pos.entry_price,
-                            "exit_price": current_price,
-                            "pnl": pnl,
-                            "qty": pos.total_qty,
-                        })
-                        notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-                        # Отменяем оставшиеся ордера (TP1/TP2 если остались)
-                        await order_mgr.cancel_all_tp_sl(pos.direction)
-                        # Проверяем, не осталась ли пылевая позиция
-                        real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                        if real_qty > 0 and real_qty < 0.001:
-                            await order_mgr.close_dust(pos.direction)
-                        if pos.is_recovery:
-                            await recovery.release(chain_id=pos.recovery_chain_id)
-                            await recovery.report(pnl=pnl)
-                            log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
-                        elif pnl < 0:
-                            await recovery.report(pnl=pnl)
-                        await recovery.report_result(pnl)
-                        return
+                    await process_hit(hit, current_price, candle_time_ms)
 
             # Защита от открытия второй позиции по той же монете.
             # Если после обработки сигналов TP/SL позиция всё ещё отслеживается
@@ -1240,7 +1246,7 @@ async def _run_live_or_paper(
                         f"(positions={risk_check.get('positions_open')})"
                     )
                     if reporter is not None:
-                        balance = await order_mgr.get_balance() if cfg.mode == "live" else cfg.paper_balance
+                        balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                         sim_qty = _calc_simulated_qty(cfg, signal, balance)
                         signal_data["qty"] = sim_qty
                         tid = await reporter.report_rejected(signal_data, f"risk:{reason}", qty=sim_qty)
@@ -1277,7 +1283,7 @@ async def _run_live_or_paper(
                     f" — skipping signal for {cfg.symbol}"
                 )
                 if reporter is not None:
-                    balance = await order_mgr.get_balance() if cfg.mode == "live" else cfg.paper_balance
+                    balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                     sim_qty = _calc_simulated_qty(cfg, signal, balance)
                     signal_data["qty"] = sim_qty
                     tid = await reporter.report_rejected(signal_data, "risk:debt_limit", qty=sim_qty)
@@ -1318,7 +1324,7 @@ async def _run_live_or_paper(
                 # внешняя сделка) — recovery-ордер наложится на неё и на бирже
                 # (one-way mode) они сольются в одну позицию. В таком случае
                 # компенсировать нельзя — отпускаем цепочку.
-                if cfg.mode == "live" and order_mgr:
+                if (signal.mode or cfg.mode) == "live" and order_mgr:
                     try:
                         existing_qty = await order_mgr._get_real_position_qty(signal.direction)
                         if existing_qty >= 0.000001:
@@ -1332,7 +1338,7 @@ async def _run_live_or_paper(
                     except Exception as e:
                         log.warning(f"[RECOVERY] Position check failed ({e}) — proceeding cautiously")
 
-            result = await order_mgr.open_position(signal, recovery_target=recovery_target)
+            result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
             if result is not None:
                 entry_price, qty = result[0], result[1]
                 signal_data["qty"] = qty
@@ -1366,7 +1372,8 @@ async def _run_live_or_paper(
                     recovery_chain_id=chain_id,
                 )
                 events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
-                notifier.send_signal(signal_data)
+                if (getattr(signal, 'mode', None) or cfg.mode) == "live":
+                    notifier.send_signal(signal_data)
                 _recent_open_times.append(now)
                 _last_signal_time[cfg.symbol] = now
                 _on_position_opened(signal.preset)
@@ -1398,7 +1405,7 @@ async def _run_live_or_paper(
                     
                 if tracker.has_open_position():
                     pos = tracker.position
-                    if pos:
+                    if pos and ((pos.mode if pos else None) or cfg.mode) == "live":
                         exchange_pos = await order_mgr.get_position_info()
                         if exchange_pos:
                             local_qty = pos.remaining_qty
@@ -1432,7 +1439,7 @@ async def _run_live_or_paper(
                                     pnl = await tracker.apply_hit_async(hit_type, current_price or pos.entry_price, candle_time_ms)
                                     if preset_before and tracker.position is None:
                                         _on_position_closed(preset_before)
-                                    await order_mgr.cancel_all_tp_sl(pos.direction)
+                                    await order_mgr.cancel_all_tp_sl(pos.direction, mode=(pos.mode if pos else None) or cfg.mode)
                                     if pos.is_recovery:
                                         await recovery.release(chain_id=pos.recovery_chain_id)
                                         await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
@@ -1464,6 +1471,30 @@ async def _run_live_or_paper(
 
     watchdog_task = asyncio.create_task(_watchdog())
 
+    async def tick_sl_tp_check():
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.sleep(5)
+                if shutdown_event.is_set():
+                    break
+                if not tracker.has_open_position():
+                    continue
+                try:
+                    ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
+                    current_price = float(ticker.get("price", 0))
+                except Exception:
+                    continue
+                if current_price <= 0:
+                    continue
+                hit = tracker.check(current_price)
+                if hit:
+                    candle_time_ms = int(time.time() * 1000)
+                    await process_hit(hit, current_price, candle_time_ms)
+            except Exception as e:
+                log.debug(f"[TICK_SL_TP] error: {e}")
+
+    tick_task = asyncio.create_task(tick_sl_tp_check())
+
     async def _time_profit_close_check():
         while not shutdown_event.is_set():
             try:
@@ -1477,6 +1508,7 @@ async def _run_live_or_paper(
                 pos = tracker.position
                 if not pos or pos.closed or not pos.opened_at:
                     continue
+                pos_mode = (pos.mode if pos else None) or cfg.mode
                 try:
                     ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
                     current_price = float(ticker.get("price", 0))
@@ -1500,12 +1532,12 @@ async def _run_live_or_paper(
                 )
                 if order_mgr:
                     try:
-                        await order_mgr.cancel_all_tp_sl(pos.direction)
+                        await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
                     except Exception:
                         pass
-                    if cfg.mode == "live":
+                    if pos_mode == "live":
                         try:
-                            await order_mgr.close_position_market(pos.direction)
+                            await order_mgr.close_position_market(pos.direction, mode=pos_mode)
                         except Exception as e:
                             log.warning(f"[TIME_PROFIT] Live close failed: {e}")
                 trade_id_before = tracker._trade_id
@@ -1525,10 +1557,11 @@ async def _run_live_or_paper(
                     elif pnl < 0:
                         await recovery.report(pnl=pnl)
                     await recovery.report_result(pnl)
-                notifier.send_message(
-                    f"⏰ TIME_PROFIT {cfg.symbol} {pos.direction} | "
-                    f"Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}"
-                )
+                if pos_mode == "live":
+                    notifier.send_message(
+                        f"⏰ TIME_PROFIT {cfg.symbol} {pos.direction} | "
+                        f"Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}"
+                    )
             except Exception as e:
                 log.error(f"[TIME_PROFIT] Check error: {e}", exc_info=True)
 
@@ -1546,7 +1579,7 @@ async def _run_live_or_paper(
     )
     
     # Останавливаем фоновые задачи
-    for task in (check_task, sim_task, watchdog_task, time_profit_task):
+    for task in (check_task, sim_task, watchdog_task, time_profit_task, tick_task):
         if not task.done():
             task.cancel()
             try:

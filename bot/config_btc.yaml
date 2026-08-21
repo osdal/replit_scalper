@@ -68,7 +68,7 @@ fixed_risk_usd: 0.5
 htf_ema_fast: 12
 htf_ema_slow: 51
 htf_enabled: true
-htf_timeframe: 1h
+htf_timeframe: 15m
 leverage: 150
 log_file: logs/bot.log
 margin_pct: 0

@@ -69,6 +69,7 @@ class Signal:
     bb_middle: float = 0.0
     bb_lower: float = 0.0
     atr: float = 0.0
+    mode: Optional[str] = None  # "paper"|"live"|None (None = наследует режим бота)
 
 
 # ── Indicator calculations ────────────────────────────────────────────────
@@ -264,6 +265,7 @@ def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
         bb_middle=round(float(curr.get("bb_middle", 0) or 0), 4),
         bb_lower=round(float(curr.get("bb_lower", 0) or 0), 4),
         atr=round(float(curr.get("atr", 0) or 0), 6),
+        mode=preset_cfg.get("mode") or cfg.mode,
     )
 
 

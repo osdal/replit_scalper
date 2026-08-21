@@ -48,6 +48,7 @@ class Position:
     is_recovery: bool = False       # True если это компенсирующая сделка
     recovery_chain_id: Optional[int] = None
     opened_at: Optional[str] = None  # ISO timestamp when position was opened (for TIME_PROFIT_CLOSE_HOURS)
+    mode: Optional[str] = None       # "paper"|"live"|None — режим сделки (из пресета)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -101,6 +102,7 @@ class PositionTracker:
             "recovery_chain_id": p.recovery_chain_id,
             "trade_id":        self._trade_id,
             "opened_at":       p.opened_at,
+            "mode":            p.mode,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -145,6 +147,7 @@ class PositionTracker:
                 is_recovery=data.get("is_recovery", False),
                 recovery_chain_id=data.get("recovery_chain_id"),
                 opened_at=data.get("opened_at"),
+                mode=data.get("mode"),
             )
             self._trade_id = data.get("trade_id")
             self.log.info(
@@ -179,7 +182,7 @@ class PositionTracker:
                 "qty":         qty,
                 "entry_time":  str(signal.timestamp).replace(" ", "T"),
                 "is_open":     True,
-                "mode":        self.cfg.mode,
+                "mode":        signal.mode or self.cfg.mode,
                 "ema_fast":    signal.ema_fast,
                 "ema_slow":    signal.ema_slow,
                 "volume":      signal.volume,
@@ -340,7 +343,8 @@ class PositionTracker:
 
     def _estimated_commission(self, entry_price: float, exit_price: float, qty: float) -> float:
         """Расчётная (симулируемая) комиссия Taker для сделки в USDT."""
-        if self.cfg.mode == "live":
+        eff_mode = (self.position.mode if self.position else None) or self.cfg.mode
+        if eff_mode == "live":
             return 0.0  # В live комиссия берётся с биржи, в БД не пишем расчётную
         fee = self.cfg.commission_pct / 100.0
         return round((abs(entry_price) + abs(exit_price)) * abs(qty) * fee, 8)
@@ -386,6 +390,7 @@ class PositionTracker:
             is_recovery=is_recovery,
             recovery_chain_id=recovery_chain_id,
             opened_at=datetime.datetime.utcnow().isoformat() if signal.timestamp is None else str(signal.timestamp).replace(" ", "T"),
+            mode=signal.mode,
         )
         self._trade_id = None
         self._save_state()

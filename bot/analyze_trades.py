@@ -6,7 +6,8 @@ Adapted from ClawStreet bot analytics.
 
 import sys
 import os
-from datetime import datetime
+import argparse
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,15 +22,11 @@ def parse_timestamp(ts_str):
     if not ts_str:
         return None
     try:
-        # База хранит ISO как '2026-08-20T09:41:00[.ffffff]'; приводим 'T' к пробелу.
-        ts_str = ts_str.replace("Z", "").replace("T", " ").split(".")[0]
-        return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        ts_str = ts_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_str)
+        return dt.replace(tzinfo=None)
     except Exception:
-        try:
-            ts_str = ts_str.replace("Z", "").replace("T", " ")
-            return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
-        except Exception:
-            return None
+        return None
 
 
 def load_trades(db_path=None):
@@ -44,11 +41,24 @@ def load_trades(db_path=None):
     return trades
 
 
-def analyze_trades(trades=None, excluded_presets=None):
+def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time=None):
     if trades is None:
         trades = load_trades()
     if excluded_presets is None:
         excluded_presets = set()
+
+    if start_time is not None or end_time is not None:
+        filtered = []
+        for t in trades:
+            ts = parse_timestamp(t.get("entry_time", ""))
+            if ts is None:
+                continue
+            if start_time is not None and ts < start_time:
+                continue
+            if end_time is not None and ts > end_time:
+                continue
+            filtered.append(t)
+        trades = filtered
 
     opens = [t for t in trades if t.get("status") == "open" or (t.get("is_open") == 1 and t.get("status") != "rejected")]
     closes = [t for t in trades if t.get("status") == "closed"]
@@ -80,6 +90,7 @@ def analyze_trades(trades=None, excluded_presets=None):
         "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "commission": 0.0,
         "avg_win": 0.0, "avg_loss": 0.0, "best_trade": 0.0, "worst_trade": 0.0,
         "wins_list": [], "losses_list": [], "hold_times": [],
+        "hold_count": 0, "hold_times_tp": [], "hold_times_sl": [],
     })
 
     total_commission = 0.0
@@ -106,8 +117,6 @@ def analyze_trades(trades=None, excluded_presets=None):
     for preset, s in preset_stats.items():
         s["avg_win"] = sum(s["wins_list"]) / len(s["wins_list"]) if s["wins_list"] else 0.0
         s["avg_loss"] = sum(s["losses_list"]) / len(s["losses_list"]) if s["losses_list"] else 0.0
-        s["avg_hold_time"] = 0.0
-        s["hold_count"] = 0
 
     # Hold times — для каждой закрытой сделки: exit_time - entry_time из одной записи
     avg_hold_time = 0.0
@@ -133,6 +142,11 @@ def analyze_trades(trades=None, excluded_presets=None):
             avg_hold_time += hold_minutes
             hold_time_count += 1
             reason = close_t.get("exit_reason", "")
+            if pstats is not None:
+                if "TP" in reason:
+                    pstats["hold_times_tp"].append(hold_minutes)
+                elif "SL" in reason:
+                    pstats["hold_times_sl"].append(hold_minutes)
             if "TP" in reason:
                 avg_hold_tp += hold_minutes
                 hold_tp_count += 1
@@ -145,6 +159,11 @@ def analyze_trades(trades=None, excluded_presets=None):
     avg_hold_time = avg_hold_time / hold_time_count if hold_time_count else 0.0
     avg_hold_tp = avg_hold_tp / hold_tp_count if hold_tp_count else 0.0
     avg_hold_sl = avg_hold_sl / hold_sl_count if hold_sl_count else 0.0
+
+    for preset, s in preset_stats.items():
+        s["avg_hold_time"] = sum(s["hold_times"]) / len(s["hold_times"]) if s["hold_times"] else 0.0
+        s["avg_hold_tp"] = sum(s["hold_times_tp"]) / len(s["hold_times_tp"]) if s["hold_times_tp"] else 0.0
+        s["avg_hold_sl"] = sum(s["hold_times_sl"]) / len(s["hold_times_sl"]) if s["hold_times_sl"] else 0.0
 
     # Overall stats
     included_closes = [t for t in closes if (t.get("preset") or "unknown") not in excluded_presets]
@@ -174,6 +193,53 @@ def analyze_trades(trades=None, excluded_presets=None):
         else:
             current_consecutive = 0
             consecutive_wins = 0
+
+    loss_streaks = []
+    current_streak = None
+    sorted_for_streaks = sorted(included_closes, key=lambda x: x.get("entry_time", ""))
+    for t in sorted_for_streaks:
+        pnl = float(t.get("pnl") or 0.0)
+        ts = parse_timestamp(t.get("entry_time", ""))
+        if pnl < 0:
+            if current_streak is None:
+                current_streak = {
+                    "start": ts,
+                    "end": ts,
+                    "count": 1,
+                    "pnl": pnl,
+                    "symbols": {t.get("symbol", "?")},
+                    "presets": {t.get("preset") or "unknown"},
+                    "start_hour": ts.hour if ts else None,
+                }
+            else:
+                current_streak["count"] += 1
+                current_streak["pnl"] += pnl
+                current_streak["end"] = ts
+                current_streak["symbols"].add(t.get("symbol", "?"))
+                current_streak["presets"].add(t.get("preset") or "unknown")
+        else:
+            if current_streak is not None:
+                loss_streaks.append(current_streak)
+                current_streak = None
+    if current_streak is not None:
+        loss_streaks.append(current_streak)
+
+    streak_lengths = defaultdict(int)
+    streak_pnl = defaultdict(float)
+    streak_coins = defaultdict(int)
+    streak_presets = defaultdict(int)
+    streak_hours = defaultdict(lambda: {"count": 0, "pnl": 0.0})
+    for s in loss_streaks:
+        streak_lengths[s["count"]] += 1
+        streak_pnl[s["count"]] += s["pnl"]
+        for sym in s["symbols"]:
+            streak_coins[sym] += 1
+        for pr in s["presets"]:
+            streak_presets[pr] += 1
+        h = s.get("start_hour")
+        if h is not None:
+            streak_hours[h]["count"] += 1
+            streak_hours[h]["pnl"] += s["pnl"]
 
     # Drawdown
     equity_curve = []
@@ -423,6 +489,25 @@ def analyze_trades(trades=None, excluded_presets=None):
         "pos_stats": pos_stats,
         "metrics": metrics,
         "excluded_presets": sorted(excluded_presets),
+        "loss_streaks": {
+            "count": len(loss_streaks),
+            "by_length": {k: {"count": v, "pnl": streak_pnl[k]} for k, v in sorted(streak_lengths.items())},
+            "coins": dict(sorted(streak_coins.items(), key=lambda x: x[1], reverse=True)),
+            "presets": dict(sorted(streak_presets.items(), key=lambda x: x[1], reverse=True)),
+            "hours": dict(sorted(streak_hours.items())),
+            "raw": [
+                {
+                    "start": s["start"].isoformat() if s["start"] else None,
+                    "end": s["end"].isoformat() if s["end"] else None,
+                    "count": s["count"],
+                    "pnl": s["pnl"],
+                    "symbols": sorted(s["symbols"]),
+                    "presets": sorted(s["presets"]),
+                    "start_hour": s.get("start_hour"),
+                }
+                for s in loss_streaks
+            ],
+        },
     }
 
 
@@ -453,10 +538,13 @@ def _pearson(xs, ys):
     return num / (dx * dy)
 
 
-def generate_report(stats):
+def generate_report(stats, start_time=None, end_time=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report = []
     report.append(f"## Analysis Report - {now}")
+    if start_time is not None or end_time is not None:
+        report.append("")
+        report.append(f"_Filtered window: {start_time or '...'} -> {end_time or '...'}_")
     report.append("")
     report.append("### Overall Statistics")
     report.append("")
@@ -489,6 +577,56 @@ def generate_report(stats):
     report.append(f"| Avg Hold (TP) | {format_number(stats['avg_hold_tp'], 1)} min |")
     report.append(f"| Avg Hold (SL) | {format_number(stats['avg_hold_sl'], 1)} min |")
     report.append("")
+    report.append(f"| Max Consecutive Losses | {stats['max_consecutive_losses']} |")
+    report.append(f"| Max Consecutive Wins | {stats['max_consecutive_wins']} |")
+    report.append("")
+    streak_stats = stats.get("loss_streaks", {})
+    report.append("### Loss Streaks")
+    report.append("")
+    report.append(f"| Total Streaks | {streak_stats.get('count', 0)} |")
+    report.append(f"| Max Consecutive Losses | {stats['max_consecutive_losses']} |")
+    report.append("")
+    report.append("#### Streak Length Distribution")
+    report.append("")
+    report.append("| Length | Streaks | Total PnL |")
+    report.append("|---|---|---|")
+    for length, data in sorted(streak_stats.get("by_length", {}).items()):
+        report.append(f"| {length} loss | {data['count']} | {format_number(data['pnl'])} |")
+    report.append("")
+    report.append("#### Streak Coins")
+    report.append("")
+    report.append("| Symbol | Streaks Involved |")
+    report.append("|---|---|")
+    for sym, cnt in list(streak_stats.get("coins", {}).items())[:20]:
+        report.append(f"| {sym} | {cnt} |")
+    report.append("")
+    report.append("#### Streak Presets")
+    report.append("")
+    report.append("| Preset | Streaks Involved |")
+    report.append("|---|---|")
+    for pr, cnt in list(streak_stats.get("presets", {}).items())[:20]:
+        report.append(f"| {pr} | {cnt} |")
+    report.append("")
+    report.append("#### Loss Streaks by Hour")
+    report.append("")
+    report.append("| Hour | Streaks | Total PnL |")
+    report.append("|---|---|---|")
+    for h in sorted(streak_stats.get("hours", {}).keys()):
+        d = streak_stats["hours"][h]
+        report.append(f"| {h:02d}:00 | {d['count']} | {format_number(d['pnl'])} |")
+    report.append("")
+    if streak_stats.get("raw"):
+        report.append("#### Recent Loss Streaks")
+        report.append("")
+        report.append("| Start | End | Length | PnL | Symbols | Presets |")
+        report.append("|---|---|---|---|---|---|")
+        for s in streak_stats["raw"][-20:]:
+            syms = ", ".join(s.get("symbols", [])[:5])
+            prs = ", ".join(s.get("presets", [])[:5])
+            start = (s.get("start") or "")[:19]
+            end = (s.get("end") or "")[:19]
+            report.append(f"| {start} | {end} | {s['count']} | {format_number(s['pnl'])} | {syms} | {prs} |")
+        report.append("")
     pos = stats.get("pos_stats", {})
     report.append("### Position Sizing")
     report.append("")
@@ -548,8 +686,8 @@ def generate_report(stats):
     report.append("")
     report.append("### Per Preset Statistics")
     report.append("")
-    report.append("| Preset | Trades | Wins | Losses | Win% | PnL | Commission | AvgWin | AvgLoss | Best | Worst | AvgHold |")
-    report.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    report.append("| Preset | Trades | Wins | Losses | Win% | PnL | Commission | AvgWin | AvgLoss | Best | Worst | AvgHold | AvgHold TP | AvgHold SL |")
+    report.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for preset, data in sorted(stats["preset_stats"].items()):
         win_rate = (data["wins"] / data["trades"] * 100) if data["trades"] > 0 else 0.0
         report.append(
@@ -557,7 +695,27 @@ def generate_report(stats):
             f"{format_number(win_rate)}% | {format_number(data['pnl'])} | {format_number(data.get('commission', 0.0))} | "
             f"{format_number(data['avg_win'])} | {format_number(data['avg_loss'])} | "
             f"{format_number(data['best_trade'])} | {format_number(data['worst_trade'])} | "
-            f"{format_number(data.get('avg_hold_time', 0), 1)} min |"
+            f"{format_number(data.get('avg_hold_time', 0), 1)} min | "
+            f"{format_number(data.get('avg_hold_tp', 0), 1)} min | "
+            f"{format_number(data.get('avg_hold_sl', 0), 1)} min |"
+        )
+    report.append("")
+    report.append("### Per Preset Hold Times")
+    report.append("")
+    report.append("| Preset | Trades | Avg Hold | Avg Hold TP | Avg Hold SL | TP/SL Ratio |")
+    report.append("|---|---|---|---|---|---|")
+    for preset, data in sorted(stats["preset_stats"].items()):
+        if data["trades"] == 0:
+            continue
+        avg_tp = data.get("avg_hold_tp", 0.0)
+        avg_sl = data.get("avg_hold_sl", 0.0)
+        ratio = (avg_tp / avg_sl) if avg_sl > 0 else 0.0
+        report.append(
+            f"| {preset} | {data['trades']} | "
+            f"{format_number(data.get('avg_hold_time', 0), 1)} min | "
+            f"{format_number(avg_tp, 1)} min | "
+            f"{format_number(avg_sl, 1)} min | "
+            f"{format_number(ratio, 1)}x |"
         )
     report.append("")
     report.append("### Per Preset Configuration vs Performance")
@@ -668,16 +826,34 @@ def generate_report(stats):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Analyze bot trades")
+    parser.add_argument("--hours", type=int, default=None, help="Filter trades from last N hours")
+    parser.add_argument("--start", type=str, default=None, help="Filter trades from this ISO datetime")
+    parser.add_argument("--end", type=str, default=None, help="Filter trades up to this ISO datetime")
+    parser.add_argument("--no-write", action="store_true", help="Print report without writing to ANALYTICS.md")
+    args = parser.parse_args()
+
+    start_time = None
+    end_time = None
+    if args.hours is not None:
+        end_time = datetime.now()
+        start_time = end_time - timedelta(hours=args.hours)
+    elif args.start:
+        start_time = parse_timestamp(args.start)
+    if args.end:
+        end_time = parse_timestamp(args.end)
+
     trades = load_trades()
-    stats = analyze_trades(trades)
-    report = generate_report(stats)
+    stats = analyze_trades(trades, start_time=start_time, end_time=end_time)
+    report = generate_report(stats, start_time=start_time, end_time=end_time)
     print(report)
 
-    analytics_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANALYTICS.md")
-    with open(analytics_path, "w", encoding="utf-8") as f:
-        f.write(report)
-        f.write("\n")
-    print(f"\nReport written to {analytics_path}")
+    if not args.no_write:
+        analytics_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANALYTICS.md")
+        with open(analytics_path, "w", encoding="utf-8") as f:
+            f.write(report)
+            f.write("\n")
+        print(f"\nReport written to {analytics_path}")
 
 
 if __name__ == "__main__":
