@@ -87,6 +87,7 @@ DEFAULT_PRESET_CONFIG = {
     "tp": 1.0,
     "sl": 0.5,
     "max_per_preset": 0,
+    "mode": None,  # None = наследует режим бота (cfg.mode); "paper"|"live" - переопределяет
 }
 
 

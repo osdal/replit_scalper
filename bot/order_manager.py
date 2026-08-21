@@ -70,14 +70,18 @@ class OrderManager:
                 return
         raise RuntimeError(f"Symbol {self.cfg.symbol} not found in futures_exchange_info")
 
-    async def _adjust_qty(self, qty: float) -> float:
-        if self.cfg.mode != "live":
+    async def _adjust_qty(self, qty: float, mode: Optional[str] = None) -> float:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
             return round(qty, 3)
         await self._get_symbol_filters()
         return _round_step(qty, self._step_size)
 
-    async def _adjust_price(self, price: float) -> float:
-        if self.cfg.mode != "live":
+    async def _adjust_price(self, price: float, mode: Optional[str] = None) -> float:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
             return round(price, 8)
         await self._get_symbol_filters()
         if self._tick_size:
@@ -161,8 +165,10 @@ class OrderManager:
         self.log.warning(f"[LIVE] Using signal price as fallback: {fallback}")
         return fallback
 
-    async def get_balance(self) -> float:
-        if self.cfg.mode == "live":
+    async def get_balance(self, mode: Optional[str] = None) -> float:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode == "live":
             account = await self.client.futures_account_balance()
             for asset in account:
                 if asset["asset"] == "USDT":
@@ -175,8 +181,10 @@ class OrderManager:
     #  Cancel helpers                                                      #
     # ------------------------------------------------------------------ #
 
-    async def cancel_all_tp_sl(self, direction: str) -> None:
-        if self.cfg.mode != "live":
+    async def cancel_all_tp_sl(self, direction: str, mode: Optional[str] = None) -> None:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
             return
 
         try:
@@ -209,13 +217,13 @@ class OrderManager:
 
     async def _place_sl(self, direction: str, sl_price: float, qty: float = 0.0) -> None:
         stop_side = _opposite_side(direction)
-        sl_price = await self._adjust_price(sl_price)
+        sl_price = await self._adjust_price(sl_price, mode="live")
 
         if qty > 0:
-            use_qty = await self._adjust_qty(qty)
+            use_qty = await self._adjust_qty(qty, mode="live")
         else:
             real_qty = await self._get_real_position_qty(direction)
-            use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001)
+            use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001, mode="live")
 
         try:
             result = await self.client.futures_create_order(
@@ -234,8 +242,8 @@ class OrderManager:
 
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
         side  = _opposite_side(direction)
-        price = await self._adjust_price(price)
-        qty   = await self._adjust_qty(qty)
+        price = await self._adjust_price(price, mode="live")
+        qty   = await self._adjust_qty(qty, mode="live")
         if qty <= 0:
             self.log.warning(f"[LIVE] TP limit qty={qty} <= 0, skipping")
             return
@@ -258,8 +266,8 @@ class OrderManager:
         tp1_price: float,
         tp2_price: float,
     ) -> None:
-        tp1_qty = await self._adjust_qty(total_qty * self.cfg.tp1_close_pct / 100)
-        tp2_qty = await self._adjust_qty(total_qty - tp1_qty)
+        tp1_qty = await self._adjust_qty(total_qty * self.cfg.tp1_close_pct / 100, mode="live")
+        tp2_qty = await self._adjust_qty(total_qty - tp1_qty, mode="live")
         self.log.info(f"[ORDER] Placing all orders | sl_qty={total_qty} tp1_qty={tp1_qty} tp2_qty={tp2_qty}")
 
         await self._place_sl(direction, sl_price, qty=total_qty)
@@ -277,8 +285,11 @@ class OrderManager:
     async def open_position(
         self, signal: Signal,
         recovery_target: Optional[float] = None,
+        mode: Optional[str] = None,
     ) -> Optional[Tuple[float, float]]:
-        balance = await self.get_balance()
+        if mode is None:
+            mode = self.cfg.mode
+        balance = await self.get_balance(mode)
         is_recovery = recovery_target is not None
 
         if is_recovery:
@@ -323,7 +334,7 @@ class OrderManager:
                 entry_price=signal.entry_price,
                 leverage=self.cfg.leverage,
             )
-        qty = await self._adjust_qty(raw_qty)
+        qty = await self._adjust_qty(raw_qty, mode=mode)
 
         if qty <= 0:
             self.log.error(
@@ -335,7 +346,7 @@ class OrderManager:
 
         tp1_close_pct = 100 if is_recovery else self.cfg.tp1_close_pct
 
-        if self.cfg.mode == "live":
+        if mode == "live":
             await self._set_leverage()
             order = await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
@@ -381,8 +392,8 @@ class OrderManager:
                     tp1_price = entry_price + price_move
                 else:
                     tp1_price = entry_price - price_move
-                adjusted_tp1 = await self._adjust_price(tp1_price)
-                adjusted_sl = await self._adjust_price(signal.sl_price)
+                adjusted_tp1 = await self._adjust_price(tp1_price, mode="live")
+                adjusted_sl = await self._adjust_price(signal.sl_price, mode="live")
                 self.log.info(
                     f"[RECOVERY] Orders | target_profit={target:.4f} "
                     f"tp1_price={tp1_price:.4f} sl_price={signal.sl_price:.4f} "
@@ -418,8 +429,10 @@ class OrderManager:
                 return signal.entry_price, qty, tp1_price
             return signal.entry_price, qty
 
-    async def close_partial(self, direction: str, qty: float, price: float, reason: str) -> bool:
-        if self.cfg.mode == "live":
+    async def close_partial(self, direction: str, qty: float, price: float, reason: str, mode: Optional[str] = None) -> bool:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode == "live":
             real_qty = await self._get_real_position_qty(direction)
             if real_qty == 0.0:
                 self.log.warning(f"[LIVE] Partial close already executed by exchange | {reason}")
@@ -430,8 +443,10 @@ class OrderManager:
             self.log.info(f"[PAPER] Would close partial | {reason} qty={qty} price={price}")
             return True
 
-    async def close_full(self, direction: str, qty: float, price: float, reason: str) -> bool:
-        if self.cfg.mode == "live":
+    async def close_full(self, direction: str, qty: float, price: float, reason: str, mode: Optional[str] = None) -> bool:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode == "live":
             real_qty = await self._get_real_position_qty(direction)
             if real_qty == 0.0:
                 self.log.warning(f"[LIVE] Close full already executed by exchange | {reason}")
@@ -442,9 +457,11 @@ class OrderManager:
             self.log.info(f"[PAPER] Would close full | {reason} qty={qty} price={price}")
             return True
 
-    async def close_dust(self, direction: str) -> bool:
+    async def close_dust(self, direction: str, mode: Optional[str] = None) -> bool:
         """Закрывает пылевую позицию (notional < $1) маркет-ордером."""
-        if self.cfg.mode != "live":
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
             return False
         try:
             real_qty = await self._get_real_position_qty(direction)
@@ -472,9 +489,11 @@ class OrderManager:
             self.log.warning(f"[LIVE] Could not close dust: {e}")
             return False
 
-    async def close_position_market(self, direction: str) -> bool:
+    async def close_position_market(self, direction: str, mode: Optional[str] = None) -> bool:
         """Закрывает позицию рыночным ордером (reduceOnly)."""
-        if self.cfg.mode != "live" or not self.client:
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live" or not self.client:
             return False
         try:
             real_qty = await self._get_real_position_qty(direction)
@@ -500,9 +519,11 @@ class OrderManager:
 
     async def move_sl_to_breakeven(
         self, direction: str, entry_price: float,
-        remaining_qty: float = 0.0, tp2_price: float = 0.0
+        remaining_qty: float = 0.0, tp2_price: float = 0.0, mode: Optional[str] = None
     ) -> None:
-        if self.cfg.mode == "live":
+        if mode is None:
+            mode = self.cfg.mode
+        if mode == "live":
             try:
                 await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
                 self.log.info(f"[LIVE] All orders cancelled before SL move")
