@@ -96,7 +96,7 @@ AND curr.volume >= curr.volume_ma * volume_multiplier
 ### 2.2 HTF-фильтр (Higher Timeframe)
 
 При `htf_enabled=True` сигналы против тренда старшего ТФ блокируются.
-- HTF EMA fast/slow (по умолчанию 9/21 на 1h)
+- HTF EMA fast/slow (по умолчанию 12/51 на **15m**)
 - Тренд: `LONG` если `htf_ema_fast > htf_ema_slow`, иначе `SHORT`
 - Сигнал допускается только если `signal.direction == htf_trend`
 
@@ -129,6 +129,8 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 - **live** — реальная торговля на Binance Futures (USDT-M perpetual).
 - **paper** — симуляция без реальных ордеров (используется `paper_balance`).
 - **backtest** — прогон на исторических данных через `backtester.py`.
+
+> **Telegram:** уведомления отправляются только для **live** сделок. Paper-сделки не шлют сигналы/события/TP1/TP2/SL в Telegram.
 
 ### 2.7 Мультипресетная система
 
@@ -197,6 +199,7 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 - **TP1** — `LIMIT` (reduceOnly=True, GTC), закрывает `tp1_close_pct%` позиции (по умолчанию 50%).
 - **TP2** — `LIMIT` (reduceOnly=True, GTC), закрывает остаток.
 - При срабатывании TP1 SL автоматически переносится в breakeven (`entry_price`).
+- **Tick-based SL/TP**: фоновый таск каждые 5 секунд опрашивает тикер и проверяет hits по текущей цене, дополняя свечную проверку.
 
 ### 3.3 Recovery-ограничения
 
@@ -494,10 +497,10 @@ backtest_start: "2026-01-01"
 backtest_end: "2026-06-01"
 paper_balance: 1000.0
 log_file: "logs/bot.log"
-htf_enabled: true
-htf_timeframe: "1h"
-htf_ema_fast: 9
-htf_ema_slow: 21
+  htf_enabled: true
+  htf_timeframe: "15m"
+  htf_ema_fast: 12
+  htf_ema_slow: 51
 recovery_max_position_pct: 100.0
 fixed_qty: 0.0
 margin_pct: 0.0
@@ -523,10 +526,11 @@ llm_per_symbol_cooldown_min: 5
 llm_backoff_sec: 60.0
 llm_short_backoff_sec: 5.0
 llm_provider_retry_delay_sec: 1.0
-gemini_api_key: ""
-gemini_model: "gemini-2.0-flash-exp"
-groq_api_key: ""
-groq_model: "groq/compound-mini"
+  gemini_api_key: ""
+  gemini_model: "gemini-2.0-flash-exp"
+  groq_api_key: ""
+  groq_model: "groq/compound-mini"
+  commission_pct: 0.05       # комиссия биржи (%), вычитается из PnL
 ```
 
 ### 10.2 Recovery конфиг (`bot/recovery_config.yaml`)
@@ -642,12 +646,18 @@ python analyze_trades.py
 ```
 
 Разделы отчёта:
-- **Overall Statistics** — Win Rate, PnL, Profit Factor, Max Drawdown, consecutive wins/losses
+- **Overall Statistics** — Win Rate, PnL (Gross/Net), Profit Factor, Max Drawdown, consecutive wins/losses, Avg Hold Time, Avg Hold TP/SL
+- **Loss Streaks** — распределение по длине, монеты, пресеты, часовой breakdown
+- **Position Sizing** — средний/мин/макс номинал, средний qty
 - **Per Coin Statistics** — по каждой монете: trades, wins, losses, win%, PnL, rejected
-- **Per Preset Statistics** — по каждому пресету: WR, PnL, avg win/loss, best/worst, avg hold
-- **Per Preset Configuration vs Performance** — настроенный TP/SL vs факт, статус `[OK]/[WARN]/[POOR]`
+- **Per Preset Statistics** — по каждому пресету: WR, PnL, avg win/loss, best/worst, avg hold, AvgHold TP/SL, TP/SL Ratio
+- **Day-of-Week Distribution** — производительность по дням недели
+- **ATR (Volatility) vs PnL** — корреляция ATR с PnL, buckets по ATR%, Commission % of Notional, Max Concurrent Open Positions
+- **Signal Funnel** — сколько сигналов прошло через все фильтры
 - **Hourly Distribution** и **Preset Performance by Hour** — производительность по часам
 - **LLM Statistics** — отклонения по пресетам
+
+Фильтры: `--hours N` (последние N часов), `--start`, `--end`, `--no-write` (только вывод).
 
 ### 14.2 `monitor-opt.ps1`
 Мониторинг процесса оптимизации: проверяет, что `walk_forward_opt.py` запущен, и пишет статус.
@@ -717,6 +727,19 @@ Daily-скрипт регистрируется в планировщике за
 
 ## 16. Changelog
 
+### 2026-08-21
+- **Telegram live-only**: уведомления (`send_signal`, `send_event`, `send_message`) отправляются только для позиций с `mode=live`. Paper-сделки не шлют ничего в Telegram.
+- **Per-preset mode override**: у пресетов в `preset_config.py` можно задать `mode: live|paper`, который имеет приоритет над `cfg.mode`. В `Position`/`Signal` добавлено поле `mode`, `OrderManager` принимает `mode` явно.
+- **Tick-based SL/TP**: в `main.py` добавлен фон таск `tick_sl_tp_check()` — каждые 5с опрашивает тикер и вызывает `process_hit()`; свечная проверка и тиковая используют общий обработчик.
+- **HTF 15m**: во всех `config_*.yaml` переключен `htf_timeframe` на `15m` (`htf_enabled: true`), что позволяет больше контр-тренд SHORT-сигналов.
+- **Аналитика** (`analyze_trades.py` + `ANALYTICS.md`):
+  - Добавлены разделы: Position Sizing, Signal Funnel, Day-of-Week Distribution, ATR vs PnL (корреляция + buckets), Concurrent Open Positions, Commission % of Notional.
+  - Per-preset: `AvgHold TP`, `AvgHold SL`, `TP/SL Ratio`.
+  - Loss Streaks: распределение по длине, монеты, пресеты, часовой breakdown, recent streaks.
+  - Поддержка фильтров `--hours`, `--start`, `--end`, `--no-write`.
+- **Комиссия**: добавлено поле `commission_pct` в `Config` (0.05%), комиссия вычитается из PnL (net), хранится в колонке `commission` в БД; backfill 349 исторических сделок.
+- **Округление SL/TP**: исправлено на 8 десятичных знаков в `strategy.py`, `main.py`, `order_manager.py`.
+
 ### 2026-08-19
 - **Добавлен LLM-фильтр сигналов** (`llm_client.py`): провайдеры Groq/Gemini/OpenRouter (с fallback-моделями), circuit breaker (429/ошибки), rate limiter, per-symbol cooldown, mock-режим. Интегрирован в `main.py` после лимитов и до `confirm()`. Поля `llm_*` добавлены в `Config` и все `config_*.yaml` (по умолчанию `llm_enabled: false`).
 - **Добавлен скрипт анализа** (`analyze_trades.py`): читает `data/bot.db`, генерирует `ANALYTICS.md` — overall/per-coin/per-preset статистика, hourly distribution, LLM-статистика.
@@ -724,7 +747,7 @@ Daily-скрипт регистрируется в планировщике за
 - **Включены все 46 пресетов** во всех `config_*.yaml` (`enabled_presets`).
 - **TP=1%, SL=0.5%** установлены во всех конфигах (`tp1_pct`, `tp2_pct`, `sl_pct`). Исправлены `config_bnb/btc/eth.yaml`, где `tp2_pct < tp1_pct` ломал валидацию.
 - **Сняты лимиты на количество сделок**: `max_open_per_cycle: 0` (без лимита), `max_per_preset: 0` в `preset_config.py`, `max_positions: 100000` в `recovery_config.yaml` (0 не работает — сервер падает в дефолт 2).
-- **Основной таймфрейм переключён на `1m`** во всех конфигах (был `5m`); HTF остался `1h`.
+- **Основной таймфрейм переключён на `1m`** во всех конфигах (был `5m`); HTF переключён на `15m`.
 
 ### 2026-08-11
 - **Исправлен сбой запуска ботов через API** (`bots.ts`): изменён `spawn` с `detached: true` + `proc.unref()` на `detached: false` + `stdio: ["ignore","ignore","ignore"]` + `windowsHide: true`. Раньше процесс умирал сразу после `start` (`success: true`, но 0 python-процессов). Windows-окна по-прежнему скрыты.
