@@ -1171,6 +1171,7 @@ async def _run_live_or_paper(
                 "bb_middle": signal.bb_middle,
                 "bb_lower": signal.bb_lower,
                 "atr": signal.atr,
+                "quote_volume": getattr(signal, "quote_volume", 0.0) or 0.0,
                 "leverage": cfg.leverage,
             }
 

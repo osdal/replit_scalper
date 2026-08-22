@@ -34,6 +34,7 @@ export const tradesTable = sqliteTable("trades", {
   atr:          real("atr"),
   preset:       text("preset"),
   commission:   real("commission"),
+  quote_volume: real("quote_volume"),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ id: true });
