@@ -855,6 +855,8 @@ async def _run_live_or_paper(
     _last_signal_time = {}
     _preset_open_counts: dict[str, int] = {}
     _consecutive_losses = 0
+    _last_loss_time = 0.0
+    _loss_streak_reset_after = 3600  # 1 hour cooldown after streak triggers
 
     def _on_position_opened(preset: str):
         _preset_open_counts[preset] = _preset_open_counts.get(preset, 0) + 1
@@ -978,8 +980,11 @@ async def _run_live_or_paper(
 
         if hit == "SL":
             _consecutive_losses += 1
+            _last_loss_time = time.time()
         elif hit in ("TP1", "TP2"):
             _consecutive_losses = 0
+            _last_loss_time = 0.0
+            _last_loss_time = 0.0
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
@@ -1191,6 +1196,11 @@ async def _run_live_or_paper(
                 return
 
             # Loss streak protection: skip next signal(s) after consecutive losses
+            if _consecutive_losses >= 3 and _last_loss_time > 0:
+                if time.time() - _last_loss_time >= _loss_streak_reset_after:
+                    _consecutive_losses = 0
+                    _last_loss_time = 0.0
+                    log.info(f"[LOSS_STREAK] Cooldown passed, resetting consecutive losses counter")
             if _consecutive_losses >= 7:
                 log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 7")
                 await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_7")
