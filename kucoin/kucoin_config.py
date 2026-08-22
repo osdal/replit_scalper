@@ -26,6 +26,10 @@ class KuCoinConfig:
     htf_timeframe: str = "1h"
     htf_ema_fast: int = 9
     htf_ema_slow: int = 21
+    htf2_enabled: bool = False
+    htf2_timeframe: str = "15m"
+    htf2_ema_fast: int = 12
+    htf2_ema_slow: int = 26
     api_key: str = ""
     api_secret: str = ""
     api_passphrase: str = ""

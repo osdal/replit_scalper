@@ -96,9 +96,17 @@ AND curr.volume >= curr.volume_ma * volume_multiplier
 ### 2.2 HTF-фильтр (Higher Timeframe)
 
 При `htf_enabled=True` сигналы против тренда старшего ТФ блокируются.
-- HTF EMA fast/slow (по умолчанию 12/51 на **15m**)
+- HTF EMA fast/slow (по умолчанию 12/51 на **1h**)
 - Тренд: `LONG` если `htf_ema_fast > htf_ema_slow`, иначе `SHORT`
 - Сигнал допускается только если `signal.direction == htf_trend`
+
+### 2.2a Двойной HTF-фильтр
+
+При `htf2_enabled=True` сигнал допускается **только если оба** старших ТФ показывают одинаковый тренд.
+- HTF2 EMA fast/slow (по умолчанию 12/26 на **15m**)
+- Если HTF1 = LONG, а HTF2 = SHORT → сигнал отклоняется
+- Если оба LONG → сигнал допускается
+- Если включён только один из фильтров → работает как одиночный
 
 ### 2.3 ADX-фильтр
 
@@ -504,9 +512,13 @@ backtest_end: "2026-06-01"
 paper_balance: 1000.0
 log_file: "logs/bot.log"
   htf_enabled: true
-  htf_timeframe: "15m"
+  htf_timeframe: "1h"
   htf_ema_fast: 12
   htf_ema_slow: 51
+  htf2_enabled: true
+  htf2_timeframe: "15m"
+  htf2_ema_fast: 12
+  htf2_ema_slow: 26
 recovery_max_position_pct: 100.0
 fixed_qty: 0.0
 margin_pct: 0.0
