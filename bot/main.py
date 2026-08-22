@@ -819,6 +819,9 @@ async def _run_live_or_paper(
     log.info(f"[STARTUP] Step 8: loaded {len(df_buffer)} candles for warm-up ({cfg.timeframe})")
 
     htf_buffer: pd.DataFrame = pd.DataFrame()
+    htf_buffer_2: pd.DataFrame = pd.DataFrame()
+    htf_trend_1 = None
+    htf_trend_2 = None
     if cfg.htf_enabled:
         log.info("[STARTUP] Step 9: fetching HTF klines")
         htf_buffer = await get_recent_klines(
@@ -826,10 +829,24 @@ async def _run_live_or_paper(
             limit=max(cfg.htf_ema_slow * 3, 100),
         )
         htf_buffer = calculate_htf_indicators(htf_buffer, cfg)
-        trend = get_htf_trend_latest(htf_buffer)
-        log.info(f"[STARTUP] Step 10: loaded {len(htf_buffer)} HTF candles | trend={trend}")
+        htf_trend_1 = get_htf_trend_latest(htf_buffer)
+        log.info(f"[STARTUP] Step 10: loaded {len(htf_buffer)} HTF candles | trend={htf_trend_1}")
     else:
         log.info("[STARTUP] Step 9: HTF disabled")
+
+    if getattr(cfg, "htf2_enabled", False):
+        log.info("[STARTUP] Step 9b: fetching HTF2 klines")
+        htf_buffer_2 = await get_recent_klines(
+            client=client, symbol=cfg.symbol, interval=cfg.htf2_timeframe,
+            limit=max(getattr(cfg, "htf2_ema_slow", 26) * 3, 100),
+        )
+        htf_buffer_2 = calculate_htf_indicators(
+            htf_buffer_2, cfg,
+            ema_fast=getattr(cfg, "htf2_ema_fast", 12),
+            ema_slow=getattr(cfg, "htf2_ema_slow", 26),
+        )
+        htf_trend_2 = get_htf_trend_latest(htf_buffer_2)
+        log.info(f"[STARTUP] Step 10b: loaded {len(htf_buffer_2)} HTF2 candles | trend={htf_trend_2}")
 
     log.info("[STARTUP] Step 11: starting candle polling")
     candle_count = [0]
@@ -991,7 +1008,11 @@ async def _run_live_or_paper(
 
             if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
-                log.info(f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} htf_trend={htf_trend_now}")
+                htf2_trend_now = get_htf_trend_latest(htf_buffer_2) if getattr(cfg, "htf2_enabled", False) else "off"
+                log.info(
+                    f"Heartbeat | candles={candle_count[0]} price={current_price:.2f} "
+                    f"htf_trend={htf_trend_now} htf2_trend={htf2_trend_now}"
+                )
                 # Синхронизируем unrealized PnL с биржей для открытых позиций
                 if tracker.has_open_position() and ((tracker.position.mode if tracker.position else None) or cfg.mode) == "live":
                     await tracker.sync_unrealized_pnl()
@@ -1116,7 +1137,19 @@ async def _run_live_or_paper(
                 log.debug(f"[GUARD] Position still open for {cfg.symbol} — skip new signal")
                 return
 
-            htf_trend = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else None
+            htf_trend = None
+            if cfg.htf_enabled and getattr(cfg, "htf2_enabled", False):
+                t1 = get_htf_trend_latest(htf_buffer)
+                t2 = get_htf_trend_latest(htf_buffer_2)
+                if t1 and t2 and t1 == t2:
+                    htf_trend = t1
+                else:
+                    log.debug(f"[HTF2] Skip signal: htf={t1} htf2={t2}")
+                    return
+            elif cfg.htf_enabled:
+                htf_trend = get_htf_trend_latest(htf_buffer)
+            elif getattr(cfg, "htf2_enabled", False):
+                htf_trend = get_htf_trend_latest(htf_buffer_2)
             signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets)
             if not signals:
                 return
@@ -1398,6 +1431,21 @@ async def _run_live_or_paper(
         except Exception as e:
             log.error(f"on_htf_candle error: {e}", exc_info=True)
 
+    async def on_htf_candle_2(candle: pd.Series):
+        nonlocal htf_buffer_2
+        try:
+            new_row = pd.DataFrame([candle]).set_index("open_time")
+            htf_buffer_2 = pd.concat([htf_buffer_2, new_row]).tail(300)
+            htf_buffer_2 = calculate_htf_indicators(
+                htf_buffer_2, cfg,
+                ema_fast=getattr(cfg, "htf2_ema_fast", 12),
+                ema_slow=getattr(cfg, "htf2_ema_slow", 26),
+            )
+            trend = get_htf_trend_latest(htf_buffer_2)
+            log.info(f"HTF2 candle closed | {cfg.htf2_timeframe} trend={trend}")
+        except Exception as e:
+            log.error(f"on_htf_candle_2 error: {e}", exc_info=True)
+
     async def periodic_position_check():
         """Проверка состояния позиции каждые 1 час (3600 секунд)."""
         while not shutdown_event.is_set():
@@ -1575,6 +1623,8 @@ async def _run_live_or_paper(
     handlers = {cfg.timeframe: on_candle}
     if cfg.htf_enabled:
         handlers[cfg.htf_timeframe] = on_htf_candle
+    if getattr(cfg, "htf2_enabled", False):
+        handlers[cfg.htf2_timeframe] = on_htf_candle_2
 
     await start_kline_polling(
         client=client, symbol=cfg.symbol, handlers=handlers,

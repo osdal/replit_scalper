@@ -29,6 +29,8 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
   volume_ma_period INTEGER NOT NULL, volume_multiplier REAL NOT NULL,
   htf_enabled INTEGER NOT NULL DEFAULT 0, htf_timeframe TEXT,
   htf_ema_fast INTEGER, htf_ema_slow INTEGER,
+  htf2_enabled INTEGER NOT NULL DEFAULT 0, htf2_timeframe TEXT,
+  htf2_ema_fast INTEGER, htf2_ema_slow INTEGER,
   auto_mode INTEGER NOT NULL DEFAULT 1, paper_balance REAL NOT NULL DEFAULT 1000,
   log_file TEXT NOT NULL, is_running INTEGER NOT NULL DEFAULT 0,
   last_heartbeat TEXT, current_price REAL, position TEXT,
@@ -75,6 +77,22 @@ for (const [col, ddl] of tradeExtraCols) {
 }
 await db.run(sql`UPDATE trades SET status='closed' WHERE is_open=0 AND status != 'rejected'`);
 
+// Мигрируем bots: добавляем HTF2 колонки если их нет.
+const { rows: botCols } = await db.run(sql`PRAGMA table_info(bots)`);
+const botColNames: string[] = (botCols as any[]).map((r: any) => String(r.name));
+const botExtraCols: Array<[string, string]> = [
+  ["htf2_enabled", "INTEGER NOT NULL DEFAULT 0"],
+  ["htf2_timeframe", "TEXT"],
+  ["htf2_ema_fast", "INTEGER"],
+  ["htf2_ema_slow", "INTEGER"],
+];
+for (const [col, ddl] of botExtraCols) {
+  if (!botColNames.includes(col)) {
+    await db.run(sql`ALTER TABLE bots ADD COLUMN ${sql.raw(col)} ${sql.raw(ddl)}`);
+    console.log(`  Added column bots.${col}`);
+  }
+}
+
 await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   debt_amount REAL NOT NULL,
@@ -120,6 +138,10 @@ for (const file of configs) {
       htf_timeframe:    (raw.htf_timeframe as string) || null,
       htf_ema_fast:     (raw.htf_ema_fast as number) || null,
       htf_ema_slow:     (raw.htf_ema_slow as number) || null,
+      htf2_enabled:     (raw.htf2_enabled as boolean) || false,
+      htf2_timeframe:   (raw.htf2_timeframe as string) || null,
+      htf2_ema_fast:    (raw.htf2_ema_fast as number) || null,
+      htf2_ema_slow:    (raw.htf2_ema_slow as number) || null,
       auto_mode:        (raw.auto_mode as boolean) ?? true,
       paper_balance:    (raw.paper_balance as number) || 1000,
       log_file:         raw.log_file as string,
@@ -137,10 +159,14 @@ for (const file of configs) {
     tp2_pct: raw.tp2_pct as number, ema_fast: raw.ema_fast as number,
     ema_slow: raw.ema_slow as number, volume_ma_period: raw.volume_ma_period as number,
     volume_multiplier: raw.volume_multiplier as number,
-    htf_enabled: (raw.htf_enabled as boolean) || false,
-    htf_timeframe: (raw.htf_timeframe as string) || null,
-    htf_ema_fast: (raw.htf_ema_fast as number) || null,
-    htf_ema_slow: (raw.htf_ema_slow as number) || null,
+      htf_enabled: (raw.htf_enabled as boolean) || false,
+      htf_timeframe: (raw.htf_timeframe as string) || null,
+      htf_ema_fast: (raw.htf_ema_fast as number) || null,
+      htf_ema_slow: (raw.htf_ema_slow as number) || null,
+      htf2_enabled: (raw.htf2_enabled as boolean) || false,
+      htf2_timeframe: (raw.htf2_timeframe as string) || null,
+      htf2_ema_fast: (raw.htf2_ema_fast as number) || null,
+      htf2_ema_slow: (raw.htf2_ema_slow as number) || null,
     auto_mode: (raw.auto_mode as boolean) ?? true,
     paper_balance: (raw.paper_balance as number) || 1000,
     log_file: raw.log_file as string, is_running: false,

@@ -1,4 +1,4 @@
-max_open_per_cycle: 0
+﻿max_open_per_cycle: 0
 enabled_presets:
   - ema_cross_long
   - ema_cross_short
@@ -67,8 +67,12 @@ fixed_qty: 0.0
 fixed_risk_usd: 0.5
 htf_ema_fast: 8
 htf_ema_slow: 24
+htf2_enabled: true
+htf2_timeframe: 15m
+htf2_ema_fast: 12
+htf2_ema_slow: 26
 htf_enabled: true
-htf_timeframe: 15m
+htf_timeframe: 1h
 leverage: 75
 log_file: logs/wif.log
 margin_pct: 0

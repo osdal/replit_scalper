@@ -72,7 +72,7 @@ function Apply-To-Config($symbol, $params) {
     $body = @{}
     $numberKeys = @("ema_fast","ema_slow","sl_pct","tp1_pct","tp2_pct",
                     "volume_multiplier","tp1_close_pct","risk_pct",
-                    "htf_ema_fast","htf_ema_slow")
+                    "htf_ema_fast","htf_ema_slow","htf2_ema_fast","htf2_ema_slow")
     foreach ($k in $numberKeys) {
         if ($params.ContainsKey($k) -and $params[$k] -ne "" -and $params[$k] -ne "-") {
             $body[$k] = [double]$params[$k]
@@ -83,6 +83,11 @@ function Apply-To-Config($symbol, $params) {
         $body["htf_enabled"] = $true
     } else {
         $body["htf_enabled"] = $false
+    }
+    if ($params.ContainsKey("htf2_ema_fast") -and [double]$params["htf2_ema_fast"] -gt 0) {
+        $body["htf2_enabled"] = $true
+    } else {
+        $body["htf2_enabled"] = $false
     }
     
     try {
