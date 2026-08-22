@@ -18,8 +18,8 @@ PRESET_CONFIG: dict[str, dict] = {
     "sma_cross_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     "sma_cross_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 3. RSI bounce (отскок от перепроданности/перекупленности) ──────────
-    "rsi_bounce_long": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0, "mode": "paper"},
-    "rsi_bounce_short": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0},
+    "rsi_bounce_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0, "mode": "paper"},
+    "rsi_bounce_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 4. RSI divergence (дивергенция цены и RSI) ────────────────────────
     "rsi_divergence_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     "rsi_divergence_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
@@ -30,14 +30,14 @@ PRESET_CONFIG: dict[str, dict] = {
     "macd_hist_trend_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     "macd_hist_trend_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 7. Bollinger Bounce (отскок от полос) ─────────────────────────────
-    "bb_bounce_long": {"tp": 0.9, "sl": 0.45, "max_per_preset": 0},
-    "bb_bounce_short": {"tp": 0.9, "sl": 0.45, "max_per_preset": 0},
+    "bb_bounce_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
+    "bb_bounce_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 8. Bollinger Squeeze Breakout (сжатие + пробой) ───────────────────
     "bb_squeeze_breakout_long": {"tp": 1.2, "sl": 0.6, "max_per_preset": 0},
     "bb_squeeze_breakout_short": {"tp": 1.2, "sl": 0.6, "max_per_preset": 0},
     # ── 9. Stochastic bounce (отскок от перепроданности/перекупленности) ──
-    "stoch_bounce_long": {"tp": 0.7, "sl": 0.35, "max_per_preset": 0},
-    "stoch_bounce_short": {"tp": 0.7, "sl": 0.35, "max_per_preset": 0},
+    "stoch_bounce_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
+    "stoch_bounce_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 10. Stochastic OB/OS (уровни 20/80) ───────────────────────────────
     "stoch_obos_long": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0},
     "stoch_obos_short": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0},
