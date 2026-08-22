@@ -65,6 +65,7 @@ const tradeExtraCols: Array<[string, string]> = [
   ["atr", "REAL"],
   ["preset", "TEXT"],
   ["commission", "REAL"],
+  ["quote_volume", "REAL"],
 ];
 for (const [col, ddl] of tradeExtraCols) {
   if (!tradeColNames.includes(col)) {
