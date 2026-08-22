@@ -74,6 +74,7 @@ class DbReporter:
         payload["bb_middle"] = signal_data.get("bb_middle")
         payload["bb_lower"] = signal_data.get("bb_lower")
         payload["atr"] = signal_data.get("atr")
+        payload["quote_volume"] = signal_data.get("quote_volume")
         return await self._post_trade(payload)
 
     async def _post_trade(self, trade: dict) -> Optional[int]:
