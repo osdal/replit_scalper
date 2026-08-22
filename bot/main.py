@@ -854,6 +854,7 @@ async def _run_live_or_paper(
     _recent_open_times = []
     _last_signal_time = {}
     _preset_open_counts: dict[str, int] = {}
+    _consecutive_losses = 0
 
     def _on_position_opened(preset: str):
         _preset_open_counts[preset] = _preset_open_counts.get(preset, 0) + 1
@@ -864,6 +865,7 @@ async def _run_live_or_paper(
             _preset_open_counts[preset] = cnt - 1
 
     async def process_hit(hit: str, current_price: float, candle_time_ms: int):
+        nonlocal _consecutive_losses
         pos = tracker.position
         pos_mode = (pos.mode if pos else None) or cfg.mode
         is_live_close = (pos_mode == "live")
@@ -973,6 +975,11 @@ async def _run_live_or_paper(
             elif pnl < 0:
                 await recovery.report(pnl=pnl)
             await recovery.report_result(pnl)
+
+        if hit == "SL":
+            _consecutive_losses += 1
+        elif hit in ("TP1", "TP2"):
+            _consecutive_losses = 0
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
@@ -1181,6 +1188,20 @@ async def _run_live_or_paper(
             if max_per_preset > 0 and current_preset_count >= max_per_preset:
                 log.debug(f"[PRESET_LIMIT] Skip {raw_signal.preset} for {cfg.symbol}: {current_preset_count} >= max_per_preset={max_per_preset}")
                 await _track_skipped_signal(reporter, raw_signal, cfg, "skip:preset_limit")
+                return
+
+            # Loss streak protection: skip next signal(s) after consecutive losses
+            if _consecutive_losses >= 7:
+                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 7")
+                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_7")
+                return
+            if _consecutive_losses >= 5:
+                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 5")
+                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_5")
+                return
+            if _consecutive_losses >= 3:
+                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 3")
+                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_3")
                 return
 
             signal = raw_signal
