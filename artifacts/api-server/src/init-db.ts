@@ -42,7 +42,7 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   tp1_price REAL NOT NULL DEFAULT 0, tp2_price REAL NOT NULL DEFAULT 0,
   pnl REAL, exit_reason TEXT, entry_time TEXT NOT NULL, exit_time TEXT,
   is_open INTEGER NOT NULL DEFAULT 1, ema_fast REAL, ema_slow REAL,
-  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live',
+  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'paper',
   status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT,
   rsi REAL, macd REAL, macd_signal REAL, macd_hist REAL,
   bb_upper REAL, bb_middle REAL, bb_lower REAL, atr REAL,

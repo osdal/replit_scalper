@@ -276,6 +276,12 @@ BINANCE_API_SECRET=YOUR_API_SECRET_HERE
 PORT=5000
 BOT_DIR=./bot
 DATABASE_PATH=./data/bot.db
+BOT_PYTHON=
+# Полный путь к Python с установленными зависимостями бота (pandas, python-binance ...).
+# Используется при запуске ботов из дашборда. Если пустой — API сервер ищет 'python' в PATH
+# и проверяет, что у него есть нужные пакеты. На Windows часто требуется явный путь,
+# потому что 'python' может указывать на другой интерпретатор без зависимостей.
+# Пример: BOT_PYTHON=C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe
 
 # ============================================
 # Dashboard / Recovery
@@ -726,6 +732,14 @@ Daily-скрипт регистрируется в планировщике за
 ---
 
 ## 16. Changelog
+
+### 2026-08-22
+- **Режим по умолчанию изменён с live на paper**: `bot/config.yaml`, `lib/db/src/schema/trades.ts`, `artifacts/api-server/src/init-db.ts` и все `config_*.yaml` (Binance + KuCoin) теперь используют `mode: paper` по умолчанию. Это предотвращает случайную реальную торговлю при запуске.
+- **Фикс `KeyError: 'symbol'` в events-логгере**: в `bot/logger.py` добавлен `SymbolInjectFilter`, который подставляет `record.symbol` для формат-строки `%(symbol)s` в `events.log`. Раньше при логировании событий бот падал с `KeyError`.
+- **Фикс выбора Python при запуске ботов из дашборда**: в `artifacts/api-server/src/routes/bots.ts` добавлена переменная `BOT_PYTHON` (полный путь к Python с зависимостями) и проверка наличия `pandas`/`python-binance` у кандидата. Раньше API сервер мог запускать ботов через `python` из PATH, у которого не было установлен `pandas` — бот падал с `ModuleNotFoundError: No module named 'pandas'` сразу после старта. Добавлено дебаг-логирование в `bot/logs/api_<symbol>.log` и обработка `spawn`/`exit` событий.
+- **Очистка устаревших lock-файлов при старте**: `start-all.ps1` теперь удаляет `bot.lock.*` файлы, оставшиеся после принудительной остановки ботов.
+- **Фикс режима rejected-сделок**: `bot/db_reporter.py` и вызовы в `bot/main.py` теперь передают `mode=cfg.mode` при записи отклонённых сигналов в БД. Раньше все rejected-сделки записывались с `mode=live`, даже если бот работал в `paper`.
+- **Preset `rsi_bounce_long` переведён в paper**: в `bot/preset_config.py` добавлен `mode: "paper"` для `rsi_bounce_long`, чтобы этот пресет не открывал реальные ордера по умолчанию.
 
 ### 2026-08-21
 - **Telegram live-only**: уведомления (`send_signal`, `send_event`, `send_message`) отправляются только для позиций с `mode=live`. Paper-сделки не шлют ничего в Telegram.

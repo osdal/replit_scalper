@@ -46,6 +46,17 @@ class TradeOnlyFilter(logging.Filter):
         return any(kw in record.getMessage() for kw in TRADE_KEYWORDS)
 
 
+class SymbolInjectFilter(logging.Filter):
+    """Добавляет record.symbol, используемый в %(symbol)s формата events логгера."""
+    def __init__(self, symbol: str):
+        super().__init__()
+        self.symbol = symbol
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.symbol = self.symbol
+        return True
+
+
 def get_logger(
     log_file: str = "logs/bot.log",
     mode: str = "paper",
@@ -97,6 +108,8 @@ def get_events_logger(symbol: str = "") -> logging.Logger:
     fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
+
+    fh.addFilter(SymbolInjectFilter(symbol))
 
     logger.addHandler(fh)
     _loggers[log_file] = logger

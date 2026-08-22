@@ -21,7 +21,7 @@ export const tradesTable = sqliteTable("trades", {
   ema_slow:     real("ema_slow"),
   volume:       real("volume"),
   volume_ma:    real("volume_ma"),
-  mode:         text("mode").notNull().default("live"),
+  mode:         text("mode").notNull().default("paper"),
   status:       text("status").notNull().default("open"),  // open | closed | rejected
   reject_reason: text("reject_reason"),                    // причина отклонения (если status='rejected')
   rsi:          real("rsi"),
