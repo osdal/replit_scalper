@@ -250,6 +250,10 @@ components:
         htf_timeframe:      { type: string, nullable: true }
         htf_ema_fast:       { type: integer, nullable: true }
         htf_ema_slow:       { type: integer, nullable: true }
+        htf2_enabled:       { type: boolean }
+        htf2_timeframe:     { type: string, nullable: true }
+        htf2_ema_fast:      { type: integer, nullable: true }
+        htf2_ema_slow:      { type: integer, nullable: true }
         auto_mode:          { type: boolean }
         paper_balance:      { type: number }
       required: [timeframe, leverage, risk_pct, sl_pct, tp1_pct, tp1_close_pct, tp2_pct, ema_fast, ema_slow, volume_ma_period, volume_multiplier, htf_enabled, auto_mode, paper_balance]

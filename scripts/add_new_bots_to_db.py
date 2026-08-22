@@ -34,8 +34,8 @@ for symbol, config_file in new_bots:
     with open(os.path.join(bot_dir, config_file), 'r') as f:
         cfg = yaml.safe_load(f)
     conn.execute('''
-        INSERT INTO bots (symbol, mode, timeframe, leverage, risk_pct, sl_pct, tp1_pct, tp1_close_pct, tp2_pct, ema_fast, ema_slow, volume_ma_period, volume_multiplier, htf_enabled, htf_timeframe, htf_ema_fast, htf_ema_slow, auto_mode, paper_balance, log_file, is_running)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO bots (symbol, mode, timeframe, leverage, risk_pct, sl_pct, tp1_pct, tp1_close_pct, tp2_pct, ema_fast, ema_slow, volume_ma_period, volume_multiplier, htf_enabled, htf_timeframe, htf_ema_fast, htf_ema_slow, htf2_enabled, htf2_timeframe, htf2_ema_fast, htf2_ema_slow, auto_mode, paper_balance, log_file, is_running)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         symbol,
         cfg.get('mode', 'paper'),
@@ -54,6 +54,10 @@ for symbol, config_file in new_bots:
         cfg.get('htf_timeframe', '1h'),
         cfg.get('htf_ema_fast', 8),
         cfg.get('htf_ema_slow', 24),
+        cfg.get('htf2_enabled', False),
+        cfg.get('htf2_timeframe', '15m'),
+        cfg.get('htf2_ema_fast', 12),
+        cfg.get('htf2_ema_slow', 26),
         cfg.get('auto_mode', True),
         cfg.get('paper_balance', 1000.0),
         cfg.get('log_file', 'logs/' + symbol.lower() + '.log'),
