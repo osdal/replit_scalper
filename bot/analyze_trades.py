@@ -35,7 +35,15 @@ def load_trades(db_path=None):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     trades = []
-    for row in conn.execute("SELECT * FROM trades ORDER BY entry_time ASC").fetchall():
+    try:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()]
+    except Exception:
+        cols = []
+    if "quote_volume" in cols:
+        query = "SELECT * FROM trades ORDER BY entry_time ASC"
+    else:
+        query = "SELECT *, 0 AS quote_volume FROM trades ORDER BY entry_time ASC"
+    for row in conn.execute(query).fetchall():
         trades.append(dict(row))
     conn.close()
     return trades
@@ -445,12 +453,80 @@ def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time
     total_span = (prev_ts - events[0][0]) if events and prev_ts else 0.0
     avg_open = total_open_time / total_span if total_span > 0 else 0.0
 
+    # Rolling PnL / Win Rate / Profit Factor for last N closed trades
+    def _window_stats(items):
+        wins = [t for t in items if float(t.get("pnl") or 0.0) > 0]
+        losses = [t for t in items if float(t.get("pnl") or 0.0) < 0]
+        wr = (len(wins) / len(items) * 100) if items else 0.0
+        avg = sum(float(t.get("pnl") or 0.0) for t in items) / len(items) if items else 0.0
+        gp = sum(float(t.get("pnl") or 0.0) for t in items if float(t.get("pnl") or 0.0) > 0)
+        gl = sum(abs(float(t.get("pnl") or 0.0)) for t in items if float(t.get("pnl") or 0.0) < 0)
+        pf = gp / gl if gl > 0 else float("inf")
+        return {"trades": len(items), "win_rate": wr, "avg_pnl": avg, "profit_factor": pf}
+
+    sorted_closes = sorted(included_closes, key=lambda x: x.get("entry_time", ""))
+    rolling_windows = {}
+    for window in (100, 200, 500):
+        tail = sorted_closes[-window:]
+        rolling_windows[window] = _window_stats(tail)
+
+    # Signal confluence approximation: group trades by symbol + entry minute.
+    # Если за одну минуту на одном символе открыто 2+ сделки с разными пресетами —
+    # считаем это совпадением сигналов.
+    confluence_buckets = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    for t in sorted(included_closes, key=lambda x: x.get("entry_time", "")):
+        ts = parse_timestamp(t.get("entry_time", ""))
+        if not ts:
+            continue
+        minute_key = ts.strftime("%Y-%m-%d %H:%M")
+        sym = t.get("symbol", "?")
+        preset = t.get("preset") or "unknown"
+        key = (sym, minute_key)
+        confluence_buckets[key]["trades"] += 1
+        pnl = float(t.get("pnl") or 0.0)
+        confluence_buckets[key]["pnl"] += pnl
+        if pnl > 0:
+            confluence_buckets[key]["wins"] += 1
+    confluence_summary = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    for data in confluence_buckets.values():
+        bucket = min(data["trades"], 3)
+        if data["trades"] >= 3:
+            bucket = "3+"
+        confluence_summary[bucket]["trades"] += data["trades"]
+        confluence_summary[bucket]["wins"] += data["wins"]
+        confluence_summary[bucket]["pnl"] += data["pnl"]
+
+    # Volume buckets by quote_volume (USDT) at entry
+    volume_buckets = {}
+    for t in included_closes:
+        try:
+            qv = float(t.get("quote_volume") or 0.0)
+        except Exception:
+            continue
+        if qv <= 0:
+            bucket = "<1M"
+        elif qv <= 5_000_000:
+            bucket = "1-5M"
+        elif qv <= 10_000_000:
+            bucket = "5-10M"
+        else:
+            bucket = ">10M"
+        b = volume_buckets.setdefault(bucket, {"trades": 0, "wins": 0, "pnl": 0.0})
+        b["trades"] += 1
+        pnl = float(t.get("pnl") or 0.0)
+        b["pnl"] += pnl
+        if pnl > 0:
+            b["wins"] += 1
+
     metrics = {
         "dow_stats": dow_stats,
         "atr_corr": atr_corr,
         "atr_buckets": atr_buckets,
         "avg_comm_pct": avg_comm_pct,
         "concurrency": {"max": max_open, "avg": avg_open, "samples": len(events)},
+        "rolling_windows": rolling_windows,
+        "volume_buckets": volume_buckets,
+        "confluence_summary": dict(confluence_summary),
     }
 
     return {
@@ -580,6 +656,21 @@ def generate_report(stats, start_time=None, end_time=None):
     report.append(f"| Max Consecutive Losses | {stats['max_consecutive_losses']} |")
     report.append(f"| Max Consecutive Wins | {stats['max_consecutive_wins']} |")
     report.append("")
+    metr = stats.get("metrics", {})
+    rolling = metr.get("rolling_windows", {})
+    if rolling:
+        report.append("### Rolling Performance")
+        report.append("")
+        report.append("| Window | Trades | Win Rate | Avg PnL | Profit Factor |")
+        report.append("|---|---|---|---|---|")
+        for window in sorted(rolling.keys()):
+            d = rolling[window]
+            pf_str = format_number(d["profit_factor"]) if d["profit_factor"] != float("inf") else "inf"
+            report.append(
+                f"| Last {window} | {d['trades']} | {format_number(d['win_rate'])}% | "
+                f"{format_number(d['avg_pnl'])} | {pf_str} |"
+            )
+        report.append("")
     streak_stats = stats.get("loss_streaks", {})
     report.append("### Loss Streaks")
     report.append("")
@@ -673,6 +764,29 @@ def generate_report(stats, start_time=None, end_time=None):
         d = metr["atr_buckets"][b]
         report.append(f"| {format_number(b, 2)}% | {d['trades']} | {format_number(d['pnl'])} |")
     report.append("")
+    volume_buckets = metr.get("volume_buckets", {})
+    if volume_buckets:
+        report.append("### Volume (Quote) vs PnL")
+        report.append("")
+        report.append("| Quote Volume Bucket | Trades | Wins | Win% | PnL |")
+        report.append("|---|---|---|---|---|")
+        for bucket in ["<1M", "1-5M", "5-10M", ">10M"]:
+            d = volume_buckets.get(bucket, {"trades": 0, "wins": 0, "pnl": 0.0})
+            wr = (d["wins"] / d["trades"] * 100) if d["trades"] > 0 else 0.0
+            report.append(f"| {bucket} | {d['trades']} | {d['wins']} | {format_number(wr)}% | {format_number(d['pnl'])} |")
+        report.append("")
+    confluence = metr.get("confluence_summary", {})
+    if confluence:
+        report.append("### Signal Confluence (same symbol, same minute)")
+        report.append("")
+        report.append("| Coincident Presets | Trades | Wins | Win% | PnL |")
+        report.append("|---|---|---|---|---|")
+        for bucket in ["1", "2", "3+"]:
+            d = confluence.get(bucket, {"trades": 0, "wins": 0, "pnl": 0.0})
+            wr = (d["wins"] / d["trades"] * 100) if d["trades"] > 0 else 0.0
+            label = bucket if bucket != "3+" else "3+"
+            report.append(f"| {label} | {d['trades']} | {d['wins']} | {format_number(wr)}% | {format_number(d['pnl'])} |")
+        report.append("")
     report.append("### Per Coin Statistics")
     report.append("")
     report.append("| Symbol | Trades | Wins | Losses | Win% | PnL | Rejected |")

@@ -69,6 +69,7 @@ class Signal:
     bb_middle: float = 0.0
     bb_lower: float = 0.0
     atr: float = 0.0
+    quote_volume: float = 0.0  # объём в USDT за свечу перед входом
     mode: Optional[str] = None  # "paper"|"live"|None (None = наследует режим бота)
 
 
@@ -278,6 +279,7 @@ def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
         bb_middle=round(float(curr.get("bb_middle", 0) or 0), 4),
         bb_lower=round(float(curr.get("bb_lower", 0) or 0), 4),
         atr=round(atr_abs, 6),
+        quote_volume=round(float(curr.get("quote_volume", 0) or 0), 2),
         mode=preset_cfg.get("mode") or cfg.mode,
     )
 
