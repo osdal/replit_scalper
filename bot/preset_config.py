@@ -18,7 +18,7 @@ PRESET_CONFIG: dict[str, dict] = {
     "sma_cross_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     "sma_cross_short": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},
     # ── 3. RSI bounce (отскок от перепроданности/перекупленности) ──────────
-    "rsi_bounce_long": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0},
+    "rsi_bounce_long": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0, "mode": "paper"},
     "rsi_bounce_short": {"tp": 0.8, "sl": 0.4, "max_per_preset": 0},
     # ── 4. RSI divergence (дивергенция цены и RSI) ────────────────────────
     "rsi_divergence_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0},

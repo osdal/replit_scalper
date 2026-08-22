@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db, botsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { spawn, exec, type ChildProcess } from "child_process";
+import { spawn, exec, execSync, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import fs from "fs";
@@ -247,46 +247,88 @@ router.post("/:symbol/start", async (req, res) => {
     }
 
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-    
-    // Find Python executable
-    let pythonCmd = 'python3';
-    if (process.platform === 'win32') {
-      pythonCmd = 'python.exe';
-      // Try 'python' as fallback (some Windows installations use 'python' instead of 'python.exe')
-      try {
-        spawn('python', ['--version'], { stdio: 'ignore' });
-        pythonCmd = 'python';
-      } catch {
-        try {
-          spawn('python.exe', ['--version'], { stdio: 'ignore' });
-        } catch {
-          return res.status(500).json({ error: "Python not found. Install Python and add to PATH." });
-        }
+
+    // Find Python executable. Priority:
+    //   1. process.env.BOT_PYTHON (explicit path from .env)
+    //   2. 'python'/'python.exe' from PATH, but only if it has the bot deps
+    let pythonCmd = process.env.BOT_PYTHON || process.env.PYTHON || "";
+    if (!pythonCmd) {
+      if (process.platform === 'win32') {
+        pythonCmd = 'python.exe';
+      } else {
+        pythonCmd = 'python3';
       }
+    }
+    // Verify the chosen python actually has the bot dependencies. If not, search
+    // for one that does, because the system default may point to a pip-user/env
+    // install without pandas.
+    const hasDeps = (cand: string): boolean => {
+      try {
+        execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe' });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!hasDeps(pythonCmd)) {
+      // Try common explicit paths for the Python that has the deps installed.
+      const candidates = [
+        process.env.BOT_PYTHON,
+        'C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe',
+        'C:/Python311/python.exe',
+        'python',
+        'python3',
+      ].filter(Boolean) as string[];
+      const found = candidates.find((c) => hasDeps(c));
+      if (!found) {
+        return res.status(500).json({ error: "Python with bot dependencies (pandas, python-binance) not found. Check BOT_PYTHON in .env." });
+      }
+      pythonCmd = found;
     }
     
     const proc = spawn(pythonCmd, ["main.py", configFile], {
       cwd: BOT_DIR,
       detached: false,
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       env: process.env,
     });
     botProcesses.set(symbol, proc);
 
-    // Перенаправляем вывод бота в консоль API сервера
     const botTag = `[BOT ${symbol}]`;
+    const debugLogPath = path.join(BOT_DIR, "logs", `api_${symbol.toLowerCase()}.log`);
+    const debugWrite = (msg: string) => {
+      console.log(msg);
+      try {
+        fs.appendFileSync(debugLogPath, `${new Date().toISOString()} ${msg}\n`);
+      } catch { /* ignore */ }
+    };
+    proc.on("error", (err) => {
+      const msg = `${botTag} spawn error: ${err.message}`;
+      debugWrite(msg);
+      botProcesses.delete(symbol);
+      db.update(botsTable)
+        .set({ is_running: false, updated_at: new Date().toISOString() })
+        .where(eq(botsTable.symbol, symbol))
+        .catch(() => {});
+    });
+    proc.on("spawn", () => {
+      debugWrite(`${botTag} process spawned (pid=${proc.pid})`);
+    });
     proc.stdout?.on("data", (d) => {
       const lines = d.toString().trim().split("\n");
       for (const line of lines) {
-        if (line.trim()) console.log(`${botTag} ${line}`);
+        if (line.trim()) debugWrite(`${botTag} [stdout] ${line}`);
       }
     });
     proc.stderr?.on("data", (d) => {
       const lines = d.toString().trim().split("\n");
       for (const line of lines) {
-        if (line.trim()) console.error(`${botTag} ${line}`);
+        if (line.trim()) debugWrite(`${botTag} ${line}`);
       }
+    });
+    proc.on("exit", (code, signal) => {
+      debugWrite(`${botTag} exited (code=${code} signal=${signal})`);
     });
 
     await db.update(botsTable)

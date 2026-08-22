@@ -37,7 +37,7 @@ class DbReporter:
     async def report_stopped(self) -> None:
         await self._patch({"is_running": False, "position": None})
 
-    async def report_rejected(self, signal_data: dict, reason: str, qty: float = 0.0) -> Optional[int]:
+    async def report_rejected(self, signal_data: dict, reason: str, qty: float = 0.0, mode: str = "paper") -> Optional[int]:
         """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'
         (для статистики). pnl=0, is_open=0 — не влияет на торговую статистику.
         Возвращает id созданной записи (для последующей симуляции TP/SL)."""
@@ -56,7 +56,7 @@ class DbReporter:
             "entry_time": _dt.datetime.utcnow().isoformat(),
             "exit_time": None,
             "is_open": False,
-            "mode": "live",
+            "mode": mode,
             "status": "rejected",
             "reject_reason": reason,
         }

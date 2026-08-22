@@ -9,7 +9,7 @@ htf_enabled: true
 htf_timeframe: 1h
 leverage: 100
 log_file: logs/bnb.log
-mode: live
+mode: paper
 paper_balance: 1000.0
 risk_pct: 3.0
 sl_pct: 1

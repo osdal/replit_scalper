@@ -73,7 +73,7 @@ async def _track_skipped_signal(reporter, signal, cfg, reason):
             "macd": getattr(signal, "macd", None),
             "atr": getattr(signal, "atr", None),
         }
-        _asyncio.create_task(reporter.report_rejected(payload, reason))
+        _asyncio.create_task(reporter.report_rejected(payload, reason, mode=cfg.mode))
     except Exception:
         pass
 
@@ -1222,7 +1222,7 @@ async def _run_live_or_paper(
                         log.info(f"[LLM] Signal REJECTED for {cfg.symbol} {signal.preset}")
                         signal_data["reject_reason"] = "llm_reject"
                         if reporter is not None:
-                            await reporter.report_rejected(signal_data, "llm_reject")
+                            await reporter.report_rejected(signal_data, "llm_reject", mode=cfg.mode)
                         return
                     elif llm_result is True:
                         log.info(f"[LLM] Signal APPROVED for {cfg.symbol} {signal.preset}")
@@ -1249,7 +1249,7 @@ async def _run_live_or_paper(
                         balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                         sim_qty = _calc_simulated_qty(cfg, signal, balance)
                         signal_data["qty"] = sim_qty
-                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}", qty=sim_qty)
+                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}", qty=sim_qty, mode=cfg.mode)
                         if tid:
                             _rejected_sims.append({
                                 "trade_id": tid,
@@ -1286,7 +1286,7 @@ async def _run_live_or_paper(
                     balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                     sim_qty = _calc_simulated_qty(cfg, signal, balance)
                     signal_data["qty"] = sim_qty
-                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit", qty=sim_qty)
+                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit", qty=sim_qty, mode=cfg.mode)
                     if tid:
                         _rejected_sims.append({
                             "trade_id": tid,

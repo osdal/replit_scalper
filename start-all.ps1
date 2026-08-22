@@ -23,6 +23,12 @@ while ((Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Silently
     Start-Sleep -Seconds 1
     $waited++
 }
+# Clean up stale bot lock files left behind by forcibly stopped bot processes
+$locks = Get-ChildItem -Path "$scriptDir\bot" -Filter "bot.lock.*" -ErrorAction SilentlyContinue
+foreach ($lock in $locks) {
+    try { Remove-Item -LiteralPath $lock.FullName -Force -ErrorAction SilentlyContinue } catch { }
+}
+if ($locks) { Write-Host "      Removed $($locks.Count) stale bot lock file(s)" }
 Write-Host "      OK"
 Write-Host ""
 
