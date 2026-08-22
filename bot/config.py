@@ -23,10 +23,14 @@ class Config:
     backtest_end: str
     paper_balance: float
     log_file: str
-    htf_enabled: bool = False
-    htf_timeframe: str = "1h"
-    htf_ema_fast: int = 9
-    htf_ema_slow: int = 21
+    htf_enabled: bool = False          # Включить старший ТФ-фильтр (основной)
+    htf_timeframe: str = "1h"          # Старший ТФ (основной): 1h | 4h | 1d ...
+    htf_ema_fast: int = 12
+    htf_ema_slow: int = 26
+    htf2_enabled: bool = False         # Включить второй старший ТФ-фильтр
+    htf2_timeframe: str = "15m"        # Старший ТФ (второй): 15m | 1h ...
+    htf2_ema_fast: int = 12
+    htf2_ema_slow: int = 26
     recovery_enabled: bool = True
     recovery_max_position_pct: float = 100.0
     fixed_qty: float = 0.0          # Fixed position size in coins (0 = use risk_pct of balance)

@@ -197,10 +197,12 @@ def _calc_ichimoku(df: pd.DataFrame) -> dict:
     return {"tenkan": tenkan, "kijun": kijun, "senkou_a": senkou_a, "senkou_b": senkou_b, "chikou": chikou}
 
 
-def calculate_htf_indicators(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+def calculate_htf_indicators(df: pd.DataFrame, cfg: Config, ema_fast: Optional[int] = None, ema_slow: Optional[int] = None) -> pd.DataFrame:
     df = df.copy()
-    df["htf_ema_fast"] = df["close"].ewm(span=cfg.htf_ema_fast, adjust=False).mean()
-    df["htf_ema_slow"] = df["close"].ewm(span=cfg.htf_ema_slow, adjust=False).mean()
+    fast = ema_fast if ema_fast is not None else cfg.htf_ema_fast
+    slow = ema_slow if ema_slow is not None else cfg.htf_ema_slow
+    df["htf_ema_fast"] = df["close"].ewm(span=fast, adjust=False).mean()
+    df["htf_ema_slow"] = df["close"].ewm(span=slow, adjust=False).mean()
     return df
 
 
