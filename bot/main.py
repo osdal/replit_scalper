@@ -867,7 +867,7 @@ async def _run_live_or_paper(
             _preset_open_counts[preset] = cnt - 1
 
     async def process_hit(hit: str, current_price: float, candle_time_ms: int):
-        nonlocal _consecutive_losses
+        nonlocal _consecutive_losses, _last_loss_time
         pos = tracker.position
         pos_mode = (pos.mode if pos else None) or cfg.mode
         is_live_close = (pos_mode == "live")
@@ -984,10 +984,10 @@ async def _run_live_or_paper(
         elif hit in ("TP1", "TP2"):
             _consecutive_losses = 0
             _last_loss_time = 0.0
-            _last_loss_time = 0.0
 
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
+        nonlocal _consecutive_losses, _last_loss_time
         last_candle_time[0] = time.time()
         _ = events  # capture events in closure
         try:
