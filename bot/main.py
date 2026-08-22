@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from config import load_config
 from logger import get_logger, get_events_logger
 from market_data import get_recent_klines, start_kline_polling
-from strategy import calculate_indicators, calculate_htf_indicators, get_all_signals, get_htf_trend_latest, Signal
+from strategy import calculate_indicators, calculate_htf_indicators, get_all_signals, get_htf_trend_latest, Signal, _calc_atr_sl_tp
 from preset_config import get_preset_config
 from signal_handler import SignalHandler
 from order_manager import OrderManager
@@ -1353,8 +1353,10 @@ async def _run_live_or_paper(
                     if preset_cfg.get("tp"):
                         tp_pct = preset_cfg["tp"]
                         sl_pct = preset_cfg.get("sl", cfg.sl_pct)
-                        sl_dist = entry_price * sl_pct / 100
-                        tp_dist = entry_price * tp_pct / 100
+                        atr_abs = getattr(signal, "atr", 0) or 0
+                        dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry_price, atr_abs, sl_pct, tp_pct)
+                        sl_dist = entry_price * dynamic_sl / 100
+                        tp_dist = entry_price * dynamic_tp / 100
                         if signal.direction == "LONG":
                             signal.sl_price = round(entry_price - sl_dist, 8)
                             signal.tp1_price = round(entry_price + tp_dist, 8)

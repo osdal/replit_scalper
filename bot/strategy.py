@@ -226,6 +226,17 @@ def get_htf_trend_latest(df_htf: pd.DataFrame) -> Optional[str]:
 
 # ── Per-preset signal functions (fully independent) ────────────────────────
 
+def _calc_atr_sl_tp(entry: float, atr_abs: float, base_sl_pct: float, base_tp_pct: float) -> tuple[float, float]:
+    """Динамический SL по ATR: расширяем только если ATR высокий, cap 0.65%, TP = 2*SL."""
+    atr_pct = (atr_abs / entry) * 100 if entry > 0 else 0.0
+    if atr_pct > base_sl_pct / 1.5:
+        dynamic_sl = min(1.5 * atr_pct, 0.65)
+    else:
+        dynamic_sl = base_sl_pct
+    dynamic_tp = 2.0 * dynamic_sl
+    return dynamic_sl, dynamic_tp
+
+
 def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
                  ema_fast: float = 0.0, ema_slow: float = 0.0,
                  volume: float = 0.0, volume_ma: float = 0.0) -> Optional[Signal]:
@@ -235,8 +246,10 @@ def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
     preset_cfg = get_preset_config(preset)
     sl_pct = preset_cfg.get("sl", cfg.sl_pct)
     tp_pct = preset_cfg.get("tp", cfg.tp1_pct)
-    sl_dist = entry * sl_pct / 100
-    tp_dist = entry * tp_pct / 100
+    atr_abs = float(curr.get("atr", 0) or 0)
+    dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry, atr_abs, sl_pct, tp_pct)
+    sl_dist = entry * dynamic_sl / 100
+    tp_dist = entry * dynamic_tp / 100
     if direction == "LONG":
         sl_price = entry - sl_dist
         tp1_price = entry + tp_dist
@@ -264,7 +277,7 @@ def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
         bb_upper=round(float(curr.get("bb_upper", 0) or 0), 4),
         bb_middle=round(float(curr.get("bb_middle", 0) or 0), 4),
         bb_lower=round(float(curr.get("bb_lower", 0) or 0), 4),
-        atr=round(float(curr.get("atr", 0) or 0), 6),
+        atr=round(atr_abs, 6),
         mode=preset_cfg.get("mode") or cfg.mode,
     )
 
