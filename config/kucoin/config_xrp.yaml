@@ -18,11 +18,11 @@ backtest_start: "2026-05-01"
 backtest_end: "2026-06-08"
 paper_balance: 1000.0
 log_file: logs/xrp.log
-htf_enabled: True
+htf_enabled: false
 htf_timeframe: 1h
 htf_ema_fast: 9
 htf_ema_slow: 21
-htf2_enabled: true
+htf2_enabled: false
 htf2_timeframe: 15m
 htf2_ema_fast: 12
 htf2_ema_slow: 26
