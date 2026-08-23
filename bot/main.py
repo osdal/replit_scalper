@@ -54,6 +54,15 @@ def _sim_commission(entry, exit_price, qty):
 async def _track_skipped_signal(reporter, signal, cfg, reason):
     """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
     reject_reason 'skip:*' (не симулируется, только статистика). Не блокирует цикл."""
+    # При серии убытков каждый сигнал отклоняется локальной защитой. Запись каждой
+    # пропущенной сделки в БД порождает поток 'skip:loss_streak_*' (сотни строк
+    # в минуту при убыточной серии) — засоряет дашборд/БД. Блокировка работает и без
+    # записи: просто логируем факт пропуска, не создавая записи в БД.
+    if reason and reason.startswith("skip:loss_streak"):
+        logging.getLogger("main").debug(
+            f"[LOSS_STREAK] skip recording for {getattr(signal, 'symbol', '')}: {reason}"
+        )
+        return
     if reporter is None or signal is None:
         return
     try:
