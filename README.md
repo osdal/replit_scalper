@@ -752,6 +752,14 @@ Daily-скрипт регистрируется в планировщике за
 
 ## 16. Changelog
 
+### 2026-08-23
+- **Rate-limit защита Binance**: добавлен `bot/rate_limit.py` с `with_retry()` для обработки `-1003` (бан IP), `-429` и таймаутов. Все запросы klines в `bot/market_data.py` и прогрев в `bot/main.py` теперь обёрнуты в retry — бот не падает при бане, а ждёт и повторяет.
+- **Staggered запуск ботов**: `scripts_start_bots_parallel.py` теперь запускает ботов поочерёдно с паузой 4 сек между стартами. Это предотвращает массовый flood запросов при старте и бан IP.
+- **Глобальная защита от серии убытков**: включена в `bot/recovery_config.yaml` (`loss_streak_trigger: 3`, `loss_pause_signals: 5`). При 3 убытках подряд по всему портфелю включается пауза на 5 сигналов. В `artifacts/api-server/src/routes/trading.ts` прибыльная сделка теперь сбрасывает `paused_remaining=0`. В `bot/main.py` добавлено явное тегирование `risk:loss_streak`.
+- **HTF 15m**: `htf_timeframe` переключён с `1h` на `15m` в `bot/config.yaml` и всех per-symbol конфигах.
+- **HTF2 отключён**: во всех Binance конфигах (`config/binance/*.yaml`) `htf2_enabled` переключён на `false`.
+- **Очистка БД**: удалено 1175 записей со статусом `rejected` из `data/bot.db`.
+
 ### 2026-08-22
 - **Режим по умолчанию изменён с live на paper**: `bot/config.yaml`, `lib/db/src/schema/trades.ts`, `artifacts/api-server/src/init-db.ts` и все `config_*.yaml` (Binance + KuCoin) теперь используют `mode: paper` по умолчанию. Это предотвращает случайную реальную торговлю при запуске.
 - **Фикс `KeyError: 'symbol'` в events-логгере**: в `bot/logger.py` добавлен `SymbolInjectFilter`, который подставляет `record.symbol` для формат-строки `%(symbol)s` в `events.log`. Раньше при логировании событий бот падал с `KeyError`.
