@@ -897,6 +897,10 @@ async def _run_live_or_paper(
                     tp2_price=pos.tp2_price,
                     mode=pos_mode,
                 )
+            # TP1 полностью закрыл позицию (tp1_close_pct=100) — сбрасываем глобальную
+            # серию убытков, как для TP2/SL.
+            if tracker.position is None or tracker.position.remaining_qty <= 0.000001:
+                await recovery.report_result(pnl)
         elif hit == "TP1" and pos.is_recovery:
             events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
             preset_before = getattr(pos, 'preset', None)

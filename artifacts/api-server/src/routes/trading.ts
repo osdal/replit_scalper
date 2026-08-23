@@ -142,14 +142,21 @@ router.post("/check", async (req, res) => {
     if (control.paused_remaining > 0) {
       // Бот спросил разрешение — это и есть «сигнал». Пропускаем его и уменьшаем счётчик.
       const remaining = control.paused_remaining - 1;
+      // Пауза закончилась (последний пропущенный сигнал) — сбрасываем серию убытков,
+      // чтобы после «охлаждения» бот вышел в рынок с чистым листом.
+      const resetStreak = remaining === 0;
       await db.update(tradingControlTable)
-        .set({ paused_remaining: remaining, updated_at: new Date().toISOString() })
+        .set({
+          paused_remaining: remaining,
+          loss_streak: resetStreak ? 0 : control.loss_streak,
+          updated_at: new Date().toISOString(),
+        })
         .where(eq(tradingControlTable.id, 1));
       return res.json({
         allowed: false,
         reason: "pause",
         positions_open: positions,
-        loss_streak: control.loss_streak,
+        loss_streak: resetStreak ? 0 : control.loss_streak,
         paused_remaining: remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
       });
