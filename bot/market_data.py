@@ -6,6 +6,10 @@ from typing import Callable, Dict, Optional
 import pandas as pd
 from binance import AsyncClient
 
+from rate_limit import with_retry
+
+logger = logging.getLogger("market_data")
+
 
 async def get_historical_klines(
     client: AsyncClient,
@@ -37,8 +41,12 @@ async def get_recent_klines(
     }
     if start_ms is not None:
         params["startTime"] = start_ms
+
+    async def _fetch():
+        return await client.futures_klines(**params)
+
     try:
-        klines = await asyncio.wait_for(client.futures_klines(**params), timeout=30)
+        klines = await asyncio.wait_for(with_retry(_fetch, log=logger), timeout=120)
     except asyncio.TimeoutError:
         if logger:
             logger.error(f"[POLL] get_recent_klines timeout for {symbol} {interval}")
@@ -101,10 +109,11 @@ async def start_kline_polling(
         try:
             if logger:
                 logger.info(f"[POLL] Fetching init klines for {symbol} {interval}")
-            klines = await asyncio.wait_for(
-                client.futures_klines(symbol=symbol, interval=interval, limit=2),
-                timeout=30,
-            )
+
+            async def _init_fetch(interval=interval):
+                return await client.futures_klines(symbol=symbol, interval=interval, limit=2)
+
+            klines = await asyncio.wait_for(with_retry(_init_fetch, log=logger), timeout=120)
             if logger:
                 logger.info(f"[POLL] Got {len(klines)} klines for {symbol} {interval}")
             df = _klines_to_df(klines)
@@ -146,10 +155,11 @@ async def start_kline_polling(
             try:
                 if logger:
                     logger.debug(f"[POLL] Fetching klines for {symbol} {interval}")
-                klines = await asyncio.wait_for(
-                    client.futures_klines(symbol=symbol, interval=interval, limit=2),
-                    timeout=30,
-                )
+
+                async def _poll_fetch(interval=interval):
+                    return await client.futures_klines(symbol=symbol, interval=interval, limit=2)
+
+                klines = await asyncio.wait_for(with_retry(_poll_fetch, log=logger), timeout=120)
                 if logger:
                     logger.debug(f"[POLL] Got {len(klines)} klines for {symbol} {interval}")
                 df = _klines_to_df(klines)

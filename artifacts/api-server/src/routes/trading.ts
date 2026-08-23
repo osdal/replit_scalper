@@ -200,6 +200,7 @@ router.post("/result", async (req, res) => {
 
     if (pnl >= 0) {
       loss_streak = 0; // победа сбрасывает серию
+      paused_remaining = 0; // и сразу снимает паузу, если она была активна
     } else {
       loss_streak += 1;
       if (loss_streak >= cfg.loss_streak_trigger) {

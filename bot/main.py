@@ -1275,15 +1275,22 @@ async def _run_live_or_paper(
                 risk_check = await recovery.can_open()
                 if not risk_check.get("allowed", True):
                     reason = risk_check.get("reason", "risk_block")
+                    # Пауза из-за серии убытков = только если причина "pause" и счётчик убытков > 0.
+                    # Отмечаем явно, чтобы в аналитике было видно, сколько прибыльных сигналов потеряно из-за защиты.
+                    if reason == "pause" and (risk_check.get("loss_streak") or 0) > 0:
+                        reject_key = "risk:loss_streak"
+                    else:
+                        reject_key = f"risk:{reason}"
                     log.info(
-                        f"[RISK] Skip signal for {cfg.symbol}: reason={reason} "
+                        f"[RISK] Skip signal for {cfg.symbol}: reason={reason} ({reject_key}) "
+                        f"loss_streak={risk_check.get('loss_streak')} "
                         f"(positions={risk_check.get('positions_open')})"
                     )
                     if reporter is not None:
                         balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                         sim_qty = _calc_simulated_qty(cfg, signal, balance)
                         signal_data["qty"] = sim_qty
-                        tid = await reporter.report_rejected(signal_data, f"risk:{reason}", qty=sim_qty, mode=cfg.mode)
+                        tid = await reporter.report_rejected(signal_data, reject_key, qty=sim_qty, mode=cfg.mode)
                         if tid:
                             _rejected_sims.append({
                                 "trade_id": tid,
