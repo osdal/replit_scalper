@@ -19,6 +19,6 @@ backtest_end: "2026-06-08"
 paper_balance: 1000.0
 log_file: logs/bot.log
 htf_enabled: True
-htf_timeframe: 1h
+htf_timeframe: 15m
 htf_ema_fast: 9
 htf_ema_slow: 21

@@ -67,12 +67,12 @@ fixed_qty: 0.0
 fixed_risk_usd: 0.5
 htf_ema_fast: 8
 htf_ema_slow: 24
-htf2_enabled: true
+htf2_enabled: false
 htf2_timeframe: 15m
 htf2_ema_fast: 12
 htf2_ema_slow: 26
 htf_enabled: true
-htf_timeframe: 1h
+htf_timeframe: 15m
 leverage: 75
 log_file: logs/fet.log
 margin_pct: 0
