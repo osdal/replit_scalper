@@ -818,7 +818,7 @@ def get_signal_adx_trend(df: pd.DataFrame, cfg: Config,
         return None
     plus_di_prev = float(prev["+di"])
     plus_di_curr = float(curr["+di"])
-    minus_di_prev = float(prev["-"])
+    minus_di_prev = float(prev["-di"])
     minus_di_curr = float(curr["-di"])
     long_signal = plus_di_prev <= minus_di_prev and plus_di_curr > minus_di_curr
     short_signal = minus_di_prev <= plus_di_prev and minus_di_curr > plus_di_curr
