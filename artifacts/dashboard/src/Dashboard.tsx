@@ -512,7 +512,10 @@ export default function Dashboard() {
     try {
       const [b, t, s] = await Promise.all([fetchBots(), fetchTrades(undefined, 100), fetchStats()]);
       setBots(Array.isArray(b) ? b : []);
-      setTrades(Array.isArray(t?.trades) ? t.trades : []);
+      const allTrades = Array.isArray(t?.trades) ? t.trades : [];
+      // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
+      // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
+      setTrades(allTrades.filter((tr) => !String(tr.reject_reason || "").startsWith("skip:")));
       setStats(Array.isArray(s) ? s : []);
       setLastRefresh(new Date());
     } catch {
