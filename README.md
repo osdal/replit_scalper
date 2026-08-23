@@ -1,6 +1,6 @@
 # Trading Bot — документация
 
-Краткое описание: автоматический торговый бот для Binance Futures (USDT-M) и KuCoin Futures, реализующий мультипресетную стратегию (46 пресетов: EMA/SMA кроссы, RSI, MACD, Bollinger, Stochastic, VWAP, ATR, Supertrend, ADX, Ichimoku, свечные паттерны) с HTF-трендом, опциональным LLM-фильтром сигналов (Groq/Gemini/OpenRouter) и скриптом анализа результатов. Поддерживает три режима работы (live, paper, backtest), систему компенсации убытков (recovery), оптимизацию параметров и веб-дашборд.
+Краткое описание: автоматический торговый бот для Binance Futures (USDT-M) и KuCoin Futures, реализующий мультипресетную стратегию (46 пресетов: EMA/SMA кроссы, RSI, MACD, Bollinger, Stochastic, VWAP, ATR, Supertrend, ADX, Ichimoku, свечные паттерны) с HTF-трендом, опциональным LLM-фильтром сигналов (Groq/Gemini/OpenRouter), защитой от серии убытков и скриптом анализа результатов. Поддерживает три режима работы (live, paper, backtest), систему компенсации убытков (recovery), оптимизацию параметров и веб-дашборд.
 
 ---
 
@@ -216,6 +216,25 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 - `loss_streak_trigger` — после N убытков подряд включается пауза на `loss_pause_signals` сигналов.
 - `daily_loss_limit_usd` — дневной лимит убытков (USDT).
 - `max_free_debt_usd` — потолок долга recovery (новые claim запрещены при превышении).
+
+### 3.3a Защита от серии убытков (loss streak)
+
+При последовательных убытках бот **не останавливается**, а отклоняет следующие сигналы с записью причины в БД (`skip:loss_streak_3/5/7`). Это позволяет видеть в аналитике, сколько сигналов было потеряно из-за защиты.
+
+Пороги:
+- **3 убытка подряд** — сигнал отклоняется, причина `skip:loss_streak_3`
+- **5 убытков подряд** — сигнал отклоняется, причина `skip:loss_streak_5`
+- **7 убытков подряд** — сигнал отклоняется, причина `skip:loss_streak_7`
+
+Счётчик сбрасывается при любом TP1/TP2.
+
+**Cooldown**: после достижения порога (3/5/7) счётчик автоматически сбрасывается через 1 час без новых убытков. Это предотвращает бесконечное отклонение сигналов после одной серии убытков.
+
+В `analyze_trades.py` добавлены две версии статистики:
+- **Stats WITHOUT rejected trades** — только закрытые сделки (классическая статистика)
+- **Stats WITH rejected trades** — закрытые + отклонённые сигналы (считаются как 0 PnL)
+
+Это позволяет оценить, сколько потенциальной прибыли было потеряно из-за защиты.
 
 ### 3.4 Синхронизация позиции
 
@@ -672,6 +691,8 @@ python analyze_trades.py
 
 Разделы отчёта:
 - **Overall Statistics** — Win Rate, PnL (Gross/Net), Profit Factor, Max Drawdown, consecutive wins/losses, Avg Hold Time, Avg Hold TP/SL
+- **Stats WITH rejected trades** — статистика включая отклонённые сигналы (loss streak protection, cooldown, cycle limit, preset limit)
+- **Stats WITHOUT rejected trades** — только закрытые сделки (классическая статистика)
 - **Loss Streaks** — распределение по длине, монеты, пресеты, часовой breakdown
 - **Position Sizing** — средний/мин/макс номинал, средний qty
 - **Per Coin Statistics** — по каждой монете: trades, wins, losses, win%, PnL, rejected
@@ -767,6 +788,11 @@ Daily-скрипт регистрируется в планировщике за
 - **Очистка устаревших lock-файлов при старте**: `start-all.ps1` теперь удаляет `bot.lock.*` файлы, оставшиеся после принудительной остановки ботов.
 - **Фикс режима rejected-сделок**: `bot/db_reporter.py` и вызовы в `bot/main.py` теперь передают `mode=cfg.mode` при записи отклонённых сигналов в БД. Раньше все rejected-сделки записывались с `mode=live`, даже если бот работал в `paper`.
 - **Preset `rsi_bounce_long` переведён в paper**: в `bot/preset_config.py` добавлен `mode: "paper"` для `rsi_bounce_long`, чтобы этот пресет не открывал реальные ордера по умолчанию.
+- **Двойной HTF-фильтр (1h + 15m)**: добавлен `htf2_enabled`/`htf2_timeframe`/`htf2_ema_fast`/`htf2_ema_slow`. Сигнал допускается только если оба старших ТФ показывают одинаковый тренд. Все конфиги переведены на `htf_timeframe: 1h` + `htf2_timeframe: 15m`.
+- **ATR-based SL с cap 0.65%**: добавлен хелпер `_calc_atr_sl_tp()` в `strategy.py`. SL расширяется до `min(1.5 * ATR%, 0.65%)` только если ATR выше порога, TP = 2 * SL. Применяется в `_make_signal` и per-preset override в `main.py`.
+- **Bounce-пресеты повышены до TP=1.0%, SL=0.5%**: `stoch_bounce`, `rsi_bounce`, `bb_bounce` подняты с 0.7/0.35–0.9/0.45 до 1.0/0.5.
+- **Защита от серии убытков**: добавлен счётчик `_consecutive_losses` в `main.py`. При 3/5/7 убытков подряд сигналы отклоняются с причинами `skip:loss_streak_3/5/7`. Бот не останавливается.
+- **Двойная статистика в аналитике**: в `analyze_trades.py` добавлены `with_rejected` метрики и в `ANALYTICS.md` разделы "Stats WITH rejected trades" и "Stats WITHOUT rejected trades".
 
 ### 2026-08-21
 - **Telegram live-only**: уведомления (`send_signal`, `send_event`, `send_message`) отправляются только для позиций с `mode=live`. Paper-сделки не шлют ничего в Telegram.

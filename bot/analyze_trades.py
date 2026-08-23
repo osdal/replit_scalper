@@ -49,7 +49,7 @@ def load_trades(db_path=None):
     return trades
 
 
-def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time=None):
+def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time=None, include_rejected=False):
     if trades is None:
         trades = load_trades()
     if excluded_presets is None:
@@ -529,6 +529,17 @@ def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time
         "confluence_summary": dict(confluence_summary),
     }
 
+    # Stats including rejected trades (rejected count as 0 PnL trades)
+    included_closes_for_rejected = [t for t in closes if (t.get("preset") or "unknown") not in excluded_presets]
+    rejected_for_stats = [t for t in rejected if (t.get("preset") or "unknown") not in excluded_presets]
+    with_rejected = included_closes_for_rejected + rejected_for_stats
+    wr_with_rejected = (len([t for t in with_rejected if float(t.get("pnl") or 0.0) > 0]) / len(with_rejected) * 100) if with_rejected else 0.0
+    total_pnl_with_rejected = sum(float(t.get("pnl") or 0.0) for t in with_rejected)
+    avg_pnl_with_rejected = total_pnl_with_rejected / len(with_rejected) if with_rejected else 0.0
+    gp_wr = sum(float(t.get("pnl") or 0.0) for t in with_rejected if float(t.get("pnl") or 0.0) > 0)
+    gl_wr = sum(abs(float(t.get("pnl") or 0.0)) for t in with_rejected if float(t.get("pnl") or 0.0) < 0)
+    pf_with_rejected = gp_wr / gl_wr if gl_wr > 0 else float("inf")
+
     return {
         "total_opens": total_opens,
         "total_closes": total_closes,
@@ -565,6 +576,13 @@ def analyze_trades(trades=None, excluded_presets=None, start_time=None, end_time
         "pos_stats": pos_stats,
         "metrics": metrics,
         "excluded_presets": sorted(excluded_presets),
+        "with_rejected": {
+            "trades": len(with_rejected),
+            "win_rate": wr_with_rejected,
+            "total_pnl": total_pnl_with_rejected,
+            "avg_pnl_per_trade": avg_pnl_with_rejected,
+            "profit_factor": pf_with_rejected,
+        },
         "loss_streaks": {
             "count": len(loss_streaks),
             "by_length": {k: {"count": v, "pnl": streak_pnl[k]} for k, v in sorted(streak_lengths.items())},
@@ -651,6 +669,32 @@ def generate_report(stats, start_time=None, end_time=None):
     report.append(f"| Time Profit Closes | {stats['time_closes']} |")
     report.append(f"| Avg Hold Time | {format_number(stats['avg_hold_time'], 1)} min |")
     report.append(f"| Avg Hold (TP) | {format_number(stats['avg_hold_tp'], 1)} min |")
+    report.append(f"| Avg Hold (SL) | {format_number(stats['avg_hold_sl'], 1)} min |")
+    report.append("")
+    wr = stats.get("with_rejected")
+    if wr is not None:
+        report.append("### Stats WITH rejected trades")
+        report.append("")
+        report.append("| Metric | Value |")
+        report.append("|---|---|")
+        report.append(f"| Total Trades (closed + rejected) | {wr['trades']} |")
+        report.append(f"| Win Rate | {format_number(wr['win_rate'])}% |")
+        report.append(f"| Total PnL (Net) | {format_number(wr['total_pnl'])} |")
+        report.append(f"| Avg PnL per Trade | {format_number(wr['avg_pnl_per_trade'])} |")
+        report.append(f"| Profit Factor | {format_number(wr['profit_factor'])} |")
+        report.append("")
+    report.append("### Stats WITHOUT rejected trades")
+    report.append("")
+    report.append("| Metric | Value |")
+    report.append("|---|---|")
+    report.append(f"| Total Trades (closed only) | {stats['total_closes']} |")
+    report.append(f"| Win Rate | {format_number(stats['win_rate'])}% |")
+    report.append(f"| Total PnL (Net) | {format_number(stats['total_pnl'])} |")
+    report.append(f"| Avg PnL per Trade | {format_number(stats['avg_pnl_per_trade'])} |")
+    report.append(f"| Profit Factor | {format_number(stats['profit_factor'])} |")
+    report.append("")
+    streak_stats = stats.get("loss_streaks", {})
+    report.append("### Loss Streaks")
     report.append(f"| Avg Hold (SL) | {format_number(stats['avg_hold_sl'], 1)} min |")
     report.append("")
     report.append(f"| Max Consecutive Losses | {stats['max_consecutive_losses']} |")
