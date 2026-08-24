@@ -58,6 +58,22 @@ def _is_loss_streak_reason(sim) -> bool:
     return reason.startswith("risk:loss_streak") or reason.startswith("skip:loss_streak")
 
 
+# Rate-limit записи отклонённых сделок в БД. Причины вроде max_positions срабатывают
+# на КАЖДЫЙ сигнал, пока достигнут лимит позиций, — сотни записей в минуту забивают
+# API-сервер и БД. Для воронки достаточно 1 записи на (символ, причину) в окно.
+_REJECT_RECORD_COOLDOWN = 60.0
+_last_reject_record: dict[str, float] = {}
+
+
+def _reject_should_record(symbol: str, reason: str, now_ts: float) -> bool:
+    """True, если пора записать отклонение в БД (прошло больше _REJECT_RECORD_COOLDOWN)."""
+    key = f"{symbol}:{reason}"
+    if now_ts - _last_reject_record.get(key, 0.0) >= _REJECT_RECORD_COOLDOWN:
+        _last_reject_record[key] = now_ts
+        return True
+    return False
+
+
 async def _track_skipped_signal(reporter, signal, cfg, reason):
     """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
     reject_reason 'skip:*' (не симулируется, только статистика). Не блокирует цикл."""
@@ -1383,6 +1399,12 @@ async def _run_live_or_paper(
                         f"loss_streak={risk_check.get('loss_streak')} "
                         f"(positions={risk_check.get('positions_open')})"
                     )
+                    # max_positions срабатывает на каждый сигнал при достигнутом лимите —
+                    # записываем в БД не чаще 1 раза в _REJECT_RECORD_COOLDOWN, чтобы не
+                    # забивать API-сервер/БД. Для loss_streak запись и симуляция полные
+                    # (нужны варианту А: прибыльный отклонённый сигнал снимает блок).
+                    if reject_key == "risk:max_positions" and not _reject_should_record(cfg.symbol, reject_key, time.time()):
+                        return
                     if reporter is not None:
                         balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
                         sim_qty = _calc_simulated_qty(cfg, signal, balance)

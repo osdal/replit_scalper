@@ -97,12 +97,17 @@ class DbReporter:
                 async with session.post(
                     f"{API_URL}/trades",
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status in (200, 201):
                         data = await resp.json()
                         return data.get("id")
                     self.log.debug(f"[REPORTER] rejected trade POST failed: {resp.status}")
+                    # Не сдаёмся сразу на не-2xx — сервер под нагрузкой может
+                    # временно отвечать ошибкой. Повторяем в рамках цикла попыток.
+                    if attempt < 2:
+                        await asyncio.sleep(0.5)
+                        continue
                     return None
             except Exception as e:
                 self.log.debug(f"[REPORTER] rejected trade attempt {attempt+1} error: {e}")
