@@ -1410,7 +1410,6 @@ async def _run_live_or_paper(
                         sim_qty = _calc_simulated_qty(cfg, signal, balance)
                         signal_data["qty"] = sim_qty
                         tid = await reporter.report_rejected(signal_data, reject_key, qty=sim_qty, mode=cfg.mode)
-                        log.info(f"[DIAG-MAXPOS] report_rejected(reject_key={reject_key}) -> tid={tid}")
                         if tid:
                             _rejected_sims.append({
                                 "trade_id": tid,
