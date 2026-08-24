@@ -1319,9 +1319,12 @@ async def _run_live_or_paper(
                 risk_check = await recovery.can_open()
                 if not risk_check.get("allowed", True):
                     reason = risk_check.get("reason", "risk_block")
-                    # Пауза из-за серии убытков = только если причина "pause" и счётчик убытков > 0.
-                    # Отмечаем явно, чтобы в аналитике было видно, сколько прибыльных сигналов потеряно из-за защиты.
-                    if reason == "pause" and (risk_check.get("loss_streak") or 0) > 0:
+                    # Блок из-за серии убытков: сервер возвращает reason "loss_streak" либо
+                    # "pause" с ненулевым loss_streak. Отмечаем явно, чтобы в аналитике было
+                    # видно, сколько прибыльных сигналов потеряно из-за защиты.
+                    if (reason == "loss_streak") or (
+                        reason == "pause" and (risk_check.get("loss_streak") or 0) > 0
+                    ):
                         reject_key = "risk:loss_streak"
                     else:
                         reject_key = f"risk:{reason}"

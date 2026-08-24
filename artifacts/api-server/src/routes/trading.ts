@@ -138,26 +138,16 @@ router.post("/check", async (req, res) => {
       });
     }
 
-    // Пауза активна?
+    // Блок после серии убытков активен? Снимается только прибыльной сделкой.
     if (control.paused_remaining > 0) {
-      // Бот спросил разрешение — это и есть «сигнал». Пропускаем его и уменьшаем счётчик.
-      const remaining = control.paused_remaining - 1;
-      // Пауза закончилась (последний пропущенный сигнал) — сбрасываем серию убытков,
-      // чтобы после «охлаждения» бот вышел в рынок с чистым листом.
-      const resetStreak = remaining === 0;
-      await db.update(tradingControlTable)
-        .set({
-          paused_remaining: remaining,
-          loss_streak: resetStreak ? 0 : control.loss_streak,
-          updated_at: new Date().toISOString(),
-        })
-        .where(eq(tradingControlTable.id, 1));
+      // НЕ уменьшаем paused_remaining — блок держится до первой победы,
+      // чтобы «съедание» слота проверками не снимало защиту за секунды.
       return res.json({
         allowed: false,
-        reason: "pause",
+        reason: "loss_streak",
         positions_open: positions,
-        loss_streak: resetStreak ? 0 : control.loss_streak,
-        paused_remaining: remaining,
+        loss_streak: control.loss_streak,
+        paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
       });
     }
@@ -205,13 +195,18 @@ router.post("/result", async (req, res) => {
     let loss_streak = control.loss_streak;
     let paused_remaining = control.paused_remaining;
 
+    // Вариант 3: блокируем входы до первой прибыльной сделки.
+    // Пауза (paused_remaining) держится, пока не закроется сделка в плюс.
     if (pnl >= 0) {
-      loss_streak = 0; // победа сбрасывает серию
-      paused_remaining = 0; // и сразу снимает паузу, если она была активна
+      // Победа снимает блок и сбрасывает серию.
+      loss_streak = 0;
+      paused_remaining = 0;
     } else {
       loss_streak += 1;
       if (loss_streak >= cfg.loss_streak_trigger) {
-        paused_remaining = cfg.loss_pause_signals; // включаем паузу на M сигналов
+        // Достигнут порог серии — включаем устойчивый блок входа.
+        // Он снимается ТОЛЬКО прибыльной сделкой (или автосбросом по времени).
+        paused_remaining = 1;
       }
     }
 
