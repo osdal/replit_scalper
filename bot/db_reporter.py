@@ -182,6 +182,7 @@ class DbReporter:
 
     async def patch_trade(self, trade_id: int, data: dict) -> bool:
         """Обновляет существующую сделку (закрытие). Возвращает True если успешно."""
+        data = _clean_nums(dict(data))
         for attempt in range(3):
             session = await self._get_session()
             if session is None:
@@ -193,11 +194,16 @@ class DbReporter:
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status >= 400:
-                        self.log.debug(f"[REPORTER] trade PATCH failed: {resp.status}")
+                        body = ""
+                        try:
+                            body = await resp.text()
+                        except Exception:
+                            pass
+                        self.log.warning(f"[REPORTER] trade PATCH failed: {resp.status} body={body[:200]} id={trade_id} url={API_URL}/trades/{trade_id}")
                         return False
                     return True
             except Exception as e:
-                self.log.debug(f"[REPORTER] patch_trade attempt {attempt+1} error: {e}")
+                self.log.warning(f"[REPORTER] patch_trade attempt {attempt+1} error: {type(e).__name__}: {e} id={trade_id}")
                 await self._close_session()
                 if attempt < 2:
                     await asyncio.sleep(0.5)
@@ -256,11 +262,11 @@ class DbReporter:
             try:
                 async with session.patch(
                     f"{API_URL}/bots/{self.symbol}",
-                    json=data,
+                    json=_clean_nums(dict(data)),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status >= 400:
-                        self.log.debug(f"[REPORTER] PATCH failed: {resp.status}")
+                        self.log.warning(f"[REPORTER] bot PATCH failed: {resp.status} url={API_URL}/bots/{self.symbol}")
                     return
             except Exception as e:
                 self.log.debug(f"[REPORTER] PATCH attempt {attempt+1} error: {e}")
