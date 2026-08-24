@@ -201,10 +201,12 @@ class RecoveryClient:
             self.log.error(f"[RISK] trading/check error: {e}")
         return default
 
-    async def report_result(self, pnl: float) -> None:
+    async def report_result(self, pnl: float, simulated: bool = False) -> None:
         """
         Сообщает серверу итог закрытой сделки для обновления общего
         счётчика подряд убытков (глобальная пауза на портфель).
+        simulated=True — это результат симуляции ОТКЛОНЁННОЙ сделки: прибыльная
+        симуляция снимает блок защиты, убыточная не влияет на реальный счётчик.
         """
         session = await self._get_session()
         if session is None:
@@ -212,13 +214,13 @@ class RecoveryClient:
         try:
             async with session.post(
                 f"{API_URL}/trading/result",
-                json={"symbol": self.symbol, "pnl": pnl},
+                json={"symbol": self.symbol, "pnl": pnl, "simulated": simulated},
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     self.log.debug(
-                        f"[RISK] reported result pnl={pnl:.4f} "
+                        f"[RISK] reported result pnl={pnl:.4f} sim={simulated} "
                         f"loss_streak={data.get('loss_streak')} "
                         f"paused_remaining={data.get('paused_remaining')}"
                     )
