@@ -183,9 +183,19 @@ router.post("/check", async (req, res) => {
  * Если pnl >= 0 — сброс счётчика. Если pnl < 0 — инкремент; при достижении
  * loss_streak_trigger включается пауза (paused_remaining = loss_pause_signals).
  */
+/**
+ * POST /api/trading/result
+ * Бот сообщает результат закрытой сделки. Обновляет общий счётчик подряд убытков.
+ * body: { pnl: number, simulated?: boolean }
+ * - реальная сделка (simulated=false/нет): pnl>=0 сбрасывает серию/блок;
+ *   pnl<0 инкрементирует серию; при достижении loss_streak_trigger включается блок.
+ * - симулированная отклонённая сделка (simulated=true): pnl>=0 снимает блок
+ *   (прибыльный сигнал в период защиты — значит серия «сломана»); pnl<0 НЕ влияет
+ *   на реальный счётчик (сделка не открывалась).
+ */
 router.post("/result", async (req, res) => {
   try {
-    const { pnl } = req.body;
+    const { pnl, simulated } = req.body;
     if (pnl === undefined) return res.status(400).json({ error: "pnl is required" });
 
     const cfg = readConfig();
@@ -195,18 +205,23 @@ router.post("/result", async (req, res) => {
     let loss_streak = control.loss_streak;
     let paused_remaining = control.paused_remaining;
 
-    // Вариант 3: блокируем входы до первой прибыльной сделки.
-    // Пауза (paused_remaining) держится, пока не закроется сделка в плюс.
-    if (pnl >= 0) {
-      // Победа снимает блок и сбрасывает серию.
-      loss_streak = 0;
-      paused_remaining = 0;
+    if (simulated === true) {
+      // Симулированная (отклонённая) сделка: только победа снимает блок,
+      // убыток не трогает реальный счётчик.
+      if (pnl >= 0) {
+        loss_streak = 0;
+        paused_remaining = 0;
+      }
     } else {
-      loss_streak += 1;
-      if (loss_streak >= cfg.loss_streak_trigger) {
-        // Достигнут порог серии — включаем устойчивый блок входа.
-        // Он снимается ТОЛЬКО прибыльной сделкой (или автосбросом по времени).
-        paused_remaining = 1;
+      // Реальная сделка. Вариант 3: блокируем входы до первой прибыльной сделки.
+      if (pnl >= 0) {
+        loss_streak = 0;
+        paused_remaining = 0;
+      } else {
+        loss_streak += 1;
+        if (loss_streak >= cfg.loss_streak_trigger) {
+          paused_remaining = 1;
+        }
       }
     }
 

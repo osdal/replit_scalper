@@ -51,6 +51,13 @@ def _sim_commission(entry, exit_price, qty):
     return (abs(entry) + abs(exit_price)) * abs(qty) * fee
 
 
+def _is_loss_streak_reason(sim) -> bool:
+    """True, если отклонённый сигнал был отклонён из-за защиты от серии убытков
+    (глобальной 'risk:loss_streak' или локальной 'skip:loss_streak_*')."""
+    reason = (sim.get("reject_reason") or "")
+    return reason.startswith("risk:loss_streak") or reason.startswith("skip:loss_streak")
+
+
 async def _track_skipped_signal(reporter, signal, cfg, reason):
     """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
     reject_reason 'skip:*' (не симулируется, только статистика). Не блокирует цикл."""
@@ -163,6 +170,7 @@ async def _load_pending_rejected(reporter, log):
                 "entry_time": t.get("entry_time"),
                 "candles": 0,
                 "historical_checked": False,
+                "reject_reason": t.get("reject_reason"),
             })
         except Exception as e:
             log.debug(f"[REJECTED] skip pending trade {t.get('id')}: {e}")
@@ -171,7 +179,7 @@ async def _load_pending_rejected(reporter, log):
     return result
 
 
-async def _simulate_rejected_background(client, reporter, log, shutdown_event):
+async def _simulate_rejected_background(client, reporter, recovery, log, shutdown_event):
     """Фоновая задача: симулирует исход отклонённых сделок по историческим свечам."""
     while not shutdown_event.is_set():
         try:
@@ -213,6 +221,10 @@ async def _simulate_rejected_background(client, reporter, log, shutdown_event):
                                 log.info(
                                     f"[REJECTED_SIM] Trade #{sim['trade_id']} {sim['symbol']} {sim['direction']} => {exit_reason} @ {exit_price} pnl={pnl:+.4f}"
                                 )
+                                # Прибыльный сигнал, отклонённый защитой от серии убытков,
+                                # снимает глобальный блок (симуляция — вариант А).
+                                if net_pnl >= 0 and recovery and _is_loss_streak_reason(sim):
+                                    await recovery.report_result(net_pnl, simulated=True)
                                 _rejected_sims.remove(sim)
                             else:
                                 sim["historical_checked"] = True
@@ -224,10 +236,11 @@ async def _simulate_rejected_background(client, reporter, log, shutdown_event):
             log.debug(f"[REJECTED_SIM] background error: {e}")
 
 
-async def _simulate_rejected_outcome(current_price, reporter, log):
+async def _simulate_rejected_outcome(current_price, reporter, recovery, log):
     """Продвигает симуляцию исходов отклонённых сигналов: если цена дошла до
     SL или TP1 фиксируем результат как exit_reason/exit_price/pnl (симулируемое,
-    позиция не открывалась). Истёкшие по времени отметки убираем без результата."""
+    позиция не открывалась). Истёкшие по времени отметки убираем без результата.
+    Прибыльный сигнал, отклонённый защитой от серии убытков, снимает блок (вариант А)."""
     if not _rejected_sims or reporter is None:
         return
     kept = []
@@ -271,6 +284,9 @@ async def _simulate_rejected_outcome(current_price, reporter, log):
                     "exit_time": _dt.datetime.utcnow().isoformat(),
                 })
                 log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} pnl={pnl:+.4f} (trade #{tid})")
+                # Прибыльный отклонённый сигнал снимает глобальный блок (вариант А).
+                if net_pnl >= 0 and recovery and _is_loss_streak_reason(sim):
+                    await recovery.report_result(net_pnl, simulated=True)
             except Exception as e:
                 log.debug(f"[RISK_SIM] finalize error: {e}")
             continue
@@ -285,8 +301,6 @@ async def _simulate_rejected_outcome(current_price, reporter, log):
 
 def _lock_file(symbol: str) -> str:
     return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
-
-
 def _process_is_bot(pid: int, symbol: str) -> bool:
     """Return True only if PID is a live Python process running this bot's main.py."""
     try:
@@ -1014,7 +1028,7 @@ async def _run_live_or_paper(
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
 
             await reporter.report_heartbeat(current_price)
-            await _simulate_rejected_outcome(current_price, reporter, log)
+            await _simulate_rejected_outcome(current_price, reporter, recovery, log)
             if tracker.has_open_position():
                 pos = tracker.position
                 await reporter.report_position({
@@ -1350,6 +1364,7 @@ async def _run_live_or_paper(
                                 "entry_time": datetime.utcnow().isoformat(),
                                 "candles": 0,
                                 "historical_checked": False,
+                                "reject_reason": reject_key,
                             })
                     return
 
@@ -1562,7 +1577,7 @@ async def _run_live_or_paper(
 
     # Запускаем периодическую проверку состояния позиции в фоне
     check_task = asyncio.create_task(periodic_position_check())
-    sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, log, shutdown_event))
+    sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, recovery, log, shutdown_event))
 
     async def _watchdog():
         while not shutdown_event.is_set():
