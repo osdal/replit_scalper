@@ -5,6 +5,7 @@
 """
 import logging
 import os
+import socket
 from typing import Optional
 
 try:
@@ -56,7 +57,9 @@ class RecoveryClient:
             self.log.warning("[RECOVERY] aiohttp not available, recovery disabled")
             return None
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # trust_env=False + IPv4: локальный API, без прокси/IPv6-резолва.
+            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
+            self._session = aiohttp.ClientSession(connector=connector, trust_env=False)
         return self._session
 
     async def claim(self) -> dict:

@@ -3,7 +3,9 @@
 """
 import asyncio
 import logging
+import math
 import os
+import socket
 from typing import Optional
 
 try:
@@ -13,6 +15,25 @@ except ImportError:
     HAS_AIOHTTP = False
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+
+
+def _clean_nums(obj):
+    """Рекурсивно заменяет float NaN/Infinity на None.
+
+    aiohttp сериализует NaN/Inf как 'NaN'/'Infinity' (расширение Python json),
+    а Express strict-JSON парсер отвергает такой JSON -> 400 HTML. Индикаторы
+    сигнала (rsi/atr/macd/...) могут быть NaN на коротких данных, поэтому
+    очищаем перед отправкой."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _clean_nums(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean_nums(v) for v in obj]
+    return obj
+
 
 
 class DbReporter:
@@ -25,7 +46,10 @@ class DbReporter:
         if not HAS_AIOHTTP:
             return None
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # trust_env=False + принудительный IPv4: бот ходит на локальный API,
+            # прокси и резолв localhost->IPv6 здесь не нужны (источник лишних сбоев).
+            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
+            self._session = aiohttp.ClientSession(connector=connector, trust_env=False)
         return self._session
 
     async def report_heartbeat(self, price: float) -> None:
@@ -83,7 +107,7 @@ class DbReporter:
             if session is None:
                 return None
             try:
-                payload = dict(trade)
+                payload = _clean_nums(dict(trade))
                 payload.setdefault("symbol", self.symbol)
                 payload.setdefault("rsi", trade.get("rsi"))
                 payload.setdefault("macd", trade.get("macd"))
@@ -128,7 +152,7 @@ class DbReporter:
             if session is None:
                 return None
             try:
-                payload = dict(trade)
+                payload = _clean_nums(dict(trade))
                 payload.setdefault("rsi", trade.get("rsi"))
                 payload.setdefault("macd", trade.get("macd"))
                 payload.setdefault("macd_signal", trade.get("macd_signal"))
