@@ -102,7 +102,12 @@ class DbReporter:
                     if resp.status in (200, 201):
                         data = await resp.json()
                         return data.get("id")
-                    self.log.warning(f"[REPORTER] rejected trade POST failed: {resp.status} url={API_URL}/trades")
+                    body = ""
+                    try:
+                        body = await resp.text()
+                    except Exception:
+                        pass
+                    self.log.warning(f"[REPORTER] rejected trade POST failed: {resp.status} body={body[:300]} url={API_URL}/trades")
                     # Не сдаёмся сразу на не-2xx — сервер под нагрузкой может
                     # временно отвечать ошибкой. Повторяем в рамках цикла попыток.
                     if attempt < 2:
