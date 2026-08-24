@@ -147,6 +147,33 @@ def _calc_simulated_qty(cfg, signal, balance):
     return raw_qty
 
 
+def _build_signal_data(signal, cfg) -> dict:
+    """Строит словарь данных сигнала для API/аналитики из объекта Signal."""
+    return {
+        "direction": signal.direction,
+        "symbol": cfg.symbol,
+        "entry_price": signal.entry_price,
+        "sl_price": signal.sl_price,
+        "tp1_price": signal.tp1_price,
+        "tp2_price": signal.tp2_price,
+        "preset": signal.preset,
+        "ema_fast": signal.ema_fast,
+        "ema_slow": signal.ema_slow,
+        "volume": signal.volume,
+        "volume_ma": signal.volume_ma,
+        "rsi": signal.rsi,
+        "macd": signal.macd,
+        "macd_signal": signal.macd_signal,
+        "macd_hist": signal.macd_hist,
+        "bb_upper": signal.bb_upper,
+        "bb_middle": signal.bb_middle,
+        "bb_lower": signal.bb_lower,
+        "atr": signal.atr,
+        "quote_volume": getattr(signal, "quote_volume", 0.0) or 0.0,
+        "leverage": cfg.leverage,
+    }
+
+
 async def _load_pending_rejected(reporter, log):
     """Загружает из БД все отклонённые сделки без exit_reason в очередь симуляции."""
     if reporter is None:
@@ -1189,6 +1216,37 @@ async def _run_live_or_paper(
                 htf_trend = get_htf_trend_latest(htf_buffer)
             elif getattr(cfg, "htf2_enabled", False):
                 htf_trend = get_htf_trend_latest(htf_buffer_2)
+
+            # Сначала считаем сигналы БЕЗ фильтра по старшему таймфрейму (htf_trend=None —
+            # HTF-фильтр выключается) и помечаем отклонённые HTF-варианты, чтобы видеть
+            # причину «высший таймфрейм» в воронке сигналов.
+            base_signals = get_all_signals(df_buffer, cfg, None, cfg.enabled_presets)
+            if cfg.htf_enabled and htf_trend and base_signals:
+                for s in base_signals:
+                    if htf_trend != s.direction:
+                        try:
+                            htf_sd = _build_signal_data(s, cfg)
+                            balance = await order_mgr.get_balance(mode=getattr(s, "mode", None) or cfg.mode)
+                            htf_qty = _calc_simulated_qty(cfg, s, balance)
+                            htf_sd["qty"] = htf_qty
+                            tid = await reporter.report_rejected(htf_sd, "risk:htf", qty=htf_qty, mode=cfg.mode)
+                            if tid:
+                                _rejected_sims.append({
+                                    "trade_id": tid,
+                                    "symbol": cfg.symbol,
+                                    "direction": s.direction,
+                                    "entry": s.entry_price,
+                                    "sl": s.sl_price,
+                                    "tp1": s.tp1_price,
+                                    "qty": htf_qty,
+                                    "entry_time": datetime.utcnow().isoformat(),
+                                    "candles": 0,
+                                    "historical_checked": False,
+                                    "reject_reason": "risk:htf",
+                                })
+                        except Exception as e:
+                            log.debug(f"[HTF] record rejected signal error: {e}")
+
             signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets)
             if not signals:
                 return
@@ -1242,29 +1300,7 @@ async def _run_live_or_paper(
                 return
 
             signal = raw_signal
-            signal_data = {
-                "direction": signal.direction,
-                "symbol": cfg.symbol,
-                "entry_price": signal.entry_price,
-                "sl_price": signal.sl_price,
-                "tp1_price": signal.tp1_price,
-                "tp2_price": signal.tp2_price,
-                "preset": signal.preset,
-                "ema_fast": signal.ema_fast,
-                "ema_slow": signal.ema_slow,
-                "volume": signal.volume,
-                "volume_ma": signal.volume_ma,
-                "rsi": signal.rsi,
-                "macd": signal.macd,
-                "macd_signal": signal.macd_signal,
-                "macd_hist": signal.macd_hist,
-                "bb_upper": signal.bb_upper,
-                "bb_middle": signal.bb_middle,
-                "bb_lower": signal.bb_lower,
-                "atr": signal.atr,
-                "quote_volume": getattr(signal, "quote_volume", 0.0) or 0.0,
-                "leverage": cfg.leverage,
-            }
+            signal_data = _build_signal_data(signal, cfg)
 
             # Optional LLM validation
             if getattr(cfg, "llm_enabled", False):
