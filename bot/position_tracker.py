@@ -49,6 +49,7 @@ class Position:
     recovery_chain_id: Optional[int] = None
     opened_at: Optional[str] = None  # ISO timestamp when position was opened (for TIME_PROFIT_CLOSE_HOURS)
     mode: Optional[str] = None       # "paper"|"live"|None — режим сделки (из пресета)
+    reject_reason: Optional[str] = None  # если задан — сделка помечена как REJECTED (не в статистике)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -103,6 +104,7 @@ class PositionTracker:
             "trade_id":        self._trade_id,
             "opened_at":       p.opened_at,
             "mode":            p.mode,
+            "reject_reason":   p.reject_reason,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -148,6 +150,7 @@ class PositionTracker:
                 recovery_chain_id=data.get("recovery_chain_id"),
                 opened_at=data.get("opened_at"),
                 mode=data.get("mode"),
+                reject_reason=data.get("reject_reason"),
             )
             self._trade_id = data.get("trade_id")
             self.log.info(
@@ -168,7 +171,7 @@ class PositionTracker:
     #  Reporter helpers                                                    #
     # ------------------------------------------------------------------ #
 
-    async def _report_open(self, signal: Signal, qty: float) -> None:
+    async def _report_open(self, signal: Signal, qty: float, reject_reason: Optional[str] = None) -> None:
         if not self.reporter:
             return
         try:
@@ -197,6 +200,10 @@ class PositionTracker:
                 "atr":         signal.atr,
                 "preset":      signal.preset,
             }
+            if reject_reason:
+                # Отклонённая (но открытая) позиция: помечаем, чтобы исключить из статистики.
+                trade_data["status"] = "rejected"
+                trade_data["reject_reason"] = reject_reason
             trade_id = await self.reporter.report_trade(trade_data)
             if trade_id:
                 self._trade_id = trade_id
@@ -230,7 +237,7 @@ class PositionTracker:
                 pass
         return 0
 
-    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0) -> None:
+    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None) -> None:
         if not self.reporter or not self._trade_id:
             return
         try:
@@ -238,7 +245,7 @@ class PositionTracker:
             commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
             # Try to get real PnL from Binance to match position history
             real_pnl = None
-            if self.order_mgr:
+            if self.order_mgr and not reject_reason:
                 entry_time_ms = await self._entry_time_ms(self._trade_id)
                 if entry_time_ms > 0:
                     try:
@@ -252,6 +259,7 @@ class PositionTracker:
                 pnl_to_use = real_pnl
                 # В live-режиме комиссия уже учтена в реальном PnL, показываем её как расчётную.
                 commission = self._estimated_commission(entry_price, exit_price, qty)
+            status = "rejected" if reject_reason else "closed"
             success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
@@ -260,7 +268,7 @@ class PositionTracker:
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
-                "status":      "closed",
+                "status":      status,
             })
             if not success:
                 # Запись не найдена (например после очистки БД) — создаём новую
@@ -278,15 +286,17 @@ class PositionTracker:
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
                     "is_open":     False,
-                    "status":      "closed",
+                    "status":      status,
                     "mode":        self.cfg.mode,
                 }
+                if reject_reason:
+                    new_trade["reject_reason"] = reject_reason
                 await self.reporter.report_trade(new_trade)
             self._trade_id = None
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close error: {e}")
 
-    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0) -> None:
+    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None) -> None:
         """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
@@ -295,7 +305,7 @@ class PositionTracker:
             commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
             # Try to get real PnL from Binance to match position history
             real_pnl = None
-            if self.order_mgr:
+            if self.order_mgr and not reject_reason:
                 entry_time_ms = await self._entry_time_ms(trade_id)
                 if entry_time_ms > 0:
                     try:
@@ -308,6 +318,7 @@ class PositionTracker:
             if real_pnl is not None and abs(real_pnl) > 0.0001:
                 pnl_to_use = real_pnl
                 commission = self._estimated_commission(entry_price, exit_price, qty)
+            status = "rejected" if reject_reason else "closed"
             success = await self.reporter.patch_trade(trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
@@ -316,7 +327,7 @@ class PositionTracker:
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
-                "status":      "closed",
+                "status":      status,
             })
             if not success:
                 # Запись не найдена (например после очистки БД) — создаём новую
@@ -334,9 +345,11 @@ class PositionTracker:
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
                     "is_open":     False,
-                    "status":      "closed",
+                    "status":      status,
                     "mode":        self.cfg.mode,
                 }
+                if reject_reason:
+                    new_trade["reject_reason"] = reject_reason
                 await self.reporter.report_trade(new_trade)
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close_with_id error: {e}")
@@ -367,6 +380,7 @@ class PositionTracker:
     def open(
         self, signal: Signal, qty: float,
         is_recovery: bool = False, recovery_chain_id: Optional[int] = None,
+        reject_reason: Optional[str] = None,
     ) -> None:
         self.position = Position(
             direction=signal.direction,
@@ -391,10 +405,12 @@ class PositionTracker:
             recovery_chain_id=recovery_chain_id,
             opened_at=datetime.datetime.utcnow().isoformat() if signal.timestamp is None else str(signal.timestamp).replace(" ", "T"),
             mode=signal.mode,
+            reject_reason=reject_reason,
         )
         self._trade_id = None
         self._save_state()
         tag = " [RECOVERY]" if is_recovery else ""
+        tag += " [REJECTED]" if reject_reason else ""
         self.log.info(
             f"Position opened{tag} | {signal.direction} | entry={signal.entry_price} "
             f"SL={signal.sl_price} TP1={signal.tp1_price} TP2={signal.tp2_price} qty={qty} | "
@@ -407,10 +423,11 @@ class PositionTracker:
     async def open_async(
         self, signal: Signal, qty: float,
         is_recovery: bool = False, recovery_chain_id: Optional[int] = None,
+        reject_reason: Optional[str] = None,
     ) -> None:
         """Открывает позицию и репортит в БД."""
-        self.open(signal, qty, is_recovery=is_recovery, recovery_chain_id=recovery_chain_id)
-        await self._report_open(signal, qty)
+        self.open(signal, qty, is_recovery=is_recovery, recovery_chain_id=recovery_chain_id, reject_reason=reject_reason)
+        await self._report_open(signal, qty, reject_reason=reject_reason)
         self._save_state()
 
     def force_close(self, reason: str, close_price: float) -> float:
@@ -565,6 +582,7 @@ class PositionTracker:
         total_qty_before = p.total_qty if p else 0.0
         tp1_hit_before = p.tp1_hit if p else False
         entry_price_before = p.entry_price if p else close_price
+        reject_before = p.reject_reason if p else None
         # entry_timestamp может быть строкой из JSON или datetime объектом
         entry_time_ms = 0
         if p and p.entry_timestamp:
@@ -583,7 +601,7 @@ class PositionTracker:
             await self._verify_position_closed(p.direction, 10)
             real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
-            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1", entry_price_before)
+            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1", entry_price_before, reject_reason=reject_before)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
         elif hit == "TP1":
             # Полное закрытие по TP1 (tp1_close_pct=100, схема TP=2xSL без разделения):
@@ -598,7 +616,7 @@ class PositionTracker:
                 pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
                 if trade_id_before:
                     qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1", entry_price_before)
+                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1", entry_price_before, reject_reason=reject_before)
                 await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
                 if real_pnl is not None:
                     total_trade_pnl = real_pnl
@@ -615,7 +633,7 @@ class PositionTracker:
                 # qty для БД: если remaining уже 0 (позиция полностью закрыта
                 # TP1 на 100%), сохраняем исходный объём позиции, а не 0.
                 qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before)
+                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before, reject_reason=reject_before)
             await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
             # Update local PnL with real value for return
             if real_pnl is not None:
@@ -691,3 +709,7 @@ class PositionTracker:
 
     def has_open_position(self) -> bool:
         return self.position is not None and not self.position.closed
+        
+    def has_rejected_position(self) -> bool:
+        """Check if there's a rejected position that should be tracked."""
+        return False  # Placeholder for rejected position tracking

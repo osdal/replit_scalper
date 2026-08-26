@@ -955,9 +955,9 @@ def detect_engulfing_pattern(df: pd.DataFrame) -> Optional[tuple[str, str]]:
     if prev_body == 0 or curr_body == 0:
         return None
     if c_prev < o_prev and c_curr > o_curr and o_curr < c_prev and c_curr > o_prev:
-        return "engulfing_long"
+        return "engulfing_long", "LONG"
     if c_prev > o_prev and c_curr < o_curr and o_curr > c_prev and c_curr < o_prev:
-        return "engulfing_short"
+        return "engulfing_short", "SHORT"
     return None
 
 

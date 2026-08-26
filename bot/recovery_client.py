@@ -177,11 +177,15 @@ class RecoveryClient:
         Спрашивает сервер, можно ли открыть новую позицию с учётом
         глобального лимита позиций и паузы после серии убытков.
         Возвращает: {"allowed": bool, "reason": str|None, ...}
+        При ЛЮБОЙ ошибке/недоступности сервера — fail-closed: не разрешаем
+        открытие (иначе боты в момент рестарта API/сетевого сбоя лезут сверх
+        лимита и открывают лишние позиции).
         """
-        default = {"allowed": True, "reason": None}
+        fail_closed = {"allowed": False, "reason": "check_error"}
         session = await self._get_session()
         if session is None:
-            return default
+            self.log.error(f"[RISK] can_open: no session — FAIL CLOSED for {self.symbol}")
+            return fail_closed
         try:
             async with session.post(
                 f"{API_URL}/trading/check",
@@ -199,10 +203,11 @@ class RecoveryClient:
                             f"paused_remaining={data.get('paused_remaining')}"
                         )
                     return data
-                self.log.warning(f"[RISK] trading/check failed: {resp.status}")
+                self.log.error(f"[RISK] trading/check failed: status={resp.status} — FAIL-CLOSED")
+                return fail_closed
         except Exception as e:
-            self.log.error(f"[RISK] trading/check error: {e}")
-        return default
+            self.log.error(f"[RISK] trading/check error: {e} — FAIL-CLOSED")
+            return fail_closed
 
     async def report_result(self, pnl: float, simulated: bool = False) -> None:
         """

@@ -515,7 +515,7 @@ export async function reloadConfigsFromYaml(): Promise<void> {
   await db.update(botsTable).set({ is_running: false, position: null });
 }
 
-async function stopAllBots(): Promise<void> {
+export async function stopAllBots(): Promise<void> {
   const symbols = Array.from(botProcesses.keys());
   // SIGTERM first (Windows: use kill() without signal)
   for (const symbol of symbols) {
