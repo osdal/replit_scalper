@@ -74,40 +74,41 @@ def _reject_should_record(symbol: str, reason: str, now_ts: float) -> bool:
     return False
 
 
-async def _track_skipped_signal(reporter, signal, cfg, reason):
-    """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
-    reject_reason 'skip:*' (не симулируется, только статистика). Не блокирует цикл."""
-    # При серии убытков каждый сигнал отклоняется локальной защитой. Запись каждой
-    # пропущенной сделки в БД порождает поток 'skip:loss_streak_*' (сотни строк
-    # в минуту при убыточной серии) — засоряет дашборд/БД. Блокировка работает и без
-    # записи: просто логируем факт пропуска, не создавая записи в БД.
-    if reason and reason.startswith("skip:loss_streak"):
-        logging.getLogger("main").debug(
-            f"[LOSS_STREAK] skip recording for {getattr(signal, 'symbol', '')}: {reason}"
-        )
-        return
-    if reporter is None or signal is None:
-        return
-    try:
-        import asyncio as _asyncio
-        payload = {
-            "direction": getattr(signal, "direction", "LONG"),
-            "entry_price": getattr(signal, "entry_price", 0.0),
-            "sl_price": getattr(signal, "sl_price", 0.0),
-            "tp1_price": getattr(signal, "tp1_price", 0.0),
-            "tp2_price": getattr(signal, "tp2_price", 0.0),
-            "preset": getattr(signal, "preset", None),
-            "ema_fast": getattr(signal, "ema_fast", None),
-            "ema_slow": getattr(signal, "ema_slow", None),
-            "volume": getattr(signal, "volume", None),
-            "volume_ma": getattr(signal, "volume_ma", None),
-            "rsi": getattr(signal, "rsi", None),
-            "macd": getattr(signal, "macd", None),
-            "atr": getattr(signal, "atr", None),
-        }
-        _asyncio.create_task(reporter.report_rejected(payload, reason, mode=cfg.mode))
-    except Exception:
-        pass
+    async def _track_skipped_signal(reporter, signal, cfg, reason):
+        """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
+        reject_reason (например 'max_positions')."""
+        if reporter is None or signal is None:
+            return
+        try:
+            import asyncio as _asyncio
+            payload = {
+                "direction": getattr(signal, "direction", "LONG"),
+                "entry_price": getattr(signal, "entry_price", 0.0),
+                "sl_price": getattr(signal, "sl_price", 0.0),
+                "tp1_price": getattr(signal, "tp1_price", 0.0),
+                "tp2_price": getattr(signal, "tp2_price", 0.0),
+                "preset": getattr(signal, "preset", None),
+                "ema_fast": getattr(signal, "ema_fast", None),
+                "ema_slow": getattr(signal, "ema_slow", None),
+                "volume": getattr(signal, "volume", None),
+                "volume_ma": getattr(signal, "volume_ma", None),
+                "rsi": getattr(signal, "rsi", None),
+                "macd": getattr(signal, "macd", None),
+                "atr": getattr(signal, "atr", None),
+            }
+            # Calculate position size that would have been opened
+            from order_manager import calc_quantity
+            balance = 1000  # Default balance for paper trades
+            qty = calc_quantity(
+                balance=balance,
+                risk_pct=cfg.risk_pct,
+                sl_pct=cfg.sl_pct,
+                entry_price=signal.entry_price,
+                leverage=cfg.leverage,
+            )
+            _asyncio.create_task(reporter.report_rejected(payload, reason, qty, mode=cfg.mode))
+        except Exception:
+            pass
 
 
 def _simulate_exit(direction, entry, sl, tp1, klines):
@@ -694,7 +695,7 @@ async def _sync_position_on_start(
     import requests
     try:
         api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
-        existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=20", timeout=5).json()
+        existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=500", timeout=5).json()
         existing_open = None
         for old_trade in (existing.get("trades") or []):
             if old_trade.get("is_open"):
@@ -938,6 +939,9 @@ async def _run_live_or_paper(
         pos_mode = (pos.mode if pos else None) or cfg.mode
         is_live_close = (pos_mode == "live")
         is_live = (pos_mode == "live")
+        # «Отклонённая» (rejected) сделка исключается из глобального счётчика серии
+        # убытков и recovery — она не должна влиять на риск-контроль (как и на статистику).
+        is_rejected = bool(getattr(pos, 'reject_reason', None))
         if hit == "TP1" and not pos.is_recovery:
             events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
             preset_before = getattr(pos, 'preset', None)
@@ -964,9 +968,10 @@ async def _run_live_or_paper(
                     mode=pos_mode,
                 )
             # TP1 полностью закрыл позицию (tp1_close_pct=100) — сбрасываем глобальную
-            # серию убытков, как для TP2/SL.
+            # серию убытков, как для TP2/SL. Любая ПОЛОЖИТЕЛЬНАЯ сделка (в т.ч. rejected)
+            # прерывает паузу; убыточная rejected не трогает счётчик (simulated=True).
             if tracker.position is None or tracker.position.remaining_qty <= 0.000001:
-                await recovery.report_result(pnl)
+                await recovery.report_result(pnl, simulated=is_rejected)
         elif hit == "TP1" and pos.is_recovery:
             events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
             preset_before = getattr(pos, 'preset', None)
@@ -1015,9 +1020,9 @@ async def _run_live_or_paper(
                     await order_mgr.close_dust(pos.direction, mode=pos_mode)
             if pos.is_recovery:
                 await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
-            elif pnl < 0:
+            elif pnl < 0 and not is_rejected:
                 await recovery.report(pnl=pnl)
-            await recovery.report_result(pnl)
+            await recovery.report_result(pnl, simulated=is_rejected)
         else:
             events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
             preset_before = getattr(pos, 'preset', None)
@@ -1044,11 +1049,11 @@ async def _run_live_or_paper(
                 await recovery.release(chain_id=pos.recovery_chain_id)
                 await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
                 log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
-            elif pnl < 0:
+            elif pnl < 0 and not is_rejected:
                 await recovery.report(pnl=pnl)
-            await recovery.report_result(pnl)
+            await recovery.report_result(pnl, simulated=is_rejected)
 
-        if hit == "SL":
+        if hit == "SL" and not is_rejected:
             _consecutive_losses += 1
             _last_loss_time = time.time()
         elif hit in ("TP1", "TP2"):
@@ -1237,31 +1242,6 @@ async def _run_live_or_paper(
             # HTF-фильтр выключается) и помечаем отклонённые HTF-варианты, чтобы видеть
             # причину «высший таймфрейм» в воронке сигналов.
             base_signals = get_all_signals(df_buffer, cfg, None, cfg.enabled_presets)
-            if cfg.htf_enabled and htf_trend and base_signals:
-                for s in base_signals:
-                    if htf_trend != s.direction:
-                        try:
-                            htf_sd = _build_signal_data(s, cfg)
-                            balance = await order_mgr.get_balance(mode=getattr(s, "mode", None) or cfg.mode)
-                            htf_qty = _calc_simulated_qty(cfg, s, balance)
-                            htf_sd["qty"] = htf_qty
-                            tid = await reporter.report_rejected(htf_sd, "risk:htf", qty=htf_qty, mode=cfg.mode)
-                            if tid:
-                                _rejected_sims.append({
-                                    "trade_id": tid,
-                                    "symbol": cfg.symbol,
-                                    "direction": s.direction,
-                                    "entry": s.entry_price,
-                                    "sl": s.sl_price,
-                                    "tp1": s.tp1_price,
-                                    "qty": htf_qty,
-                                    "entry_time": datetime.utcnow().isoformat(),
-                                    "candles": 0,
-                                    "historical_checked": False,
-                                    "reject_reason": "risk:htf",
-                                })
-                        except Exception as e:
-                            log.debug(f"[HTF] record rejected signal error: {e}")
 
             signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets)
             if not signals:
@@ -1379,88 +1359,50 @@ async def _run_live_or_paper(
             if not confirmed:
                 return
 
-            # Глобальный риск-контроль: лимит позиций + пауза после серии убытков.
-            # Проверяем ДО claim, чтобы не захватывать recovery-цепочку впустую.
+            # Глобальный риск-контроль: лимит позиций (max_positions) + пауза после серии убытков.
+            # Сервер считает ТОЛЬКО ПРИНЯТЫЕ открытые позиции (status != 'rejected').
+            # Договорённость: ВСЕ сделки обрабатываются одинаково — если сигнал «отклонён»
+            # (лимит/пауза и пр.), он ВСЁ РАВНО открывается как настоящая позиция
+            # (трейкер, SL/TP, видна в боте), НО помечается rejected и не учитывается
+            # в статистике/винрейте и счётчике лимита.
+            open_reject_reason = None
             if recovery:
                 risk_check = await recovery.can_open()
                 if not risk_check.get("allowed", True):
                     reason = risk_check.get("reason", "risk_block")
-                    # Блок из-за серии убытков: сервер возвращает reason "loss_streak" либо
-                    # "pause" с ненулевым loss_streak. Отмечаем явно, чтобы в аналитике было
-                    # видно, сколько прибыльных сигналов потеряно из-за защиты.
                     if (reason == "loss_streak") or (
                         reason == "pause" and (risk_check.get("loss_streak") or 0) > 0
                     ):
                         reject_key = "risk:loss_streak"
                     else:
                         reject_key = f"risk:{reason}"
+                    open_reject_reason = reject_key.split(":", 1)[-1]  # "max_positions"|"loss_streak"|...
                     log.info(
-                        f"[RISK] Skip signal for {cfg.symbol}: reason={reason} ({reject_key}) "
-                        f"loss_streak={risk_check.get('loss_streak')} "
-                        f"(positions={risk_check.get('positions_open')})"
+                        f"[RISK] {reject_key} for {cfg.symbol} — opening as REJECTED "
+                        f"(excluded from winrate/PnL; positions={risk_check.get('positions_open')})"
                     )
-                    # max_positions срабатывает на каждый сигнал при достигнутом лимите —
-                    # записываем в БД не чаще 1 раза в _REJECT_RECORD_COOLDOWN, чтобы не
-                    # забивать API-сервер/БД. Для loss_streak запись и симуляция полные
-                    # (нужны варианту А: прибыльный отклонённый сигнал снимает блок).
-                    if reject_key == "risk:max_positions" and not _reject_should_record(cfg.symbol, reject_key, time.time()):
-                        return
-                    if reporter is not None:
-                        balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
-                        sim_qty = _calc_simulated_qty(cfg, signal, balance)
-                        signal_data["qty"] = sim_qty
-                        tid = await reporter.report_rejected(signal_data, reject_key, qty=sim_qty, mode=cfg.mode)
-                        if tid:
-                            _rejected_sims.append({
-                                "trade_id": tid,
-                                "symbol": cfg.symbol,
-                                "direction": signal_data.get("direction"),
-                                "entry": signal_data.get("entry_price"),
-                                "sl": signal_data.get("sl_price"),
-                                "tp1": signal_data.get("tp1_price"),
-                                "qty": sim_qty,
-                                "entry_time": datetime.utcnow().isoformat(),
-                                "candles": 0,
-                                "historical_checked": False,
-                                "reject_reason": reject_key,
-                            })
-                    return
 
-            # Пробуем захватить свободный долг для recovery-режима
-            claim = await recovery.claim()
+            # Для «отклонённых» сделок recovery не задействуем (без захвата цепочки).
+            if open_reject_reason:
+                claim = {"chainId": None, "debtAmount": 0.0, "bonusPct": 0.0, "enabled": False}
+            else:
+                # Пробуем захватить свободный долг для recovery-режима
+                claim = await recovery.claim()
             recovery_target = None
             chain_id = None
-            
+
             # Логируем полный ответ от сервера
             log.info(f"[RECOVERY] claim response: {claim}")
 
             # Потолок долга: сервер отказывает в выдаче recovery-долга, когда
             # суммарный free+locked долг >= max_free_debt_usd. В этом случае
             # НЕ открываем даже обычную позицию — пропускаем сигнал, чтобы
-            # не наращивать риск дальше.
-            if claim.get("reason") == "debt_limit":
+            # не наращивать риск дальше. Rejected сделки пропускают этот лимит.
+            if claim.get("reason") == "debt_limit" and not open_reject_reason:
                 log.warning(
                     f"[RISK] Debt limit reached (freeDebt={claim.get('freeDebt')})"
                     f" — skipping signal for {cfg.symbol}"
                 )
-                if reporter is not None:
-                    balance = await order_mgr.get_balance(mode=signal.mode or cfg.mode)
-                    sim_qty = _calc_simulated_qty(cfg, signal, balance)
-                    signal_data["qty"] = sim_qty
-                    tid = await reporter.report_rejected(signal_data, "risk:debt_limit", qty=sim_qty, mode=cfg.mode)
-                    if tid:
-                        _rejected_sims.append({
-                            "trade_id": tid,
-                            "symbol": cfg.symbol,
-                            "direction": signal_data.get("direction"),
-                            "entry": signal_data.get("entry_price"),
-                            "sl": signal_data.get("sl_price"),
-                            "tp1": signal_data.get("tp1_price"),
-                            "qty": sim_qty,
-                            "entry_time": datetime.utcnow().isoformat(),
-                            "candles": 0,
-                            "historical_checked": False,
-                        })
                 return
             
             # Сохраняем состояние recovery в глобальной переменной
@@ -1533,6 +1475,7 @@ async def _run_live_or_paper(
                     signal, qty=qty,
                     is_recovery=is_recovery,
                     recovery_chain_id=chain_id,
+                    reject_reason=open_reject_reason,
                 )
                 events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
                 if (getattr(signal, 'mode', None) or cfg.mode) == "live":
@@ -1664,6 +1607,12 @@ async def _run_live_or_paper(
                     continue
                 if current_price <= 0:
                     continue
+                # Обновляем live-цену для дашборда, чтобы unrealized PnL в карточке
+                # бота пересчитывался между свечами, а не залипал на цене открытия.
+                # Защита: никогда не перезаписываем цену нулём (Binance может вернуть 0
+                # при лимите/бане — это породит ложный unrealized PnL в дашборде).
+                if reporter is not None and current_price > 0:
+                    await reporter.report_heartbeat(current_price)
                 hit = tracker.check(current_price)
                 if hit:
                     candle_time_ms = int(time.time() * 1000)

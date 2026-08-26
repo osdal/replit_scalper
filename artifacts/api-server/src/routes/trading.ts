@@ -9,12 +9,13 @@
  * т.к. боты распределены и in-memory не согласован.
  */
 import { Router } from "express";
-import { db, tradesTable, tradingControlTable, recoveryChainsTable } from "@workspace/db";
+import { db, tradesTable, tradingControlTable, recoveryChainsTable, botsTable } from "@workspace/db";
 import { eq, sql, gte } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+import { stopAllBots } from "./bots";
 
 const router = Router();
 
@@ -24,8 +25,8 @@ const __dirname = path.dirname(__filename);
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(__dirname, "../../../../bot/recovery_config.yaml");
 
-function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number } {
-  const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120 };
+function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
+  const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
     return {
@@ -37,6 +38,9 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
       pause_timeout_minutes: raw.pause_timeout_minutes !== undefined
         ? Number(raw.pause_timeout_minutes)
         : def.pause_timeout_minutes,
+      max_positions_ignore_after_hours: raw.max_positions_ignore_after_hours !== undefined
+        ? Number(raw.max_positions_ignore_after_hours)
+        : def.max_positions_ignore_after_hours,
     };
   } catch {
     return def;
@@ -79,11 +83,21 @@ async function autoResetStale(control: any, timeoutMinutes: number): Promise<boo
   return false;
 }
 
-async function countOpenPositions(): Promise<number> {
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-  const [res] = await db.select({ n: sql<number>`count(*)` })
-    .from(tradesTable)
-    .where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`);
+// Максимум одновременно открытых позиций: учитываются только ПРИНЯТЫЕ открытые
+// позиции (status != 'rejected'). Отклонённые (is_open=0) не занимают слот и не
+// считаются в лимите. Порог max_positions_ignore_after_hours исключает долго
+// открытые позиции (>N часов) из счёта. Если порог = 0, считаются ВСЕ принятые.
+async function countOpenPositions(ignoreAfterHours: number): Promise<number> {
+  const cutoff = ignoreAfterHours > 0
+    ? new Date(Date.now() - ignoreAfterHours * 60 * 60 * 1000).toISOString()
+    : null;
+  const [res] = cutoff
+    ? await db.select({ n: sql<number>`count(*)` })
+        .from(tradesTable)
+        .where(sql`is_open = 1 AND status != 'rejected' AND entry_time >= ${cutoff}`)
+    : await db.select({ n: sql<number>`count(*)` })
+        .from(tradesTable)
+        .where(sql`is_open = 1 AND status != 'rejected'`);
   return Number(res?.n || 0);
 }
 
@@ -116,7 +130,7 @@ router.post("/check", async (req, res) => {
   try {
     const cfg = readConfig();
     const control = await getControlRow();
-    const positions = await countOpenPositions();
+    const positions = await countOpenPositions(cfg.max_positions_ignore_after_hours);
     const daily_loss = await getDailyLoss();
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
@@ -138,10 +152,11 @@ router.post("/check", async (req, res) => {
       });
     }
 
-    // Блок после серии убытков активен? Снимается только прибыльной сделкой.
+    // Блок после серии убытков активен: при достижении loss_streak_trigger пауза
+    // блокирует новые ВХОДЫ (реальные позиции), пока не будет прибыльной сделки.
+    // Отклонённые (rejected) сделки по договорённости открываются как позиции и
+    // могут снять паузу прибыльной симуляцией.
     if (control.paused_remaining > 0) {
-      // НЕ уменьшаем paused_remaining — блок держится до первой победы,
-      // чтобы «съедание» слота проверками не снимало защиту за секунды.
       return res.json({
         allowed: false,
         reason: "loss_streak",
@@ -235,6 +250,86 @@ router.post("/result", async (req, res) => {
   }
 });
 
+/**
+ * POST /api/trading/close-and-reset
+ * Закрывает ВСЕ открытые позиции в БД (реальные и rejected), обнуляет
+ * счётчик открытых позиций и серию/паузу убытков. Останавливает всех
+ * ботов и стирает их локальные state-файлы (чтобы не было рассинхрона
+ * между трекером и БД). Предназначено для кнопки «Close All & Reset».
+ */
+router.post("/close-and-reset", async (_req, res) => {
+  try {
+    const now = new Date().toISOString();
+
+    // 1. Закрываем все открытые сделки (и real, и rejected).
+    const result = await db.update(tradesTable)
+      .set({
+        is_open: false,
+        status: "closed",
+        exit_reason: "manual_reset",
+        exit_time: now,
+        exit_price: 0,
+        pnl: 0,
+      })
+      .where(eq(tradesTable.is_open, true))
+      .returning();
+
+    const closedTrades = result?.length || 0;
+
+    // 2. Удаляем ранее закрытые "manual_reset" записи (остатки прошлых сбросов),
+    //    чтобы таблица сделок не засорялась этими техническими строками.
+    const clearedManualReset = await db.delete(tradesTable)
+      .where(eq(tradesTable.exit_reason, "manual_reset")).returning();
+
+    // 2b. Удаляем отклонённые (rejected) записи без итогового PnL — это «мусор»:
+    //     такие записи не дожидаются закрытия симуляцией и навсегда остаются
+    //     с PnL «—» в дашборде. По запросу пользователя кнопка их вычищает.
+    const clearedNoPnlRejected = await db.delete(tradesTable)
+      .where(sql`status = 'rejected' AND pnl IS NULL`).returning();
+
+    // 3. Сброс позиций в таблице ботов: карточки в дашборде берут `position`
+    //    именно отсюда, поэтому без чистки позиции «висят» в UI, хоть и
+    //    закрыты в trades.
+    const botsCleared = await db.update(botsTable)
+      .set({ position: null, is_running: false, current_price: null })
+      .returning();
+
+    // 4. Обнуляем счётчик открытых позиций и серию убытков.
+    await db.update(tradingControlTable)
+      .set({ loss_streak: 0, paused_remaining: 0, updated_at: now })
+      .where(eq(tradingControlTable.id, 1));
+
+    // 5. Останавливаем всех ботов и стираем их state-файлы (пересинхронизация).
+    //    Запускаем в фоне, чтобы ответ клиенту пришёл сразу, а не ждать всё
+    //    (~десятки вызовов powershell при большом числе ботов).
+    void stopAllBots().catch(() => {});
+
+    // 6. Дополнительно подчищаем любые оставшиеся lock/state файлы.
+    try {
+      const botDir = path.resolve(__dirname, "../../../../bot");
+      if (fs.existsSync(botDir)) {
+        const files = fs.readdirSync(botDir);
+        for (const f of files) {
+          if (f.startsWith("state_") || f.startsWith("bot.lock.")) {
+            try { fs.unlinkSync(path.join(botDir, f)); } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    res.json({
+      success: true,
+      closed_trades: closedTrades,
+      cleared_manual_reset: clearedManualReset?.length || 0,
+      cleared_no_pnl_rejected: clearedNoPnlRejected?.length || 0,
+      bots_cleared: botsCleared?.length || 0,
+      message: `Closed ${closedTrades} open positions, cleared ${clearedManualReset?.length || 0} manual_reset and ${clearedNoPnlRejected?.length || 0} no-PnL rejected records, reset ${botsCleared?.length || 0} bot cards, stopped bots`,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // GET /api/trading/status — состояние контроля для дашборда/диагностики
 router.get("/status", async (_req, res) => {
   try {
@@ -245,12 +340,13 @@ router.get("/status", async (_req, res) => {
       control.loss_streak = 0;
       control.paused_remaining = 0;
     }
-    const positions = await countOpenPositions();
+    const positions = await countOpenPositions(cfg.max_positions_ignore_after_hours);
     const daily_loss = await getDailyLoss();
     const free_debt = await getFreeDebt();
     res.json({
       positions_open: positions,
       max_positions: cfg.max_positions,
+      max_positions_ignore_after_hours: cfg.max_positions_ignore_after_hours,
       loss_streak: control.loss_streak,
       loss_streak_trigger: cfg.loss_streak_trigger,
       paused_remaining: control.paused_remaining,

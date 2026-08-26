@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -570,6 +570,21 @@ export default function Dashboard() {
     }
   };
 
+  const handleCloseAllReset = async () => {
+    if (!confirm(
+      "Close ALL open positions (real + rejected), reset open-position counter and " +
+      "loss-streak counter, and stop all bots?\n\n" +
+      "Open positions will be marked closed (exit_reason=manual_reset) and bots will be stopped & reset."
+    )) return;
+    try {
+      const r = await closeAllAndReset();
+      alert(r.message || "All closed & reset");
+      await load();
+    } catch (e) {
+      alert("Failed to close & reset: " + String(e));
+    }
+  };
+
   const handleDeleteBot = async (symbol: string) => {
     if (!confirm("Delete " + symbol + " permanently?")) return;
     try {
@@ -731,6 +746,9 @@ export default function Dashboard() {
              await load();
           }} className="">
             <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleCloseAllReset} className="border-yellow-700 text-yellow-300 hover:bg-yellow-900">
+            <Square className="w-4 h-4 mr-2" />Close All & Reset
           </Button>
           <Button variant="destructive" size="sm" onClick={async () => {
             if (confirm('Delete ALL trades and recovery chains? This cannot be undone.')) {
@@ -1142,3 +1160,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

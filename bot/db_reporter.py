@@ -53,6 +53,10 @@ class DbReporter:
         return self._session
 
     async def report_heartbeat(self, price: float) -> None:
+        # Защита: не пишем нулевую/отрицательную цену — иначе дашборд покажет
+        # ложный unrealized PnL, посчитанный от цены 0.
+        if price is None or price <= 0:
+            return
         await self._patch({"current_price": price, "is_running": True})
 
     async def report_position(self, position_dict: Optional[dict]) -> None:
@@ -62,9 +66,9 @@ class DbReporter:
         await self._patch({"is_running": False, "position": None})
 
     async def report_rejected(self, signal_data: dict, reason: str, qty: float = 0.0, mode: str = "paper") -> Optional[int]:
-        """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'
-        (для статистики). pnl=0, is_open=0 — не влияет на торговую статистику.
-        Возвращает id созданной записи (для последующей симуляции TP/SL)."""
+        """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'.
+        Включает все детали как у обычной сделки, только с пометкой причины отклонения.
+        Возвращает id созданной записи."""
         import datetime as _dt
         payload = {
             "symbol": self.symbol,
@@ -75,11 +79,11 @@ class DbReporter:
             "tp1_price": signal_data.get("tp1_price", 0.0),
             "tp2_price": signal_data.get("tp2_price", 0.0),
             "qty": qty,
-            "pnl": 0.0,
+            "pnl": None,
             "exit_reason": None,
             "entry_time": _dt.datetime.utcnow().isoformat(),
             "exit_time": None,
-            "is_open": False,
+            "is_open": False,  # Отклонённые позиции не считаются открытыми
             "mode": mode,
             "status": "rejected",
             "reject_reason": reason,

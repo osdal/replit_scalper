@@ -96,6 +96,10 @@ export async function stopAllBots(): Promise<{ success: boolean; message: string
   return apiFetch(`${API}/bots/stop-all`, { method: "POST" });
 }
 
+export async function closeAllAndReset(): Promise<{ success: boolean; closed_trades: number; message: string }> {
+  return apiFetch(`${API}/trading/close-and-reset`, { method: "POST" });
+}
+
 export async function clearRecoveryChains(): Promise<{ deleted: number }> {
   return apiFetch(`${API}/recovery/chains`, { method: "DELETE" });
 }

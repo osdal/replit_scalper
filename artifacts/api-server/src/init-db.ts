@@ -111,6 +111,14 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trading_control (
   updated_at TEXT NOT NULL
 )`);
 
+// Мигрируем trading_control: добавляем active_open (атомарный счётчик открытых слотов), если его нет.
+const { rows: ctlCols } = await db.run(sql`PRAGMA table_info(trading_control)`);
+const ctlColNames: string[] = (ctlCols as any[]).map((r: any) => String(r.name));
+if (!ctlColNames.includes("active_open")) {
+  await db.run(sql`ALTER TABLE trading_control ADD COLUMN active_open INTEGER NOT NULL DEFAULT 0`);
+  console.log("  Added column trading_control.active_open");
+}
+
 console.log("Tables created");
 
 const configs = fs.readdirSync(BOT_DIR).filter(f => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
