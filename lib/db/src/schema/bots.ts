@@ -32,6 +32,7 @@ export const botsTable = sqliteTable("bots", {
   last_heartbeat:     text("last_heartbeat"),
   current_price:      real("current_price"),
   position:           text("position"),   // JSON string
+  llm_status:         text("llm_status"), // JSON string: состояние LLM-фильтра (провайдеры, ошибки)
   updated_at:         text("updated_at").notNull().$defaultFn(() => new Date().toISOString()),
 });
 

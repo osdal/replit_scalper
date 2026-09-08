@@ -94,7 +94,7 @@ def run_set(base_cfg, df5, df_htf, name, vm, adx):
     pre = calculate_htf_indicators(df_htf.copy(), c) if c.htf_enabled and df_htf is not None else None
     lg = logging.getLogger("trial")
     lg.setLevel(logging.CRITICAL)
-    st = asyncio.run(run_backtest_on_df(df5.copy(), c, lg, df_htf=pre))
+    st = run_backtest_on_df(df5.copy(), c, lg, df_htf=pre)
     # RR 2:1 expectancy in SL units (TP=2xSL, full close)
     exp = (st.win_rate/100.0)*2.0 - (1 - st.win_rate/100.0)
     return {"setting": name, "trades": st.total_trades, "win_rate": round(st.win_rate,1),

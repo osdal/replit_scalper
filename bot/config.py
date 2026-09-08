@@ -1,6 +1,7 @@
 import dataclasses
 import yaml
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -54,7 +55,7 @@ class Config:
     llm_enabled: bool = False         # Включить LLM проверку сигналов
     llm_mock: bool = False            # Мок-режим LLM (возвращает True всегда)
     llm_api_key: str = ""             # API ключ OpenRouter (основной)
-    llm_model: str = "llama-3.1-70b-versatile"
+    llm_model: str = "minimax/minimax-m3:free"
     llm_fallback_models: str = ""
     llm_confidence_threshold: float = 0.7
     llm_calls_per_min: int = 20
@@ -63,10 +64,26 @@ class Config:
     llm_short_backoff_sec: float = 5.0
     llm_provider_retry_delay_sec: float = 1.0
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash-exp"
+    gemini_model: str = "gemini-flash-lite-latest"
     groq_api_key: str = ""
     groq_model: str = "groq/compound-mini"
     commission_pct: float = 0.05   # Симулируемая комиссия (Taker) в %, применяется к PnL в paper/backtest
+    use_fixed_tp_sl: bool = False  # True = использовать фиксированные sl_pct/tp1_pct из пресета/конфига
+                                   # (БЕЗ динамического ATR SL/TP). Для честного теста 1.2%/0.4% на бэктесте.
+    preset_sl_pct: Optional[float] = None  # Переопределение SL пресета в % (None = использовать PRESET_CONFIG)
+    preset_tp_pct: Optional[float] = None  # Переопределение TP пресета в % (None = использовать PRESET_CONFIG)
+    atr_tp_multiplier: float = 2.0         # RR для ATR-стопов: TP = atr_tp_multiplier * SL (2.0 = RR 2:1)
+    atr_tp_multiplier_long: Optional[float] = None  # Переопределение RR для LONG (None = atr_tp_multiplier)
+    atr_tp_multiplier_short: Optional[float] = None  # Переопределение RR для SHORT (None = atr_tp_multiplier)
+    atr_tp2_multiplier: float = 0.0        # TP2 (раннер) = atr_tp2_multiplier * SL. 0 = TP2 совпадает с TP1 (по умолч.)
+    min_consensus: int = 1        # Минимум РАЗНЫХ стратегий, согласных на направление (1 = выкл)
+    consensus_flat: Optional[int] = None   # consensus при ADX<15 (None = min_consensus)
+    consensus_weak: Optional[int] = None   # consensus при ADX 15-25 (None = min_consensus)
+    consensus_trend: Optional[int] = None  # consensus при ADX>=25 (None = min_consensus)
+    trend_block_short: bool = False        # True = не открывать SHORT при ADX>=25 (тренд)
+    block_hours_utc: list = field(default_factory=list)  # часы UTC, в которые НЕ входить (напр. [2,6,10])
+    excluded_presets: list = field(default_factory=list)  # пресеты, сигналы которых не открывать
+    entry_on: str = "close"       # "close" = вход по close свечи сигнала; "next_open" = по open след. свечи
 
     def __post_init__(self):
         valid_modes = ("live", "paper", "backtest")

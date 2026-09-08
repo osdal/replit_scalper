@@ -1007,7 +1007,13 @@ def main():
     print(report)
 
     if not args.no_write:
-        analytics_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANALYTICS.md")
+        bot_dir = os.path.dirname(os.path.abspath(__file__))
+        # Вложенная папка отчётов: logs/analytics/
+        analytics_dir = os.path.join(bot_dir, "logs", "analytics")
+        os.makedirs(analytics_dir, exist_ok=True)
+        # Точная дата-время формирования файла в имени.
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        analytics_path = os.path.join(analytics_dir, f"ANALYTICS_{ts}.md")
         with open(analytics_path, "w", encoding="utf-8") as f:
             f.write(report)
             f.write("\n")

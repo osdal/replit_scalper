@@ -130,7 +130,7 @@ def build_objective(base_cfg, df_5m_train, df_htf_full):
         cfg = apply_params(base_cfg, params)
         # precompute HTF indicators for this trial's HTF params on the FULL htf df
         pre = calculate_htf_indicators(df_htf_full.copy(), cfg)
-        stats = asyncio.run(run_backtest_on_df(df_5m_train.copy(), cfg, silent_log, df_htf=pre))
+        stats = run_backtest_on_df(df_5m_train.copy(), cfg, silent_log, df_htf=pre)
         trial.set_user_attr("total_trades", stats.total_trades)
         trial.set_user_attr("win_rate", round(stats.win_rate, 1))
         trial.set_user_attr("total_pnl", round(stats.total_pnl, 2))
@@ -154,7 +154,7 @@ def out_of_sample_test(df_5m_test, df_htf_full, base_cfg, params):
     pre = calculate_htf_indicators(df_htf_full.copy(), cfg)
     silent_log = logging.getLogger("optuna_trial")
     silent_log.setLevel(logging.CRITICAL)
-    stats = asyncio.run(run_backtest_on_df(df_5m_test.copy(), cfg, silent_log, df_htf=pre))
+    stats = run_backtest_on_df(df_5m_test.copy(), cfg, silent_log, df_htf=pre)
     exp = (stats.win_rate / 100.0) * 2.0 - (1 - stats.win_rate / 100.0)  # RR 2:1 expectancy in SL units
     return {
         "trades": stats.total_trades, "win_rate": round(stats.win_rate, 1),

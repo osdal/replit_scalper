@@ -146,7 +146,11 @@ async function killPid(pid: number): Promise<void> {
 router.get("/", async (_req, res) => {
   try {
     const bots = await db.select().from(botsTable);
-    res.json(bots.map(b => ({ ...b, position: b.position ? JSON.parse(b.position as string) : null })));
+    res.json(bots.map(b => ({
+      ...b,
+      position: b.position ? JSON.parse(b.position as string) : null,
+      llm_status: b.llm_status ? JSON.parse(b.llm_status as string) : null,
+    })));
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -155,7 +159,11 @@ router.get("/:symbol", async (req, res) => {
     const [bot] = await db.select().from(botsTable)
       .where(eq(botsTable.symbol, req.params.symbol.toUpperCase()));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
-    res.json({ ...bot, position: bot.position ? JSON.parse(bot.position as string) : null });
+    res.json({
+      ...bot,
+      position: bot.position ? JSON.parse(bot.position as string) : null,
+      llm_status: bot.llm_status ? JSON.parse(bot.llm_status as string) : null,
+    });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -168,6 +176,7 @@ router.put("/:symbol/config", async (req, res) => {
     delete configUpdates.last_heartbeat;
     delete configUpdates.current_price;
     delete configUpdates.position;
+    delete configUpdates.llm_status;
 
     const [updated] = await db.update(botsTable)
       .set({ ...req.body, updated_at: new Date().toISOString() })
@@ -197,6 +206,9 @@ router.patch("/:symbol", async (req, res) => {
     const body = { ...req.body };
     if (body.position && typeof body.position === "object") {
       body.position = JSON.stringify(body.position);
+    }
+    if (body.llm_status && typeof body.llm_status === "object") {
+      body.llm_status = JSON.stringify(body.llm_status);
     }
     const [updated] = await db.update(botsTable)
       .set({ ...body, last_heartbeat: new Date().toISOString(), updated_at: new Date().toISOString() })

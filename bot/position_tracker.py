@@ -2,7 +2,7 @@ import json
 import os
 import datetime
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from notifier import Notifier
@@ -50,6 +50,11 @@ class Position:
     opened_at: Optional[str] = None  # ISO timestamp when position was opened (for TIME_PROFIT_CLOSE_HOURS)
     mode: Optional[str] = None       # "paper"|"live"|None — режим сделки (из пресета)
     reject_reason: Optional[str] = None  # если задан — сделка помечена как REJECTED (не в статистике)
+    regime_adx: float = 0.0          # ADX на момент входа (только бэктест, не сериализуется)
+    regime_atr_pct: float = 0.0      # ATR% на момент входа (только бэктест)
+    regime_trend: str = ""           # наклон EMA на входе: "LONG"/"SHORT" (только бэктест)
+    intrabar_return: float = 0.0     # движение внутри свечи входа (только бэктест)
+    voting_bases: list = field(default_factory=list)  # согласовавшие стратегии (только бэктест)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -406,6 +411,7 @@ class PositionTracker:
             opened_at=datetime.datetime.utcnow().isoformat() if signal.timestamp is None else str(signal.timestamp).replace(" ", "T"),
             mode=signal.mode,
             reject_reason=reject_reason,
+            voting_bases=list(getattr(signal, "voting_bases", []) or []),
         )
         self._trade_id = None
         self._save_state()
@@ -536,6 +542,18 @@ class PositionTracker:
                 p.remaining_qty -= tp1_qty
                 p.tp1_hit = True
                 old_sl = p.sl_price
+                # Если TP1 закрыл ВЕСЬ объём (tp1_close_pct=100) — позиция завершена,
+                # иначе SL переносится в breakeven и остаток едет к TP2.
+                if p.remaining_qty <= 0.000001:
+                    p.remaining_qty = 0.0
+                    p.closed = True
+                    self.log.info(
+                        f"TP1 hit (full close) | price={close_price} qty={tp1_qty:.6f} "
+                        f"pnl={pnl:.4f} total_pnl={p.realized_pnl:.4f} | {indicators_str}"
+                    )
+                    self.position = None
+                    self._clear_state()
+                    return pnl, "TP1"
                 p.sl_price = p.entry_price
                 self._save_state()
                 self.log.info(

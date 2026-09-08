@@ -44,6 +44,21 @@ interface Bot {
   tp1_pct: number;
   tp2_pct: number;
   timeframe: string;
+  llm_status?: LLMStatus | null;
+}
+
+interface LLMProviderStatus {
+  name: string;
+  state: string;          // idle | ok | degraded | blocked | error
+  last_error: string;
+  errors_since_ok: number;
+}
+
+interface LLMStatus {
+  enabled: boolean;
+  last_result: string;    // idle | approved | rejected | skipped | all_failed
+  last_error: string;
+  providers?: Record<string, LLMProviderStatus> | null;
 }
 
 interface Trade {
@@ -152,6 +167,45 @@ function heartbeatAge(ts: string | null): string {
   return `${Math.floor(sec / 3600)}h ago`;
 }
 
+function llmProviderBadges(status: LLMStatus) {
+  if (!status.enabled) return <span className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500 text-xs">off</span>;
+  const providers = status.providers ? Object.values(status.providers) : [];
+  const colorFor = (state: string) => {
+    if (state === "ok") return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
+    if (state === "degraded") return "bg-yellow-500/15 text-yellow-300 border-yellow-500/40";
+    if (state === "blocked") return "bg-red-500/15 text-red-300 border-red-500/40";
+    if (state === "error") return "bg-red-500/15 text-red-300 border-red-500/40";
+    return "bg-zinc-800 text-zinc-400 border-zinc-700";
+  };
+  return (
+    <>
+      {providers.map((p) => (
+        <span
+          key={p.name}
+          title={p.last_error || p.state}
+          className={`px-2 py-0.5 rounded-full border text-xs ${colorFor(p.state)}`}
+        >
+          {p.name}:{p.state}
+        </span>
+      ))}
+      {providers.length === 0 && (
+        <span className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500 text-xs">no providers</span>
+      )}
+      {status.last_result && status.last_result !== "idle" && (
+        <span
+          className={`px-2 py-0.5 rounded-full border text-xs ${
+            status.last_result === "rate_limited"
+              ? "bg-yellow-500/15 text-yellow-300 border-yellow-500/40"
+              : "bg-zinc-800 text-zinc-400 border-zinc-700"
+          }`}
+        >
+          last: {status.last_result}
+        </span>
+      )}
+    </>
+  );
+}
+
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
 function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: () => void; isToggling: boolean; onDelete: (symbol: string) => void }) {
@@ -205,6 +259,13 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
           <span className="text-zinc-400">Heartbeat</span>
           <span className="text-zinc-300">{heartbeatAge(bot.last_heartbeat)}</span>
         </div>
+
+        {bot.llm_status && (
+          <div className="flex flex-wrap gap-1 items-center text-xs">
+            <span className="text-zinc-400 mr-1">AI</span>
+            {llmProviderBadges(bot.llm_status)}
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-1 pt-1">
           {[
