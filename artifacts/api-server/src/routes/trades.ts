@@ -1,14 +1,157 @@
 import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const router = Router();
 
-// DELETE /trades — удалить все сделки
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Корень проекта: src/api-server/src/routes/../../../../ = replit_scalper/
+const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
+// Папка для отчётов Clear DB: bot/logs/analytics/ (вложена в logs).
+const BACKUP_DIR = path.join(PROJECT_ROOT, "bot", "logs", "analytics");
+
+// Заголовки CSV — все поля таблицы trades (для полного анализа).
+const TRADE_CSV_COLS = [
+  "id","symbol","direction","entry_price","exit_price","qty","sl_price","tp1_price","tp2_price",
+  "pnl","exit_reason","entry_time","exit_time","is_open","ema_fast","ema_slow","volume","volume_ma",
+  "mode","status","reject_reason","rsi","macd","macd_signal","macd_hist","bb_upper","bb_middle",
+  "bb_lower","atr","preset","commission","quote_volume",
+];
+
+function csvEscape(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function timestampDir(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
+
+/** Строит компактный ANALYTICS.md из всех сделок (open/closed/rejected). */
+function buildAnalytics(rows: Record<string, any>[]): string {
+  const closes = rows.filter(r => r.status === "closed");
+  const rejected = rows.filter(r => r.status === "rejected");
+  const open = rows.filter(r => r.status === "open");
+
+  const pnl = (r: any) => { const v = Number(r.pnl); return Number.isNaN(v) ? 0 : v; };
+  const wins = closes.filter(r => pnl(r) > 0).length;
+  const losses = closes.filter(r => pnl(r) < 0).length;
+  const tp = closes.filter(r => (r.exit_reason || "").includes("TP")).length;
+  const sl = closes.filter(r => (r.exit_reason || "").includes("SL")).length;
+  const totalPnl = closes.reduce((s, r) => s + pnl(r), 0);
+  const winRate = closes.length ? (wins / closes.length) * 100 : 0;
+
+  // by reason
+  const reasonMap = new Map<string, number>();
+  for (const r of rejected) {
+    const k = r.reject_reason || "rejected";
+    reasonMap.set(k, (reasonMap.get(k) || 0) + 1);
+  }
+
+  // by preset (closed only)
+  const presetMap = new Map<string, { n: number; pnl: number; wins: number; tp: number; sl: number }>();
+  for (const r of closes) {
+    const k = r.preset || "unknown";
+    const e = presetMap.get(k) || { n: 0, pnl: 0, wins: 0, tp: 0, sl: 0 };
+    e.n++;
+    e.pnl += pnl(r);
+    if (pnl(r) > 0) e.wins++;
+    if ((r.exit_reason || "").includes("TP")) e.tp++;
+    if ((r.exit_reason || "").includes("SL")) e.sl++;
+    presetMap.set(k, e);
+  }
+
+  const lines: string[] = [];
+  lines.push(`## Analysis Backup — ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("### Overall");
+  lines.push("");
+  lines.push("| Metric | Value |");
+  lines.push("|---|---|");
+  lines.push(`| Total Opens | ${rows.length} |`);
+  lines.push(`| Open | ${open.length} |`);
+  lines.push(`| Closed | ${closes.length} |`);
+  lines.push(`| Rejected | ${rejected.length} |`);
+  lines.push(`| Win Rate (closed) | ${winRate.toFixed(2)}% |`);
+  lines.push(`| Total PnL (net closed) | ${totalPnl.toFixed(2)} |`);
+  lines.push(`| TP Closes | ${tp} |`);
+  lines.push(`| SL Closes | ${sl} |`);
+  lines.push("");
+  lines.push("### Rejected by reason");
+  lines.push("");
+  lines.push("| Reason | Count |");
+  lines.push("|---|---|");
+  for (const [k, v] of [...reasonMap.entries()].sort((a, b) => b[1] - a[1])) {
+    lines.push(`| ${k} | ${v} |`);
+  }
+  lines.push("");
+  lines.push("### Closed by preset");
+  lines.push("");
+  lines.push("| Preset | Trades | Wins | WR% | TP | SL | PnL |");
+  lines.push("|---|---|---|---|---|---|---|");
+  for (const [k, e] of [...presetMap.entries()].sort((a, b) => b[1].n - a[1].n)) {
+    const wrPer = e.n ? (e.wins / e.n) * 100 : 0;
+    lines.push(`| ${k} | ${e.n} | ${e.wins} | ${wrPer.toFixed(1)}% | ${e.tp} | ${e.sl} | ${e.pnl.toFixed(2)} |`);
+  }
+  lines.push("");
+  lines.push("---");
+  return lines.join("\n");
+}
+
+/** Все строки trades как плоские объекты (все колонки). */
+async function loadAllTrades(): Promise<Record<string, any>[]> {
+  const rows = await db.select().from(tradesTable);
+  return rows as unknown as Record<string, any>[];
+}
+
+function toCsv(rows: Record<string, any>[]): string {
+  const cols = Object.keys(rows[0] ?? {}).filter(c => TRADE_CSV_COLS.includes(c));
+  const header = TRADE_CSV_COLS.join(",");
+  const body = rows.map(r =>
+    TRADE_CSV_COLS.map(c => csvEscape(r[c])).join(",")
+  ).join("\n");
+  return header + "\n" + body;
+}
+
+// DELETE /trades — удалить все сделки (предварительно сохраняя ANALYTICS.md + trades.csv в backup)
 router.delete("/", async (_req, res) => {
   try {
-    const result = await db.delete(tradesTable).returning();
-    res.json({ deleted: result.length });
+    // 1. Считываем текущие сделки ДО удаления.
+    const rows = await loadAllTrades();
+
+    // 2. Формируем ANALYTICS и CSV.
+    const analyticsContent = buildAnalytics(rows);
+    const csvContent = toCsv(rows);
+
+    // 3. Сохраняем во вложенную папку bot/logs/analytics/. В имени каждого файла —
+    //    точная дата-время сохранения (YYYY-MM-DD_HH-MM-SS).
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const stamp = timestampDir();
+    const analyticsPath = path.join(BACKUP_DIR, `ANALYTICS_${stamp}.md`);
+    const csvPath = path.join(BACKUP_DIR, `trades_${stamp}.csv`);
+    const jsonPath = path.join(BACKUP_DIR, `trades_${stamp}.json`);
+    fs.writeFileSync(analyticsPath, analyticsContent + "\n", "utf-8");
+    fs.writeFileSync(csvPath, csvContent + "\n", "utf-8");
+    fs.writeFileSync(jsonPath, JSON.stringify(rows, null, 2), "utf-8");
+
+    // 4. Удаляем все сделки.
+    try {
+      await db.delete(tradesTable);
+    } catch (e) { /* ignored — supported clients return undefined */ }
+    res.json({
+      deleted: rows.length,
+      backup_dir: BACKUP_DIR,
+      backup_stamp: stamp,
+      backed_up: rows.length,
+    });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

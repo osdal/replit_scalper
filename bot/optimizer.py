@@ -111,7 +111,7 @@ def build_objective(base_cfg: Config, df_raw: pd.DataFrame, df_htf: pd.DataFrame
                 htf_indicators_cache[htf_key] = calculate_htf_indicators(df_htf.copy(), cfg)
             precomputed_htf = htf_indicators_cache[htf_key]
 
-        stats = asyncio.run(run_backtest_on_df(df_raw.copy(), cfg, silent_log, df_htf=precomputed_htf))
+        stats = run_backtest_on_df(df_raw.copy(), cfg, silent_log, df_htf=precomputed_htf)
         trial.set_user_attr("total_trades", stats.total_trades)
         trial.set_user_attr("win_rate", round(stats.win_rate, 1))
         trial.set_user_attr("total_pnl", round(stats.total_pnl, 2))

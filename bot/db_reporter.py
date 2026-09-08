@@ -59,6 +59,12 @@ class DbReporter:
             return
         await self._patch({"current_price": price, "is_running": True})
 
+    async def report_llm_status(self, llm_status_dict: Optional[dict]) -> None:
+        """Передаёт состояние LLM-фильтра (провайдеры, ошибки, лимиты) в БД/дашборд."""
+        if llm_status_dict is None:
+            return
+        await self._patch({"llm_status": llm_status_dict})
+
     async def report_position(self, position_dict: Optional[dict]) -> None:
         await self._patch({"position": position_dict})
 

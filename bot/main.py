@@ -51,6 +51,20 @@ def _sim_commission(entry, exit_price, qty):
     return (abs(entry) + abs(exit_price)) * abs(qty) * fee
 
 
+def _tf_to_seconds(tf: str) -> int:
+    """Переводит таймфрейм Binance (1m, 5m, 1h, 1d...) в секунды."""
+    tf = str(tf).strip().lower()
+    unit = tf[-1]
+    try:
+        num = int(tf[:-1])
+    except ValueError:
+        return 60
+    mult = {"m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit)
+    if not mult:
+        return 60
+    return num * mult
+
+
 def _is_loss_streak_reason(sim) -> bool:
     """True, если отклонённый сигнал был отклонён из-за защиты от серии убытков
     (глобальной 'risk:loss_streak' или локальной 'skip:loss_streak_*')."""
@@ -863,6 +877,36 @@ async def _run_live_or_paper(
     tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr, notifier=notifier)
     handler   = SignalHandler(cfg, log)
 
+    # LLM-фильтр создаётся ОДИН раз на весь цикл жизни бота: circuit breaker и
+    # статус провайдеров должны сохраняться между сигналами (иначе при каждом
+    # сигнале лимиты/блокировки сбрасывались бы).
+    llm = None
+    if getattr(cfg, "llm_enabled", False):
+        try:
+            from llm_client import LLMClient, LLMConfig
+            llm_cfg = LLMConfig(
+                enabled=True,
+                mock=getattr(cfg, "llm_mock", False),
+                api_key=getattr(cfg, "llm_api_key", ""),
+                model=getattr(cfg, "llm_model", "llama-3.1-70b-versatile"),
+                fallback_models=getattr(cfg, "llm_fallback_models", ""),
+                gemini_api_key=getattr(cfg, "gemini_api_key", ""),
+                gemini_model=getattr(cfg, "gemini_model", "gemini-2.0-flash-exp"),
+                groq_api_key=getattr(cfg, "groq_api_key", ""),
+                groq_model=getattr(cfg, "groq_model", "groq/compound-mini"),
+                confidence_threshold=getattr(cfg, "llm_confidence_threshold", 0.7),
+                calls_per_min=getattr(cfg, "llm_calls_per_min", 20),
+                per_symbol_cooldown_min=getattr(cfg, "llm_per_symbol_cooldown_min", 5),
+                backoff_sec=getattr(cfg, "llm_backoff_sec", 60.0),
+                short_backoff_sec=getattr(cfg, "llm_short_backoff_sec", 5.0),
+                provider_retry_delay_sec=getattr(cfg, "llm_provider_retry_delay_sec", 1.0),
+            )
+            llm = LLMClient(llm_cfg)
+            log.info(f"[LLM] LLM filter enabled | groq={llm_cfg.groq_model} gemini={llm_cfg.gemini_model} openrouter={llm_cfg.model}")
+        except Exception as e:
+            log.warning(f"[LLM] Failed to init LLM client: {e}")
+            llm = None
+
     log.info("[STARTUP] Step 1: syncing position on start")
     await _sync_position_on_start(cfg, client, tracker, order_mgr, log, recovery, notifier)
     log.info("[STARTUP] Step 2: syncing done")
@@ -1243,13 +1287,32 @@ async def _run_live_or_paper(
             # причину «высший таймфрейм» в воронке сигналов.
             base_signals = get_all_signals(df_buffer, cfg, None, cfg.enabled_presets)
 
-            signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets)
+            # Режимно-адаптивный consensus: зависит от зоны ADX последней свечи
+            try:
+                adx_now = float(df_buffer.iloc[-1].get("adx", 0) or 0) if "adx" in df_buffer.columns else 0.0
+            except Exception:
+                adx_now = 0.0
+            consensus = getattr(cfg, "min_consensus", 1)
+            if adx_now < 15:
+                consensus = getattr(cfg, "consensus_flat", None) or consensus
+            elif adx_now < 25:
+                consensus = getattr(cfg, "consensus_weak", None) or consensus
+            else:
+                consensus = getattr(cfg, "consensus_trend", None) or consensus
+
+            signals = get_all_signals(df_buffer, cfg, htf_trend, cfg.enabled_presets,
+                                      min_consensus=consensus)
             if not signals:
                 return
 
             # Pick best signal by volume (strongest conviction)
             signals.sort(key=lambda s: s.volume, reverse=True)
             raw_signal = signals[0]
+
+            # В тренде (ADX>=25) блокируем SHORT, если включено
+            if adx_now >= 25 and getattr(cfg, "trend_block_short", False) and raw_signal.direction == "SHORT":
+                log.debug(f"[TREND_SHORT_BLOCK] Skip SHORT {cfg.symbol} at ADX={adx_now:.1f}")
+                return
 
             now = time.time()
             if cfg.signal_cooldown_min > 0:
@@ -1299,27 +1362,8 @@ async def _run_live_or_paper(
             signal_data = _build_signal_data(signal, cfg)
 
             # Optional LLM validation
-            if getattr(cfg, "llm_enabled", False):
+            if llm is not None:
                 try:
-                    from llm_client import LLMClient, LLMConfig
-                    llm_cfg = LLMConfig(
-                        enabled=True,
-                        mock=getattr(cfg, "llm_mock", False),
-                        api_key=getattr(cfg, "llm_api_key", ""),
-                        model=getattr(cfg, "llm_model", "llama-3.1-70b-versatile"),
-                        fallback_models=getattr(cfg, "llm_fallback_models", ""),
-                        gemini_api_key=getattr(cfg, "gemini_api_key", ""),
-                        gemini_model=getattr(cfg, "gemini_model", "gemini-2.0-flash-exp"),
-                        groq_api_key=getattr(cfg, "groq_api_key", ""),
-                        groq_model=getattr(cfg, "groq_model", "groq/compound-mini"),
-                        confidence_threshold=getattr(cfg, "llm_confidence_threshold", 0.7),
-                        calls_per_min=getattr(cfg, "llm_calls_per_min", 20),
-                        per_symbol_cooldown_min=getattr(cfg, "llm_per_symbol_cooldown_min", 5),
-                        backoff_sec=getattr(cfg, "llm_backoff_sec", 60.0),
-                        short_backoff_sec=getattr(cfg, "llm_short_backoff_sec", 5.0),
-                        provider_retry_delay_sec=getattr(cfg, "llm_provider_retry_delay_sec", 1.0),
-                    )
-                    llm = LLMClient(llm_cfg)
                     indicators = {
                         "rsi": signal.rsi,
                         "macd": signal.macd,
@@ -1342,11 +1386,33 @@ async def _run_live_or_paper(
                         tp_price=signal.tp1_price,
                         indicators=indicators,
                     )
+                    if reporter is not None:
+                        await reporter.report_llm_status(llm.status.to_dict())
                     if llm_result is False:
                         log.info(f"[LLM] Signal REJECTED for {cfg.symbol} {signal.preset}")
                         signal_data["reject_reason"] = "llm_reject"
                         if reporter is not None:
-                            await reporter.report_rejected(signal_data, "llm_reject", mode=cfg.mode)
+                            trade_id = await reporter.report_rejected(signal_data, "llm_reject", mode=cfg.mode)
+                            # Отклонённый ИИ сигнал НЕ открывает позицию в трекере (иначе
+                            # rejected-позиция занимает слот и блокирует настоящие сделки
+                            # через guard в on_candle). Записываем в БД для наблюдения и
+                            # добавляем в очередь симуляции: фоновая задача найдёт исход
+                            # (SL/TP1) по историческим свечам и допишет exit_price/pnl.
+                            if trade_id:
+                                qty = _calc_simulated_qty(cfg, signal, cfg.paper_balance)
+                                _rejected_sims.append({
+                                    "trade_id": trade_id,
+                                    "symbol": cfg.symbol,
+                                    "direction": signal.direction,
+                                    "entry": float(signal.entry_price or 0),
+                                    "sl": float(signal.sl_price or 0),
+                                    "tp1": float(signal.tp1_price or 0),
+                                    "qty": qty,
+                                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                                    "candles": 0,
+                                    "historical_checked": False,
+                                    "reject_reason": "llm_reject",
+                                })
                         return
                     elif llm_result is True:
                         log.info(f"[LLM] Signal APPROVED for {cfg.symbol} {signal.preset}")
@@ -1457,17 +1523,26 @@ async def _run_live_or_paper(
                         tp_pct = preset_cfg["tp"]
                         sl_pct = preset_cfg.get("sl", cfg.sl_pct)
                         atr_abs = getattr(signal, "atr", 0) or 0
-                        dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry_price, atr_abs, sl_pct, tp_pct)
+                        if signal.direction == "LONG":
+                            mult = getattr(cfg, "atr_tp_multiplier_long", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+                        else:
+                            mult = getattr(cfg, "atr_tp_multiplier_short", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+                        dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry_price, atr_abs, sl_pct, tp_pct,
+                                                                 tp_multiplier=mult)
+                        # TP2 (раннер) дальше TP1, если задан atr_tp2_multiplier
+                        tp2_mult = getattr(cfg, "atr_tp2_multiplier", 0.0) or 0.0
+                        dynamic_tp2 = tp2_mult * dynamic_sl if tp2_mult > 0 and dynamic_sl > 0 else dynamic_tp
                         sl_dist = entry_price * dynamic_sl / 100
                         tp_dist = entry_price * dynamic_tp / 100
+                        tp2_dist = entry_price * dynamic_tp2 / 100
                         if signal.direction == "LONG":
                             signal.sl_price = round(entry_price - sl_dist, 8)
                             signal.tp1_price = round(entry_price + tp_dist, 8)
-                            signal.tp2_price = round(entry_price + tp_dist, 8)
+                            signal.tp2_price = round(entry_price + tp2_dist, 8)
                         else:
                             signal.sl_price = round(entry_price + sl_dist, 8)
                             signal.tp1_price = round(entry_price - tp_dist, 8)
-                            signal.tp2_price = round(entry_price - tp_dist, 8)
+                            signal.tp2_price = round(entry_price - tp2_dist, 8)
                         signal_data["sl_price"] = signal.sl_price
                         signal_data["tp1_price"] = signal.tp1_price
                         signal_data["tp2_price"] = signal.tp2_price
@@ -1581,16 +1656,38 @@ async def _run_live_or_paper(
     sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, recovery, log, shutdown_event))
 
     async def _watchdog():
+        # Таймаут watchdog масштабируется от таймфрейма: на 1h свеча приходит
+        # раз в час, поэтому лимит 15 минут убивал бота между свечами.
+        interval_sec = _tf_to_seconds(cfg.timeframe) or 60
+        no_candle_timeout = max(interval_sec * 2.5, 900)
         while not shutdown_event.is_set():
             await asyncio.sleep(60)
             if shutdown_event.is_set():
                 break
-            if time.time() - last_candle_time[0] > 900:
-                log.error("[WATCHDOG] No candles processed for 15 minutes, triggering shutdown")
+            if time.time() - last_candle_time[0] > no_candle_timeout:
+                log.error(f"[WATCHDOG] No candles processed for {int(no_candle_timeout)}s, triggering shutdown")
                 shutdown_event.set()
                 break
 
     watchdog_task = asyncio.create_task(_watchdog())
+
+    async def _heartbeat_task():
+        # Регулярный heartbeat между свечами: на 1h без него дашборд показывает
+        # устаревший last_heartbeat почти час. Обновляем каждые 60 сек.
+        while not shutdown_event.is_set():
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                break
+            try:
+                ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
+                current_price = float(ticker.get("price", 0))
+            except Exception:
+                continue
+            if current_price <= 0:
+                continue
+            await reporter.report_heartbeat(current_price)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_task())
 
     async def tick_sl_tp_check():
         while not shutdown_event.is_set():
@@ -1708,7 +1805,7 @@ async def _run_live_or_paper(
     )
     
     # Останавливаем фоновые задачи
-    for task in (check_task, sim_task, watchdog_task, time_profit_task, tick_task):
+    for task in (check_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task):
         if not task.done():
             task.cancel()
             try:

@@ -34,8 +34,11 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
   auto_mode INTEGER NOT NULL DEFAULT 1, paper_balance REAL NOT NULL DEFAULT 1000,
   log_file TEXT NOT NULL, is_running INTEGER NOT NULL DEFAULT 0,
   last_heartbeat TEXT, current_price REAL, position TEXT,
-  updated_at TEXT NOT NULL
+  llm_status TEXT, updated_at TEXT NOT NULL
 )`);
+
+// Миграция: добавляем колонку llm_status, если её ещё нет (старые БД)
+await db.run(sql`ALTER TABLE bots ADD COLUMN llm_status TEXT`).catch(() => { /* уже есть */ });
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,

@@ -300,3 +300,68 @@ powershell -ExecutionPolicy Bypass -File auto-optimize-daily.ps1
 Потом — новые индикаторы (RSI + MACD + BB + ATR) в strategy.py
 Потом — per-preset архитектура + свечные паттерны
 Опционально — LLM-фильтр
+
+
+Самые дешёвые платные модели для кода
+Модель	Цена (Input/Output за 1M)	Контекст	Особенности
+Ling-2.6-flash	~$0.005 / $0.03	—	Абсолютный минимум цены
+Llama 3.1 8B Instruct	$0.02 / $0.03	128K	Отличный баланс цены и качества
+GPT-4.1 Nano (batch)	$0.05 / $0.20	—	Самый дешёвый из GPT-4.1
+Nemotron 3 Super	$0.09 / $0.45	—	Хорош для кодинга
+DeepSeek V4 Flash	$0.098 / $0.197	1M	Огромный контекст
+Qwen3-Coder-Next	$0.11 / $0.80	—	Специализирован для кодинга
+Granite 4.0 Micro (3B)	$0.017 / $0.112	—	Очень дёшево
+🏆 Лучший выбор для Kilo Code
+Если нужен оптимальный баланс цена/качество:
+
+text
+meta-llama/llama-3.1-8b-instruct
+$0.02/$0.03 за 1M токенов — одна из самых дешёвых моделей, которая при этом отлично справляется с задачами программирования.
+
+Если нужен огромный контекст (для работы с большими файлами):
+
+text
+deepseek/deepseek-v4-flash
+$0.098/$0.197 за 1M токенов, контекст 1M токенов.
+
+Если нужна самая дешёвая:
+
+text
+ling/ling-2.6-flash
+~$0.015 за 1M токенов (blended).
+
+🆓 Бесплатные модели (тоже работают в Kilo Code)
+Не забывайте про суффикс :free — многие модели доступны бесплатно:
+
+qwen/qwen3-coder:free — отличная бесплатная модель для кода
+
+google/gemma-4-31b-it:free
+
+meta-llama/llama-3.2-3b-instruct:free
+
+Лимиты: 20 запросов в минуту, после пополнения от $10 — 1000 запросов в день.
+
+💡 Совет по экономии
+Используйте суффикс :floor — он автоматически направляет запрос к самому дешёвому провайдеру для выбранной модели:
+
+python
+model="meta-llama/llama-3.1-8b-instruct:floor"
+Также в OpenRouter есть Auto Router с настройкой cost_tier: "low" — система сама подберёт самую дешёвую модель, способную решить вашу задачу
+
+# Все монеты
+python .\export_minute_data.py --start 2026-07-28 --end 2026-08-28
+
+# Только нужные
+python .\export_minute_data.py --start 2026-07-28 --end 2026-08-28 --symbols BTCUSDT,ETHUSDT
+
+# Своя папка
+python .\export_minute_data.py --start 2026-07-28 --end 2026-08-28 --out-dir data\minutes
+
+# Все монеты в один файл
+python .\export_minute_data_single.py --start 2026-07-28 --end 2026-08-28
+
+# Только нужные
+python .\export_minute_data_single.py --start 2026-07-28 --end 2026-08-28 --symbols BTCUSDT,ETHUSDT
+
+# Своё имя файла
+python .\export_minute_data_single.py --start 2026-07-28 --end 2026-08-28 --out data\minutes_all.csv

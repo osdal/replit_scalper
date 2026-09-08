@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import logging
 import os
@@ -71,6 +71,7 @@ class Signal:
     atr: float = 0.0
     quote_volume: float = 0.0  # объём в USDT за свечу перед входом
     mode: Optional[str] = None  # "paper"|"live"|None (None = наследует режим бота)
+    voting_bases: list = field(default_factory=list)  # базовые стратегии, поддержавшие направление (консенсус)
 
 
 # ── Indicator calculations ────────────────────────────────────────────────
@@ -229,14 +230,19 @@ def get_htf_trend_latest(df_htf: pd.DataFrame) -> Optional[str]:
 
 # ── Per-preset signal functions (fully independent) ────────────────────────
 
-def _calc_atr_sl_tp(entry: float, atr_abs: float, base_sl_pct: float, base_tp_pct: float) -> tuple[float, float]:
-    """Динамический SL по ATR: расширяем только если ATR высокий, cap 0.65%, TP = 2*SL."""
-    atr_pct = (atr_abs / entry) * 100 if entry > 0 else 0.0
-    if atr_pct > base_sl_pct / 1.5:
-        dynamic_sl = min(1.5 * atr_pct, 0.65)
-    else:
-        dynamic_sl = base_sl_pct
-    dynamic_tp = 2.0 * dynamic_sl
+def _calc_atr_sl_tp(entry: float, atr_abs: float, base_sl_pct: float, base_tp_pct: float,
+                    tp_multiplier: float = 2.0) -> tuple[float, float]:
+    """Динамический SL/TP по ATR: SL = k*ATR (k=1.5), TP = tp_multiplier*SL.
+
+    Стоп адаптируется к волатильности каждой монеты и момента времени,
+    вместо фиксированного процента, который для одних монет слишком узок
+    (выбивается шумом), а для других избыточен.
+    """
+    if entry <= 0 or atr_abs <= 0:
+        return base_sl_pct, base_tp_pct
+    atr_pct = (atr_abs / entry) * 100
+    dynamic_sl = round(1.5 * atr_pct, 4)
+    dynamic_tp = round(tp_multiplier * dynamic_sl, 4)
     return dynamic_sl, dynamic_tp
 
 
@@ -247,20 +253,47 @@ def _make_signal(df: pd.DataFrame, cfg: Config, direction: str, preset: str,
     curr = df.iloc[-1]
     entry = float(curr["close"])
     preset_cfg = get_preset_config(preset)
-    sl_pct = preset_cfg.get("sl", cfg.sl_pct)
-    tp_pct = preset_cfg.get("tp", cfg.tp1_pct)
+    if getattr(cfg, "preset_sl_pct", None) is not None:
+        sl_pct = cfg.preset_sl_pct
+    else:
+        sl_pct = preset_cfg.get("sl", cfg.sl_pct)
+    if getattr(cfg, "preset_tp_pct", None) is not None:
+        tp_pct = cfg.preset_tp_pct
+    else:
+        tp_pct = preset_cfg.get("tp", cfg.tp1_pct)
     atr_abs = float(curr.get("atr", 0) or 0)
-    dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry, atr_abs, sl_pct, tp_pct)
+    if getattr(cfg, "use_fixed_tp_sl", False):
+        # Фиксированные TP/SL напрямую (без ATR-авто-2×SL).
+        dynamic_sl, dynamic_tp = sl_pct, tp_pct
+        tp2_mult = getattr(cfg, "tp2_pct", 0) or 0
+        dynamic_tp2 = tp2_mult if tp2_mult > 0 else dynamic_tp
+    else:
+        # RR может быть разным для LONG и SHORT (asymmetric risk/reward):
+        # например, SHORT с дальним ходом выигрывает от широкого TP,
+        # а LONG-сигналы лучше фиксировать раньше.
+        if direction == "LONG":
+            mult = getattr(cfg, "atr_tp_multiplier_long", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+        else:
+            mult = getattr(cfg, "atr_tp_multiplier_short", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+        dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry, atr_abs, sl_pct, tp_pct,
+                                                 tp_multiplier=mult)
+        # TP2 (раннер) дальше TP1, если задан atr_tp2_multiplier; иначе равен TP1
+        tp2_mult = getattr(cfg, "atr_tp2_multiplier", 0.0) or 0.0
+        if tp2_mult > 0 and dynamic_sl > 0:
+            dynamic_tp2 = tp2_mult * dynamic_sl
+        else:
+            dynamic_tp2 = dynamic_tp
     sl_dist = entry * dynamic_sl / 100
     tp_dist = entry * dynamic_tp / 100
+    tp2_dist = entry * dynamic_tp2 / 100
     if direction == "LONG":
         sl_price = entry - sl_dist
         tp1_price = entry + tp_dist
-        tp2_price = entry + tp_dist
+        tp2_price = entry + tp2_dist
     else:
         sl_price = entry + sl_dist
         tp1_price = entry - tp_dist
-        tp2_price = entry - tp_dist
+        tp2_price = entry - tp2_dist
     return Signal(
         direction=direction,
         entry_price=entry,
@@ -321,7 +354,7 @@ def get_signal_ema_cross(df: pd.DataFrame, cfg: Config,
         _sig_bump("htf")
         return None
     _sig_bump("pass")
-    return _make_signal(df, cfg, direction, "ema_cross", curr["ema_fast"], curr["ema_slow"], curr["volume"], curr["volume_ma"])
+    return _make_signal(df, cfg, direction, f"ema_cross_{direction.lower()}", curr["ema_fast"], curr["ema_slow"], curr["volume"], curr["volume_ma"])
 
 
 # 2. SMA cross
@@ -355,7 +388,7 @@ def get_signal_sma_cross(df: pd.DataFrame, cfg: Config,
         _sig_bump("htf")
         return None
     _sig_bump("pass")
-    return _make_signal(df, cfg, direction, "sma_cross", curr.get("sma_fast", 0), curr.get("sma_slow", 0), curr["volume"], curr["volume_ma"])
+    return _make_signal(df, cfg, direction, f"sma_cross_{direction.lower()}", curr.get("sma_fast", 0), curr.get("sma_slow", 0), curr["volume"], curr["volume_ma"])
 
 
 # 3. RSI bounce
@@ -978,6 +1011,132 @@ def get_signal_engulfing(df: pd.DataFrame, cfg: Config,
                         curr.get("volume", 0), curr.get("volume_ma", 0))
 
 
+def get_signal_inside_bar_rsi(df: pd.DataFrame, cfg: Config,
+                              htf_trend: Optional[str] = None) -> Optional[Signal]:
+    """
+    Inside Bar Breakout LONG + RSI>=70 (paper-forward наблюдение).
+
+    Правило (из backtest_insidebar + анализ RSI):
+      - консолидация: MB + 1..5 IB, последняя свеча закрылась ВЫШЕ
+        consolidation_high (пробой LONG),
+      - RSI последней свечи >= 70,
+      - объём последней свечи >= 1.5 * volume_ma20,
+      - SL = consolidation_low, TP = 2 * (entry - SL).
+
+    Уровни задаются ЯВНО (не через _make_signal), чтобы main.py не пересчитал их
+    по ATR: пресет в PRESET_CONFIG не имеет ключа "tp", поэтому пересчёт не сработает.
+    """
+    if len(df) < 30:
+        return None
+    # Требуем колонки индикаторов
+    if not _safe_series(df, "rsi") or not _safe_series(df, "volume_ma") or not _safe_series(df, "volume"):
+        return None
+    if pd.isna(df["rsi"].iloc[-1]) or pd.isna(df["volume_ma"].iloc[-1]):
+        return None
+
+    # 1) Находим самую свежую консолидацию, заканчивающуюся НЕ позже len-2
+    #    (последняя свеча = пробой). Сканируем от конца.
+    n = len(df)
+    found = None
+    for end in range(n - 2, max(n - 30, 0), -1):  # end = индекс последнего IB
+        # идём назад, пока свечи вложены (IB внутри предыдущей, допускаем касание)
+        j = end
+        # MB перед серией IB: серия IB это j..end
+        # Начинаем собирать IB-серию с end назад
+        ib_series = []
+        k = end
+        # проверяем вложенность end в end-1, end-1 в end-2, ... собираем максимум 5
+        # но нам нужна серия, заканчивающаяся на end, с >=1 IB
+        max_back = min(end, 6)
+        ok = True
+        mb_idx = None
+        for back in range(0, max_back):
+            cur_idx = end - back
+            prev_idx = cur_idx - 1
+            if prev_idx < 0:
+                ok = False
+                break
+            h_cur, h_prev = float(df["high"].iloc[cur_idx]), float(df["high"].iloc[prev_idx])
+            l_cur, l_prev = float(df["low"].iloc[cur_idx]), float(df["low"].iloc[prev_idx])
+            inside = (h_cur <= h_prev and l_cur >= l_prev and not (h_cur == h_prev and l_cur == l_prev))
+            if inside:
+                ib_series.append(cur_idx)
+            else:
+                # текущая cur_idx не вложена — она кандидат на MB, серия закончена
+                mb_idx = cur_idx
+                break
+        if mb_idx is None or not ib_series:
+            continue
+        ib_series = ib_series[::-1]  # от MB вперёд
+        n_ib = len(ib_series)
+        age = end - mb_idx + 1
+        if not (1 <= n_ib <= 5) or age > 24:
+            continue
+        seg = df.iloc[mb_idx:end + 1]
+        found = {
+            "mb_idx": mb_idx,
+            "last_ib_idx": end,
+            "cons_high": float(seg["high"].max()),
+            "cons_low": float(seg["low"].min()),
+        }
+        break  # берём самую свежую
+
+    if found is None:
+        return None
+
+    # 2) Пробой LONG на последней свече (close выше consolidation_high)
+    last = df.iloc[-1]
+    close_last = float(last["close"])
+    if close_last <= found["cons_high"]:
+        return None  # только LONG пробой вверх
+
+    # 2b) Только ПЕРВАЯ свеча серии пробоя: предыдущая не должна быть уже выше
+    if len(df) >= 2:
+        prev_close = float(df["close"].iloc[-2])
+        if prev_close > found["cons_high"]:
+            return None  # это не первая свеча пробоя — консолидация уже отработана
+
+    # 3) RSI >= 70
+    rsi_last = float(last["rsi"])
+    if rsi_last < 70:
+        return None
+
+    # 4) Объём >= 1.5 * volume_ma20
+    vol_last = float(last["volume"])
+    vol_ma_last = float(last["volume_ma"])
+    if vol_ma_last <= 0 or vol_last < vol_ma_last * 1.5:
+        return None
+
+    _sig_bump("inside_bar_rsi")
+    entry = close_last
+    sl = found["cons_low"]
+    tp = entry + 2.0 * (entry - sl)
+    curr = last
+    return Signal(
+        direction="LONG",
+        entry_price=round(entry, 8),
+        sl_price=round(sl, 8),
+        tp1_price=round(tp, 8),
+        tp2_price=round(tp, 8),
+        timestamp=curr.name if isinstance(curr.name, pd.Timestamp) else pd.Timestamp(curr.name),
+        preset="inside_bar_rsi_long",
+        ema_fast=round(float(curr.get("ema_fast", 0) or 0), 4),
+        ema_slow=round(float(curr.get("ema_slow", 0) or 0), 4),
+        volume=round(float(curr.get("volume", 0) or 0), 2),
+        volume_ma=round(float(curr.get("volume_ma", 0) or 0), 2),
+        rsi=round(float(curr.get("rsi", 0) or 0), 2),
+        macd=round(float(curr.get("macd", 0) or 0), 8),
+        macd_signal=round(float(curr.get("macd_signal", 0) or 0), 8),
+        macd_hist=round(float(curr.get("macd_hist", 0) or 0), 8),
+        bb_upper=round(float(curr.get("bb_upper", 0) or 0), 4),
+        bb_middle=round(float(curr.get("bb_middle", 0) or 0), 4),
+        bb_lower=round(float(curr.get("bb_lower", 0) or 0), 4),
+        atr=round(float(curr.get("atr", 0) or 0), 8),
+        quote_volume=round(float(curr.get("quote_volume", 0) or 0), 2),
+        mode=getattr(cfg, "mode", None),
+    )
+
+
 # ── Main entry point ──────────────────────────────────────────────────────
 
 def get_signal(
@@ -985,8 +1144,9 @@ def get_signal(
     cfg: Config,
     htf_trend: Optional[str] = None,
     enabled_presets: Optional[list[str]] = None,
+    min_consensus: int = 1,
 ) -> Optional[Signal]:
-    signals = get_all_signals(df, cfg, htf_trend, enabled_presets)
+    signals = get_all_signals(df, cfg, htf_trend, enabled_presets, min_consensus=min_consensus)
     if not signals:
         return None
     signals.sort(key=lambda s: s.volume, reverse=True)
@@ -998,6 +1158,7 @@ def get_all_signals(
     cfg: Config,
     htf_trend: Optional[str] = None,
     enabled_presets: Optional[list[str]] = None,
+    min_consensus: int = 1,
 ) -> list[Signal]:
     if enabled_presets is None:
         enabled_presets = ["ema_cross_long", "ema_cross_short"]
@@ -1052,7 +1213,19 @@ def get_all_signals(
         "evening_star": get_signal_candlestick,
         "engulfing_long": get_signal_engulfing,
         "engulfing_short": get_signal_engulfing,
+        "inside_bar_rsi_long": get_signal_inside_bar_rsi,
     }
+
+    # Базовая стратегия = имя пресета без _long/_short. Пара _long/_short — одна функция,
+    # и не должна давать 2 "голоса" в консенсусе.
+    def _base(preset_name: str) -> str:
+        for suffix in ("_long", "_short"):
+            if preset_name.endswith(suffix):
+                return preset_name[: -len(suffix)]
+        return preset_name
+
+    # Сначала собираем все сигналы
+    raw_signals = []
     for preset_name in presets:
         func = preset_funcs.get(preset_name)
         if func is None:
@@ -1060,7 +1233,33 @@ def get_all_signals(
         sig = func(df, cfg, htf_trend)
         if sig is not None:
             sig.preset = preset_name
+            raw_signals.append(sig)
+
+    if min_consensus <= 1:
+        # Старое поведение: один сигнал на направление, берём max volume
+        for sig in raw_signals:
             if sig.direction not in seen_directions:
                 results.append(sig)
                 seen_directions.add(sig.direction)
+        return results
+
+    # Консенсус: считаем голоса РАЗНЫХ базовых стратегий по каждому направлению
+    votes: dict[str, set[str]] = {}   # direction -> set(base_strategy)
+    for sig in raw_signals:
+        votes.setdefault(sig.direction, set()).add(_base(sig.preset))
+
+    # Возвращаем по одному сигналу (max volume среди согласных) на направление,
+    # если поддержано >= min_consensus разными стратегиями
+    for direction, bases in votes.items():
+        if direction in seen_directions:
+            continue
+        if len(bases) < min_consensus:
+            continue
+        candidates = [s for s in raw_signals if s.direction == direction]
+        candidates.sort(key=lambda s: s.volume, reverse=True)
+        if candidates:
+            chosen = candidates[0]
+            chosen.voting_bases = sorted(bases)
+            results.append(chosen)
+            seen_directions.add(direction)
     return results
