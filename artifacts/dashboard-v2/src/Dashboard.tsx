@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx } from "./hooks/useApi";
+import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus } from "./hooks/useApi";
 import { Button } from "./components/ui/button";
 import * as lightweightCharts from "lightweight-charts";
 
@@ -22,8 +22,11 @@ export default function Dashboard() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const [adxStatus, setAdxStatus] = useState<Record<string, { adx: number | null; gate: number; ok: boolean }>>({});
+  const [botsStatus, setBotsStatus] = useState<Record<string, { is_running: boolean; position: any; current_price: number | null; last_heartbeat: string }>>({});
   const [gridNLevels, setGridNLevels] = useState<number>(10);
   const [gridGate, setGridGate] = useState<number>(15);
+  const [tpPct, setTpPct] = useState<number | null>(null);
+  const [tradingActive, setTradingActive] = useState<Record<string, boolean>>({});
   const chartInstanceRef = useRef<any>(null);
   const chartSeriesRef = useRef<any>(null);
   const chartMarkersSeriesRef = useRef<any>(null);
@@ -66,21 +69,43 @@ export default function Dashboard() {
   useEffect(() => {
     if (!selectedPair) return;
     let cancelled = false;
+    const loadBots = async () => {
+      try {
+        const data = await fetchBotsStatus();
+        if (!cancelled && Object.keys(data).length > 0) {
+          setBotsStatus(data);
+        }
+      } catch {
+        // ignore transient errors
+      }
+    };
+    loadBots();
+    const id = setInterval(loadBots, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [selectedPair]);
+
+  useEffect(() => {
+    if (!selectedPair) return;
+    let cancelled = false;
     const loadAdx = async () => {
       try {
         const data = await fetchAdx();
         const normalized: Record<string, { adx: number | null; gate: number; ok: boolean }> = {};
         Object.entries(data || {}).forEach(([symbol, tfMap]) => {
           const entry = tfMap as Record<string, { adx: number | null; gate: number; ok: boolean }>;
-          if (entry["1h"] || entry["4h"]) {
-            normalized[symbol] = {
-              adx: entry["1h"]?.adx ?? entry["4h"]?.adx ?? null,
-              gate: entry["1h"]?.gate ?? entry["4h"]?.gate ?? 15,
-              ok: (entry["1h"]?.ok ?? false) || (entry["4h"]?.ok ?? false),
-            };
-            (normalized[symbol] as any).tf1h = entry["1h"] || null;
-            (normalized[symbol] as any).tf4h = entry["4h"] || null;
-          }
+          const tfs = ["1h", "4h", "12h", "1d"].filter((tf) => entry[tf]);
+          if (tfs.length === 0) return;
+          const adx = tfs.map((tf) => entry[tf].adx).find((v) => v != null) ?? null;
+          const gate = entry[tfs[0]]?.gate ?? 15;
+          const ok = tfs.some((tf) => entry[tf].ok);
+          normalized[symbol] = { adx, gate, ok };
+          (normalized[symbol] as any).tf1h = entry["1h"] || null;
+          (normalized[symbol] as any).tf4h = entry["4h"] || null;
+          (normalized[symbol] as any).tf12h = entry["12h"] || null;
+          (normalized[symbol] as any).tf1d = entry["1d"] || null;
         });
         if (!cancelled && Object.keys(normalized).length > 0) {
           setAdxStatus(normalized);
@@ -185,7 +210,8 @@ export default function Dashboard() {
 
   const calcGridLevels = useCallback((rows: Candle[], nLevels = 10) => {
     if (rows.length < 20) return [];
-    const candlesPerDay = timeframe === "4h" ? 6 : timeframe === "1h" ? 24 : 6;
+    const candlesPerDay =
+      timeframe === "4h" ? 6 : timeframe === "12h" ? 2 : timeframe === "1h" ? 24 : 1;
     const lookback = 8 * candlesPerDay;
     const tail = rows.slice(-lookback);
     if (tail.length < 10) return [];
@@ -326,11 +352,13 @@ export default function Dashboard() {
         } catch {}
       }
       const gridLevels = calcGridLevels(chartData, gridNLevels);
-      const adx = adxStatus[selectedPair || ""] as any;
+      const adx = adxStatus[selectedPair || ""];
       const adx1h = adx?.tf1h?.adx ?? null;
       const adx4h = adx?.tf4h?.adx ?? null;
-      const passesGate =
-        (adx1h != null && adx1h < gridGate) || (adx4h != null && adx4h < gridGate);
+      const adx12h = adx?.tf12h?.adx ?? null;
+      const adx1d = adx?.tf1d?.adx ?? null;
+      const relevantAdx = [adx1h, adx4h, adx12h, adx1d].find((v) => v != null) ?? null;
+      const passesGate = relevantAdx != null && relevantAdx < gridGate;
       if (passesGate && gridLevels.length > 0) {
         gridLevels.forEach((level) => {
           try {
@@ -409,32 +437,49 @@ export default function Dashboard() {
                   {iv}
                 </Button>
               ))}
+          </div>
+          {tpPct != null && (
+            <div className="mb-2 text-xs text-black">
+              estimated profit: {(() => {
+                const lows = chartData.map((r) => r.low);
+                const highs = chartData.map((r) => r.high);
+                const lo = Math.min(...lows);
+                const hi = Math.max(...highs);
+                const range = hi - lo;
+                const estimated = range * (tpPct / 100);
+                return Number.isFinite(estimated) ? `~${estimated.toFixed(4)} USDT` : "N/A";
+              })()}
             </div>
+          )}
           </div>
           <div className="mb-2 flex flex-wrap gap-2 text-xs">
-            <span className="font-semibold text-black">ADX &lt; {gridGate} (4h):</span>
-            {pairs.filter((p) => (adxStatus[p]?.tf4h?.adx ?? Infinity) < gridGate).length === 0 && (
-              <span className="text-zinc-500">нет данных</span>
-            )}
-            {pairs
-              .filter((p) => (adxStatus[p]?.tf4h?.adx ?? Infinity) < gridGate)
-              .map((p) => (
-                <span key={`4h-${p}`} className="rounded bg-emerald-100 px-2 py-0.5 text-emerald-700">
-                  {p}
-                </span>
-              ))}
-            <span className="ml-2 font-semibold text-black">ADX &lt; {gridGate} (1h):</span>
-            {pairs.filter((p) => (adxStatus[p]?.tf1h?.adx ?? Infinity) < gridGate).length === 0 && (
-              <span className="text-zinc-500">нет данных</span>
-            )}
-            {pairs
-              .filter((p) => (adxStatus[p]?.tf1h?.adx ?? Infinity) < gridGate)
-              .map((p) => (
-                <span key={`1h-${p}`} className="rounded bg-sky-100 px-2 py-0.5 text-sky-700">
-                  {p}
-                </span>
-              ))}
-            <span className="ml-2 font-semibold text-black">Grid:</span>
+            {(["1h", "4h", "12h", "1d"] as const).map((tf) => {
+              const tfKey = `tf${tf}` as keyof typeof adxStatus[string];
+              const color =
+                tf === "1h"
+                  ? "bg-sky-100 text-sky-700"
+                  : tf === "4h"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : tf === "12h"
+                      ? "bg-amber-100 text-amber-700"
+                      : "bg-purple-100 text-purple-700";
+              return (
+                <>
+                  <span className="font-semibold text-black">ADX &lt; {gridGate} ({tf}):</span>
+                  {pairs.filter((p) => (adxStatus[p]?.[tfKey]?.adx ?? Infinity) < gridGate).length === 0 && (
+                    <span className="text-zinc-500">нет данных</span>
+                  )}
+                  {pairs
+                    .filter((p) => (adxStatus[p]?.[tfKey]?.adx ?? Infinity) < gridGate)
+                    .map((p) => (
+                      <span key={`${tf}-${p}`} className={`rounded px-2 py-0.5 ${color}`}>
+                        {p}
+                      </span>
+                    ))}
+                </>
+              );
+            })}
+            <span className="ml-2 font-semibold text-black">Кол-во:</span>
             <Button
               size="sm"
               variant={gridNLevels === 10 ? "default" : "outline"}
@@ -478,8 +523,105 @@ export default function Dashboard() {
                 {g}
               </Button>
             ))}
+            <span className="ml-2 font-semibold text-black">TP %:</span>
+            {([1, 2, 5, 10] as const).map((pct) => (
+              <Button
+                key={pct}
+                size="sm"
+                variant={tpPct === pct ? "default" : "outline"}
+                onClick={() => setTpPct(tpPct === pct ? null : pct)}
+                className={
+                  "min-w-[40px] " +
+                  (tpPct === pct
+                    ? "bg-black text-white hover:bg-black/90"
+                    : "bg-white text-black border-gray-300 hover:bg-gray-100")
+                }
+              >
+                {pct}%
+              </Button>
+            ))}
+            <Button
+              size="sm"
+              variant={tradingActive[selectedPair || ""] ? "default" : "outline"}
+              onClick={() => {
+                setTradingActive((prev) => ({
+                  ...prev,
+                  [selectedPair || ""]: !prev[selectedPair || ""],
+                }));
+              }}
+              className={
+                "ml-2 " +
+                (tradingActive[selectedPair || ""]
+                  ? "bg-green-600 text-white hover:bg-green-700"
+                  : "bg-white text-black border-gray-300 hover:bg-gray-100")
+              }
+            >
+              {tradingActive[selectedPair || ""] ? "trading enabled" : "start trading"}
+            </Button>
           </div>
           <div ref={chartRef} className="h-[400px] w-full border" />
+          {selectedPair && (
+            <div className="mt-3 rounded border bg-white p-3 text-xs text-black">
+              <div className="font-semibold mb-1">Statistics</div>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3">
+                <div>pair: <span className="font-mono">{selectedPair}</span></div>
+                <div>grid TF: <span className="font-mono">{timeframe}</span></div>
+                <div>gate: <span className="font-mono">{gridGate}</span></div>
+                <div>levels: <span className="font-mono">{gridNLevels}</span></div>
+                <div>TP %: <span className="font-mono">{tpPct ?? "—"}</span></div>
+                <div>
+                  ADX ({timeframe}):{" "}
+                  <span className="font-mono">
+                    {adxStatus[selectedPair]?.[`tf${timeframe}` as any]?.adx ?? "—"}
+                  </span>
+                </div>
+                {(() => {
+                  const lows = chartData.map((r) => r.low);
+                  const highs = chartData.map((r) => r.high);
+                  const lo = lows.length ? Math.min(...lows) : null;
+                  const hi = highs.length ? Math.max(...highs) : null;
+                  return (
+                    <>
+                      <div>grid lo: <span className="font-mono">{lo != null ? lo.toFixed(4) : "—"}</span></div>
+                      <div>grid hi: <span className="font-mono">{hi != null ? hi.toFixed(4) : "—"}</span></div>
+                    </>
+                  );
+                })()}
+                <div>
+                  trading:{" "}
+                  <span className={tradingActive[selectedPair] ? "text-green-600" : "text-zinc-500"}>
+                    {tradingActive[selectedPair] ? "enabled" : "disabled"}
+                  </span>
+                </div>
+                <div>
+                  bot:{" "}
+                  <span className={botsStatus[selectedPair]?.is_running ? "text-green-600" : "text-zinc-500"}>
+                    {botsStatus[selectedPair]?.is_running ? "running" : "stopped"}
+                  </span>
+                </div>
+                <div>
+                  position:{" "}
+                  <span className="font-mono">
+                    {botsStatus[selectedPair]?.position ? "open" : "none"}
+                  </span>
+                </div>
+                <div>
+                  last price:{" "}
+                  <span className="font-mono">
+                    {botsStatus[selectedPair]?.current_price ?? lastPrice != null ? (botsStatus[selectedPair]?.current_price ?? lastPrice).toFixed(4) : "—"}
+                  </span>
+                </div>
+                <div className="col-span-2 sm:col-span-3">
+                  last heartbeat:{" "}
+                  <span className="font-mono">
+                    {botsStatus[selectedPair]?.last_heartbeat
+                      ? new Date(botsStatus[selectedPair].last_heartbeat).toLocaleString()
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

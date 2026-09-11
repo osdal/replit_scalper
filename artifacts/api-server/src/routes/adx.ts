@@ -101,11 +101,15 @@ const CACHE_MS = 30_000;
 
 async function computeForPair(symbol: string): Promise<Record<string, TfResult>> {
   const gate = 15;
-  const timeframes: ("1h" | "4h")[] = ["1h", "4h"];
+  const timeframes: Array<{ tf: "1h" | "4h" | "12h" | "1d"; limit: number }> = [
+    { tf: "1h", limit: 200 },
+    { tf: "4h", limit: 100 },
+    { tf: "12h", limit: 60 },
+    { tf: "1d", limit: 30 },
+  ];
   const entries = await Promise.all(
-    timeframes.map(async (tf) => {
+    timeframes.map(async ({ tf, limit }) => {
       try {
-        const limit = tf === "4h" ? 100 : 200;
         const klines = await getKlines(symbol, tf, limit);
         const highs = klines.map((k: any) => parseFloat(k[2]));
         const lows = klines.map((k: any) => parseFloat(k[3]));
