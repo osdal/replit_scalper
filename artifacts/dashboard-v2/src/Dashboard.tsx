@@ -27,24 +27,20 @@ export default function Dashboard() {
   const [gridGate, setGridGate] = useState<number>(15);
   const [tpPct, setTpPct] = useState<number | null>(null);
   const [tradingActive, setTradingActive] = useState<Record<string, boolean>>({});
-  const [paperTrades, setPaperTrades] = useState<Record<string, Array<{
-    entryPrice: number;
+  const [gridSim, setGridSim] = useState<Record<string, {
+    startPrice: number;
     tpPct: number;
-    side: "long";
-    openTime: Date;
-    closePrice?: number;
-    closeTime?: Date;
-    pnl?: number;
-    status: "open" | "closed";
-  }>>>({});
+    gridLevels: number;
+    unrealizedPnl: number | null;
+    realizedPnl: number;
+    lastResult: string | null;
+    startTime: Date;
+  }>>({});
   const [currentTpLine, setCurrentTpLine] = useState<number | null>(null);
-  const [unrealizedPnl, setUnrealizedPnl] = useState<number | null>(null);
-  const [realizedPnl, setRealizedPnl] = useState<number>(0);
   const chartInstanceRef = useRef<any>(null);
   const chartSeriesRef = useRef<any>(null);
   const chartMarkersSeriesRef = useRef<any>(null);
   const chartRef = useRef<HTMLDivElement>(null);
-  const tpPriceLineRef = useRef<any>(null);
 
    useEffect(() => {
     if (!selectedPair) return;
@@ -64,36 +60,35 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!selectedPair || !lastPrice || !tradingActive[selectedPair]) return;
-    const trades = paperTrades[selectedPair] || [];
-    const openTrade = trades.find((t) => t.status === "open");
-    if (!openTrade) return;
+    const sim = gridSim[selectedPair];
+    if (!sim) return;
 
-    const pnlPct = (lastPrice - openTrade.entryPrice) / openTrade.entryPrice * 100;
-    setUnrealizedPnl(pnlPct);
+    const pnlPct = (lastPrice - sim.startPrice) / sim.startPrice * 100;
+    setGridSim((prev) => ({
+      ...prev,
+      [selectedPair]: { ...prev[selectedPair], unrealizedPnl: pnlPct },
+    }));
 
-    const tpTarget = openTrade.entryPrice * (1 + openTrade.tpPct / 100);
+    const tpTarget = sim.startPrice * (1 + sim.tpPct / 100);
     if (lastPrice >= tpTarget) {
-      setPaperTrades((prev) => {
-        const updated = (prev[selectedPair] || []).map((t) => {
-          if (t.status === "open") {
-            const pnl = (lastPrice - t.entryPrice) / t.entryPrice * 100;
-            setRealizedPnl((r) => r + pnl);
-            return {
-              ...t,
-              closePrice: lastPrice,
-              closeTime: new Date(),
-              pnl,
-              status: "closed" as const,
-            };
-          }
-          return t;
-        });
-        return { ...prev, [selectedPair]: updated };
+      setGridSim((prev) => {
+        const current = prev[selectedPair];
+        if (!current) return prev;
+        const totalPnl = current.realizedPnl + (current.unrealizedPnl ?? 0);
+        return {
+          ...prev,
+          [selectedPair]: {
+            ...current,
+            realizedPnl: totalPnl,
+            unrealizedPnl: null,
+            lastResult: `${totalPnl.toFixed(2)}%`,
+          },
+        };
       });
       setCurrentTpLine(null);
-      setUnrealizedPnl(null);
+      setTradingActive((prev) => ({ ...prev, [selectedPair]: false }));
     }
-  }, [selectedPair, timeframe, lastPrice, tradingActive, paperTrades]);
+  }, [selectedPair, timeframe, lastPrice, tradingActive, gridSim]);
 
   const loadPairs = useCallback(async () => {
     try {
@@ -428,14 +423,14 @@ export default function Dashboard() {
             lineWidth: 2,
             lineStyle: 0,
             axisLabelVisible: true,
-            title: `TP ${paperTrades[selectedPair || ""]?.find((t) => t.status === "open")?.tpPct ?? ""}%`,
+            title: `TP ${gridSim[selectedPair || ""]?.tpPct ?? ""}%`,
           });
         } catch {}
       }
     };
     const id = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(id);
-  }, [chartData, calcLevels, calcGridLevels, gridGate, gridNLevels, selectedPair, adxStatus, currentTpLine, paperTrades]);
+  }, [chartData, calcLevels, calcGridLevels, gridGate, gridNLevels, selectedPair, adxStatus, currentTpLine, gridSim]);
 
   if (loading) {
     return <div className="p-6">Loading pairs...</div>;
@@ -606,43 +601,37 @@ export default function Dashboard() {
                 const pair = selectedPair || "";
                 const isActive = !!tradingActive[pair];
                 if (!isActive && lastPrice && tpPct) {
-                  const trade = {
-                    entryPrice: lastPrice,
-                    tpPct,
-                    side: "long" as const,
-                    openTime: new Date(),
-                    status: "open" as const,
-                  };
-                  setPaperTrades((prev) => ({
+                  const lows = chartData.map((r) => r.low);
+                  const highs = chartData.map((r) => r.high);
+                  const lo = lows.length ? Math.min(...lows) : lastPrice;
+                  const hi = highs.length ? Math.max(...highs) : lastPrice;
+                  const gridLevels = calcGridLevels(chartData, gridNLevels);
+                  setGridSim((prev) => ({
                     ...prev,
-                    [pair]: [...(prev[pair] || []), trade],
+                    [pair]: {
+                      startPrice: lastPrice,
+                      tpPct,
+                      gridLevels: gridLevels.length,
+                      unrealizedPnl: 0,
+                      realizedPnl: prev[pair]?.realizedPnl ?? 0,
+                      lastResult: null,
+                      startTime: new Date(),
+                    },
                   }));
-                  const tpPrice = lastPrice * (1 + tpPct / 100);
-                  setCurrentTpLine(tpPrice);
-                  setUnrealizedPnl(0);
+                  setCurrentTpLine(lastPrice * (1 + tpPct / 100));
                 } else if (isActive) {
-                  if (lastPrice) {
-                    setPaperTrades((prev) => {
-                      const trades = prev[pair] || [];
-                      const updated = trades.map((t) => {
-                        if (t.status === "open") {
-                          const pnl = (lastPrice - t.entryPrice) / t.entryPrice * 100;
-                          setRealizedPnl((r) => r + pnl);
-                          return {
-                            ...t,
-                            closePrice: lastPrice,
-                            closeTime: new Date(),
-                            pnl,
-                            status: "closed" as const,
-                          };
-                        }
-                        return t;
-                      });
-                      return { ...prev, [pair]: updated };
-                    });
-                  }
+                  setGridSim((prev) => {
+                    const current = prev[pair];
+                    if (!current) return prev;
+                    const updated = {
+                      ...current,
+                      realizedPnl: current.realizedPnl + (current.unrealizedPnl ?? 0),
+                      unrealizedPnl: null,
+                      lastResult: `${(current.realizedPnl + (current.unrealizedPnl ?? 0)).toFixed(2)}%`,
+                    };
+                    return { ...prev, [pair]: updated };
+                  });
                   setCurrentTpLine(null);
-                  setUnrealizedPnl(null);
                 }
                 setTradingActive((prev) => ({
                   ...prev,
@@ -673,39 +662,22 @@ export default function Dashboard() {
                 </div>
                 {tradingActive[selectedPair] && (
                   <>
-                    <div>grid TF: <span className="font-mono">{timeframe}</span></div>
-                    <div>gate: <span className="font-mono">{gridGate}</span></div>
-                    <div>levels: <span className="font-mono">{gridNLevels}</span></div>
-                    <div>TP %: <span className="font-mono">{tpPct ?? "—"}</span></div>
-                    <div>
-                      ADX ({timeframe}):{" "}
-                      <span className="font-mono">
-                        {adxStatus[selectedPair]?.[`tf${timeframe}` as any]?.adx ?? "—"}
-                      </span>
-                    </div>
+                    <div>grid levels: <span className="font-mono">{gridSim[selectedPair]?.gridLevels ?? "—"}</span></div>
                     <div>
                       unrealized PnL:{" "}
-                      <span className={unrealizedPnl != null ? (unrealizedPnl >= 0 ? "text-green-600" : "text-red-600") : ""}>
-                        {unrealizedPnl != null ? `${unrealizedPnl.toFixed(2)}%` : "—"}
+                      <span className={`font-mono ${(gridSim[selectedPair]?.unrealizedPnl ?? 0) >= 0 ? "text-green-600" : "text-red-600"}`}>
+                        {(gridSim[selectedPair]?.unrealizedPnl ?? 0).toFixed(2)}%
                       </span>
                     </div>
                     <div>
                       realized PnL:{" "}
-                      <span className={realizedPnl >= 0 ? "text-green-600" : "text-red-600"}>
-                        {realizedPnl.toFixed(2)}%
+                      <span className={`font-mono ${(gridSim[selectedPair]?.realizedPnl ?? 0) >= 0 ? "text-green-600" : "text-red-600"}`}>
+                        {(gridSim[selectedPair]?.realizedPnl ?? 0).toFixed(2)}%
                       </span>
                     </div>
                     <div>
-                      last trade:{" "}
-                      <span className="font-mono">
-                        {(() => {
-                          const trades = paperTrades[selectedPair] || [];
-                          const last = [...trades].reverse().find((t) => t.status === "closed");
-                          if (!last) return "—";
-                          const sign = last.pnl && last.pnl >= 0 ? "+" : "";
-                          return `${sign}${last.pnl?.toFixed(2)}%`;
-                        })()}
-                      </span>
+                      last result:{" "}
+                      <span className="font-mono">{gridSim[selectedPair]?.lastResult ?? "—"}</span>
                     </div>
                   </>
                 )}
