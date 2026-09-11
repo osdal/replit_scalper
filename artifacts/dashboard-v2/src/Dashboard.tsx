@@ -27,10 +27,24 @@ export default function Dashboard() {
   const [gridGate, setGridGate] = useState<number>(15);
   const [tpPct, setTpPct] = useState<number | null>(null);
   const [tradingActive, setTradingActive] = useState<Record<string, boolean>>({});
+  const [paperTrades, setPaperTrades] = useState<Record<string, Array<{
+    entryPrice: number;
+    tpPct: number;
+    side: "long";
+    openTime: Date;
+    closePrice?: number;
+    closeTime?: Date;
+    pnl?: number;
+    status: "open" | "closed";
+  }>>>({});
+  const [currentTpLine, setCurrentTpLine] = useState<number | null>(null);
+  const [unrealizedPnl, setUnrealizedPnl] = useState<number | null>(null);
+  const [realizedPnl, setRealizedPnl] = useState<number>(0);
   const chartInstanceRef = useRef<any>(null);
   const chartSeriesRef = useRef<any>(null);
   const chartMarkersSeriesRef = useRef<any>(null);
   const chartRef = useRef<HTMLDivElement>(null);
+  const tpPriceLineRef = useRef<any>(null);
 
    useEffect(() => {
     if (!selectedPair) return;
@@ -47,6 +61,39 @@ export default function Dashboard() {
     }, 10_000);
     return () => clearInterval(id);
   }, [selectedPair, timeframe]);
+
+  useEffect(() => {
+    if (!selectedPair || !lastPrice || !tradingActive[selectedPair]) return;
+    const trades = paperTrades[selectedPair] || [];
+    const openTrade = trades.find((t) => t.status === "open");
+    if (!openTrade) return;
+
+    const pnlPct = (lastPrice - openTrade.entryPrice) / openTrade.entryPrice * 100;
+    setUnrealizedPnl(pnlPct);
+
+    const tpTarget = openTrade.entryPrice * (1 + openTrade.tpPct / 100);
+    if (lastPrice >= tpTarget) {
+      setPaperTrades((prev) => {
+        const updated = (prev[selectedPair] || []).map((t) => {
+          if (t.status === "open") {
+            const pnl = (lastPrice - t.entryPrice) / t.entryPrice * 100;
+            setRealizedPnl((r) => r + pnl);
+            return {
+              ...t,
+              closePrice: lastPrice,
+              closeTime: new Date(),
+              pnl,
+              status: "closed" as const,
+            };
+          }
+          return t;
+        });
+        return { ...prev, [selectedPair]: updated };
+      });
+      setCurrentTpLine(null);
+      setUnrealizedPnl(null);
+    }
+  }, [selectedPair, timeframe, lastPrice, tradingActive, paperTrades]);
 
   const loadPairs = useCallback(async () => {
     try {
@@ -373,10 +420,22 @@ export default function Dashboard() {
           } catch {}
         });
       }
+      if (currentTpLine && chartSeriesRef.current) {
+        try {
+          chartSeriesRef.current.createPriceLine({
+            price: currentTpLine,
+            color: "#3b82f6",
+            lineWidth: 2,
+            lineStyle: 0,
+            axisLabelVisible: true,
+            title: `TP ${paperTrades[selectedPair || ""]?.find((t) => t.status === "open")?.tpPct ?? ""}%`,
+          });
+        } catch {}
+      }
     };
     const id = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(id);
-  }, [chartData, calcLevels, calcGridLevels, gridGate, gridNLevels, selectedPair, adxStatus]);
+  }, [chartData, calcLevels, calcGridLevels, gridGate, gridNLevels, selectedPair, adxStatus, currentTpLine, paperTrades]);
 
   if (loading) {
     return <div className="p-6">Loading pairs...</div>;
@@ -544,9 +603,50 @@ export default function Dashboard() {
               size="sm"
               variant={tradingActive[selectedPair || ""] ? "default" : "outline"}
               onClick={() => {
+                const pair = selectedPair || "";
+                const isActive = !!tradingActive[pair];
+                if (!isActive && lastPrice && tpPct) {
+                  const trade = {
+                    entryPrice: lastPrice,
+                    tpPct,
+                    side: "long" as const,
+                    openTime: new Date(),
+                    status: "open" as const,
+                  };
+                  setPaperTrades((prev) => ({
+                    ...prev,
+                    [pair]: [...(prev[pair] || []), trade],
+                  }));
+                  const tpPrice = lastPrice * (1 + tpPct / 100);
+                  setCurrentTpLine(tpPrice);
+                  setUnrealizedPnl(0);
+                } else if (isActive) {
+                  if (lastPrice) {
+                    setPaperTrades((prev) => {
+                      const trades = prev[pair] || [];
+                      const updated = trades.map((t) => {
+                        if (t.status === "open") {
+                          const pnl = (lastPrice - t.entryPrice) / t.entryPrice * 100;
+                          setRealizedPnl((r) => r + pnl);
+                          return {
+                            ...t,
+                            closePrice: lastPrice,
+                            closeTime: new Date(),
+                            pnl,
+                            status: "closed" as const,
+                          };
+                        }
+                        return t;
+                      });
+                      return { ...prev, [pair]: updated };
+                    });
+                  }
+                  setCurrentTpLine(null);
+                  setUnrealizedPnl(null);
+                }
                 setTradingActive((prev) => ({
                   ...prev,
-                  [selectedPair || ""]: !prev[selectedPair || ""],
+                  [pair]: !isActive,
                 }));
               }}
               className={
@@ -565,34 +665,76 @@ export default function Dashboard() {
               <div className="font-semibold mb-1">Statistics</div>
               <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3">
                 <div>pair: <span className="font-mono">{selectedPair}</span></div>
-                <div>grid TF: <span className="font-mono">{timeframe}</span></div>
-                <div>gate: <span className="font-mono">{gridGate}</span></div>
-                <div>levels: <span className="font-mono">{gridNLevels}</span></div>
-                <div>TP %: <span className="font-mono">{tpPct ?? "—"}</span></div>
-                <div>
-                  ADX ({timeframe}):{" "}
-                  <span className="font-mono">
-                    {adxStatus[selectedPair]?.[`tf${timeframe}` as any]?.adx ?? "—"}
-                  </span>
-                </div>
-                {(() => {
-                  const lows = chartData.map((r) => r.low);
-                  const highs = chartData.map((r) => r.high);
-                  const lo = lows.length ? Math.min(...lows) : null;
-                  const hi = highs.length ? Math.max(...highs) : null;
-                  return (
-                    <>
-                      <div>grid lo: <span className="font-mono">{lo != null ? lo.toFixed(4) : "—"}</span></div>
-                      <div>grid hi: <span className="font-mono">{hi != null ? hi.toFixed(4) : "—"}</span></div>
-                    </>
-                  );
-                })()}
                 <div>
                   trading:{" "}
                   <span className={tradingActive[selectedPair] ? "text-green-600" : "text-zinc-500"}>
                     {tradingActive[selectedPair] ? "enabled" : "disabled"}
                   </span>
                 </div>
+                {tradingActive[selectedPair] && (
+                  <>
+                    <div>grid TF: <span className="font-mono">{timeframe}</span></div>
+                    <div>gate: <span className="font-mono">{gridGate}</span></div>
+                    <div>levels: <span className="font-mono">{gridNLevels}</span></div>
+                    <div>TP %: <span className="font-mono">{tpPct ?? "—"}</span></div>
+                    <div>
+                      ADX ({timeframe}):{" "}
+                      <span className="font-mono">
+                        {adxStatus[selectedPair]?.[`tf${timeframe}` as any]?.adx ?? "—"}
+                      </span>
+                    </div>
+                    <div>
+                      unrealized PnL:{" "}
+                      <span className={unrealizedPnl != null ? (unrealizedPnl >= 0 ? "text-green-600" : "text-red-600") : ""}>
+                        {unrealizedPnl != null ? `${unrealizedPnl.toFixed(2)}%` : "—"}
+                      </span>
+                    </div>
+                    <div>
+                      realized PnL:{" "}
+                      <span className={realizedPnl >= 0 ? "text-green-600" : "text-red-600"}>
+                        {realizedPnl.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div>
+                      last trade:{" "}
+                      <span className="font-mono">
+                        {(() => {
+                          const trades = paperTrades[selectedPair] || [];
+                          const last = [...trades].reverse().find((t) => t.status === "closed");
+                          if (!last) return "—";
+                          const sign = last.pnl && last.pnl >= 0 ? "+" : "";
+                          return `${sign}${last.pnl?.toFixed(2)}%`;
+                        })()}
+                      </span>
+                    </div>
+                  </>
+                )}
+                {!tradingActive[selectedPair] && (
+                  <>
+                    <div>grid TF: <span className="font-mono">{timeframe}</span></div>
+                    <div>gate: <span className="font-mono">{gridGate}</span></div>
+                    <div>levels: <span className="font-mono">{gridNLevels}</span></div>
+                    <div>TP %: <span className="font-mono">{tpPct ?? "—"}</span></div>
+                    <div>
+                      ADX ({timeframe}):{" "}
+                      <span className="font-mono">
+                        {adxStatus[selectedPair]?.[`tf${timeframe}` as any]?.adx ?? "—"}
+                      </span>
+                    </div>
+                    {(() => {
+                      const lows = chartData.map((r) => r.low);
+                      const highs = chartData.map((r) => r.high);
+                      const lo = lows.length ? Math.min(...lows) : null;
+                      const hi = highs.length ? Math.max(...highs) : null;
+                      return (
+                        <>
+                          <div>grid lo: <span className="font-mono">{lo != null ? lo.toFixed(4) : "—"}</span></div>
+                          <div>grid hi: <span className="font-mono">{hi != null ? hi.toFixed(4) : "—"}</span></div>
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
                 <div>
                   bot:{" "}
                   <span className={botsStatus[selectedPair]?.is_running ? "text-green-600" : "text-zinc-500"}>
