@@ -838,3 +838,22 @@ Daily-скрипт регистрируется в планировщике за
 - Добавлен `monitor-opt.ps1`
 - Добавлены вспомогательные скрипты в `scripts/`
 - Добавлены `apply_wf_results.py`, `apply_all_opt.py`, `apply_margin_pct.py`
+
+### Dashboard v2 (rtifacts/dashboard-v2/, порт 5175)
+- Отдельный React/Vite дашборд для визуализации: свечной график через lightweight-charts с локальным временем, timeframe-переключение 1h/4h/12h/1d, REST-поллинг цен через /api/ticker/price.
+- Поддержка/сопротивление: автоматические уровни по последним локальным экстремумам с маркерами на графике.
+- Grid-уровни (L10/L20) по методике acktest_grid_gated.py: диапазон за 8 дней, lo/hi = min(low)/max(high), уровни рисуются только если ADX < gate по 1h или 4h.
+- Бейджи ADX < gate в реальном времени для всех 35 пар на 1h и 4h, обновление раз в 60с.
+- /api/adx: параллельный расчёт ADX по всем парам из ot/config_*.yaml, кэш 30с, ответ за ~1с.
+- Скрипт запуска start_grid.ps1 / start_grid.bat: поднимает API (5000) + dashboard-v2 (5175).
+
+### Новые API-роуты
+- GET /api/pairs — список пар из config_*.yaml, Cache-Control: no-store.
+- GET /api/history/:symbol?interval=1h|4h|12h|1d — исторические свечи Binance Futures, per-symbol кэш.
+- GET /api/ticker/price/:symbol — текущая цена Futures.
+- GET /api/adx — ADX(14) по 1h и 4h для всех пар, возвращает {adx, gate, ok}.
+
+### Инструменты бэктеста
+- ot/backtest_grid.py — базовая grid-симуляция (arithmetic/geometric, FIFO, комиссия).
+- ot/backtest_grid_gated.py — grid + ADX gate (покупки только при ADX < gate, SL по lo).
+- ot/backtest_pinbar.py, ot/backtest_exit_modes.py, ot/backtest_range.py — отдельные бэктесты.
