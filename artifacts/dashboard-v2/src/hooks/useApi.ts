@@ -143,3 +143,25 @@ export async function fetchAdx(): Promise<Record<string, { adx: number | null; g
     return {};
   }
 }
+
+export async function fetchBotsStatus(): Promise<Record<string, { is_running: boolean; position: any; current_price: number | null; last_heartbeat: string }>> {
+  try {
+    const url = new URL(`${API}/bots`);
+    url.searchParams.set("_ts", String(Date.now()));
+    const r = await fetch(url.toString());
+    if (!r.ok) return {};
+    const data = await r.json();
+    const out: Record<string, { is_running: boolean; position: any; current_price: number | null; last_heartbeat: string }> = {};
+    for (const bot of data || []) {
+      out[bot.symbol] = {
+        is_running: !!bot.is_running,
+        position: bot.position || null,
+        current_price: bot.current_price != null ? Number(bot.current_price) : null,
+        last_heartbeat: bot.last_heartbeat || "",
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
