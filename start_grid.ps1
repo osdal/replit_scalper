@@ -14,17 +14,18 @@ function Kill-ProcessOnPort($port) {
 Kill-ProcessOnPort 5000
 Kill-ProcessOnPort 5175
 
+New-Item -ItemType Directory -Force -Path logs
+
 Write-Host "Starting API server on port 5000..."
-Start-Process -FilePath "cmd.exe" -ArgumentList "/c pnpm start:api" -NoNewWindow
+$logStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$apiLog = "logs\api-server_$logStamp.log"
+Start-Process -FilePath "cmd.exe" -ArgumentList "/c pnpm start:api > $apiLog 2>&1" -NoNewWindow
+Write-Host "API log: $apiLog"
 Start-Sleep -Seconds 5
 
-Write-Host "Downloading 1 month of daily candles from Binance..."
-try {
-    $r = Invoke-RestMethod -Uri "http://localhost:5000/api/history/download" -Method Post -TimeoutSec 120 -UseBasicParsing
-    Write-Host "History download result:" ($r | ConvertTo-Json -Compress)
-} catch {
-    Write-Warning "History download failed: $($_.Exception.Message)"
-}
+Write-Host "Triggering history download in background (non-blocking)..."
+Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-Command","try { Invoke-RestMethod -Uri 'http://localhost:5000/api/history/download' -Method Post -TimeoutSec 600 -UseBasicParsing | Out-Null } catch { }" -NoNewWindow
+Start-Sleep -Seconds 1
 
 Write-Host "Starting dashboard on port 5175..."
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c pnpm start:dashboard-v2" -NoNewWindow

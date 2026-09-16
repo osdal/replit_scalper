@@ -1,5 +1,6 @@
 import { db } from "@workspace/db";
 import { botsTable } from "@workspace/db/schema";
+import { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS } from "@workspace/db";
 import { sql, eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
@@ -120,6 +121,13 @@ const ctlColNames: string[] = (ctlCols as any[]).map((r: any) => String(r.name))
 if (!ctlColNames.includes("active_open")) {
   await db.run(sql`ALTER TABLE trading_control ADD COLUMN active_open INTEGER NOT NULL DEFAULT 0`);
   console.log("  Added column trading_control.active_open");
+}
+
+await db.run(sql.raw(GRID_HISTORY_CREATE_SQL));
+
+// Миграции: добавляем недостающие колонки в уже созданных БД.
+for (const migration of GRID_HISTORY_MIGRATIONS) {
+  await db.run(sql.raw(migration)).catch(() => { /* колонка уже есть */ });
 }
 
 console.log("Tables created");

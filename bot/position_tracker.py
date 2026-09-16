@@ -52,6 +52,11 @@ class Position:
     reject_reason: Optional[str] = None  # если задан — сделка помечена как REJECTED (не в статистике)
     regime_adx: float = 0.0          # ADX на момент входа (только бэктест, не сериализуется)
     regime_atr_pct: float = 0.0      # ATR% на момент входа (только бэктест)
+    is_reverse: bool = False         # True если позиция открыта после срабатывания SL (обратная)
+    reversed_from_pnl: float = 0.0   # PnL исходной позиции на момент открытия reverse
+    reversed_from_direction: str = ""  # направление исходной позиции
+    reversed_from_qty: float = 0.0   # объём исходной позиции
+    reversed_from_entry: float = 0.0 # цена входа исходной позиции
     regime_trend: str = ""           # наклон EMA на входе: "LONG"/"SHORT" (только бэктест)
     intrabar_return: float = 0.0     # движение внутри свечи входа (только бэктест)
     voting_bases: list = field(default_factory=list)  # согласовавшие стратегии (только бэктест)
@@ -305,6 +310,9 @@ class PositionTracker:
         """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
+        if trade_id is None:
+            self.log.warning("[REPORTER] _report_close_with_id called without trade_id; skip")
+            return
         try:
             import datetime
             commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
@@ -386,6 +394,11 @@ class PositionTracker:
         self, signal: Signal, qty: float,
         is_recovery: bool = False, recovery_chain_id: Optional[int] = None,
         reject_reason: Optional[str] = None,
+        is_reverse: bool = False,
+        reversed_from_pnl: float = 0.0,
+        reversed_from_direction: str = "",
+        reversed_from_qty: float = 0.0,
+        reversed_from_entry: float = 0.0,
     ) -> None:
         self.position = Position(
             direction=signal.direction,
@@ -412,6 +425,11 @@ class PositionTracker:
             mode=signal.mode,
             reject_reason=reject_reason,
             voting_bases=list(getattr(signal, "voting_bases", []) or []),
+            is_reverse=is_reverse,
+            reversed_from_pnl=reversed_from_pnl,
+            reversed_from_direction=reversed_from_direction,
+            reversed_from_qty=reversed_from_qty,
+            reversed_from_entry=reversed_from_entry,
         )
         self._trade_id = None
         self._save_state()
@@ -464,14 +482,14 @@ class PositionTracker:
         if p is None or p.closed:
             return None
         if p.direction == "LONG":
-            if current_price <= p.sl_price:
+            if p.sl_price > 0 and current_price <= p.sl_price:
                 return "SL"
             if not p.tp1_hit and current_price >= p.tp1_price:
                 return "TP1"
             if p.tp1_hit and current_price >= p.tp2_price:
                 return "TP2"
         else:
-            if current_price >= p.sl_price:
+            if p.sl_price > 0 and current_price >= p.sl_price:
                 return "SL"
             if not p.tp1_hit and current_price <= p.tp1_price:
                 return "TP1"
@@ -510,7 +528,7 @@ class PositionTracker:
             if hit == "TP1":
                 # Логируем вход в обработку TP1
                 qty_to_close = None
-                if p.is_recovery:
+                if p.is_reverse or p.is_recovery:
                     qty_to_close = p.remaining_qty
                 else:
                     tp1_qty = round(p.total_qty * self.cfg.tp1_close_pct / 100, 6)
@@ -518,8 +536,8 @@ class PositionTracker:
                 # Лог входа в обработку TP1
                 self.log.info(f"[TP1_START] position_id={self._trade_id} current_price={close_price} qty_to_close={qty_to_close} total_qty={p.total_qty}")
                     
-                if p.is_recovery:
-                    # Recovery-позиция: TP1 закрывает 100% позиции сразу
+                if p.is_recovery or p.is_reverse:
+                    # Recovery или reverse: TP1 закрывает 100% позиции сразу
                     qty = p.remaining_qty
                     pnl = self._calc_pnl(p.direction, p.entry_price, close_price, qty)
                     p.realized_pnl += pnl
@@ -615,6 +633,18 @@ class PositionTracker:
         last_event_pnl, exit_reason_override = self.apply_hit(hit, close_price)
         total_trade_pnl = accumulated_pnl_before + last_event_pnl
 
+        # Сохраняем данные исходной ноги ДО того, как apply_hit очистит позицию
+        p_before = p
+        is_reverse = p_before and getattr(p_before, "is_reverse", False)
+        orig_dir = getattr(p_before, "reversed_from_direction", "") if p_before else ""
+        orig_entry = getattr(p_before, "reversed_from_entry", 0.0) if p_before else 0.0
+        orig_qty = getattr(p_before, "reversed_from_qty", 0.0) if p_before else 0.0
+        orig_leg_pnl = getattr(p_before, "reversed_from_pnl", 0.0) if p_before else 0.0
+        pos_mode = getattr(p_before, "mode", "live") if p_before else "live"
+
+        if not is_reverse:
+            exit_reason = exit_reason_override or hit
+
         if is_recovery_tp1_full_close:
             await self._verify_position_closed(p.direction, 10)
             real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
@@ -634,7 +664,7 @@ class PositionTracker:
                 pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
                 if trade_id_before:
                     qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, "TP1", entry_price_before, reject_reason=reject_before)
+                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before, reject_reason=reject_before)
                 await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
                 if real_pnl is not None:
                     total_trade_pnl = real_pnl
@@ -643,8 +673,9 @@ class PositionTracker:
             else:
                 self._save_state()
         elif hit in ("SL", "TP2"):
-            exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
-            await self._verify_position_closed(p.direction, 10)
+            if p and not getattr(p, "is_reverse", False):
+                exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
+            await self._verify_position_closed(p.direction if p else "LONG", 10)
             real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
             if trade_id_before:
@@ -656,6 +687,18 @@ class PositionTracker:
             # Update local PnL with real value for return
             if real_pnl is not None:
                 total_trade_pnl = real_pnl
+
+        # Если закрылась reverse-позиция — пишем единый результат REVERSE.
+        # Убыток исходной ноги (на уровне SL) сохранён в orig_leg_pnl при развороте;
+        # отдельно исходную закрывать не нужно — она уже сведена неттингом.
+        if is_reverse and self.position is None:
+            total_pnl = total_trade_pnl + orig_leg_pnl
+            if trade_id_before is not None:
+                await self._report_close_with_id(trade_id_before, close_price, total_qty_before, total_pnl, "REVERSE", entry_price_before, reject_reason=reject_before)
+                await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
+            else:
+                self.log.warning("[REVERSE] No trade_id to report combined result; skip DB close")
+            total_trade_pnl = total_pnl
 
         return total_trade_pnl
 

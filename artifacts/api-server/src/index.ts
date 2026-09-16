@@ -1,19 +1,3 @@
-import app from "./app";
-import { logger } from "./lib/logger";
-import { db, botsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { exec } from "child_process";
-import { promisify } from "util";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { reloadConfigsFromYaml } from "./routes/bots";
-import { recoverStaleChains } from "./routes/recovery";
-
-const execAsync = promisify(exec);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 // Загружаем переменные из корневого .env если они не заданы
 function loadRootEnv() {
   const rootEnvPath = path.resolve(__dirname, "../../../.env");
@@ -36,6 +20,23 @@ function loadRootEnv() {
     logger.warn({ err: e }, "Could not load root .env");
   }
 }
+
+import "./env";
+import app from "./app";
+import { logger } from "./lib/logger";
+import { db, botsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { reloadConfigsFromYaml } from "./routes/bots";
+import { recoverStaleChains } from "./routes/recovery";
+
+const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 loadRootEnv();
 

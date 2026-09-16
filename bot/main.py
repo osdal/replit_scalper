@@ -5,7 +5,7 @@ import sys
 import signal
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 from binance import AsyncClient
@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 from config import load_config
 from logger import get_logger, get_events_logger
-from market_data import get_recent_klines, start_kline_polling
+from market_data import get_recent_klines, start_kline_polling, start_kline_websocket
 from strategy import calculate_indicators, calculate_htf_indicators, get_all_signals, get_htf_trend_latest, Signal, _calc_atr_sl_tp
 from preset_config import get_preset_config
 from signal_handler import SignalHandler
@@ -839,6 +839,7 @@ async def main():
     client = await AsyncClient.create(
         api_key=api_key or None,
         api_secret=api_secret or None,
+        testnet=os.getenv("BINANCE_TESTNET", "false").lower() == "true",
     )
 
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
@@ -922,10 +923,29 @@ async def _run_live_or_paper(
     log.info(f"[STARTUP] Step 6: loaded {len(loaded)} rejected trades")
 
     log.info("[STARTUP] Step 7: fetching klines for warm-up")
-    df_buffer: pd.DataFrame = await get_recent_klines(
-        client=client, symbol=cfg.symbol, interval=cfg.timeframe,
-        limit=max(cfg.ema_slow * 3, 200),
-    )
+    df_buffer: pd.DataFrame = pd.DataFrame()
+    _warm_attempt = 0
+    while not shutdown_event.is_set():
+        try:
+            df_buffer = await get_recent_klines(
+                client=client, symbol=cfg.symbol, interval=cfg.timeframe,
+                limit=max(cfg.ema_slow * 3, 200),
+            )
+            break
+        except Exception as e:
+            _warm_attempt += 1
+            _delay = min(5 * _warm_attempt, 60)
+            log.warning(
+                f"[STARTUP] warm-up klines failed (attempt {_warm_attempt}): {e}; "
+                f"retry in {_delay}s"
+            )
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=_delay)
+            except asyncio.TimeoutError:
+                pass
+    if shutdown_event.is_set():
+        log.warning("[STARTUP] shutdown during warm-up, exiting")
+        return
     df_buffer = calculate_indicators(df_buffer, cfg)
     log.info(f"[STARTUP] Step 8: loaded {len(df_buffer)} candles for warm-up ({cfg.timeframe})")
 
@@ -1070,32 +1090,66 @@ async def _run_live_or_paper(
         else:
             events.info(f"SL_HIT | price={current_price} qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}")
             preset_before = getattr(pos, 'preset', None)
-            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
-            if preset_before and tracker.position is None:
-                _on_position_closed(preset_before)
-            events.info(f"SL_APPLY | pnl={pnl}")
-            if is_live:
-                notifier.send_event("sl_hit", {
-                    "symbol": cfg.symbol,
-                    "direction": pos.direction,
-                    "entry_price": pos.entry_price,
-                    "exit_price": current_price,
-                    "pnl": pnl,
-                    "qty": pos.total_qty,
-                })
-                notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
-            await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
-            if is_live_close:
-                real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                if real_qty > 0 and real_qty < 0.001:
-                    await order_mgr.close_dust(pos.direction, mode=pos_mode)
-            if pos.is_recovery:
-                await recovery.release(chain_id=pos.recovery_chain_id)
-                await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
-                log.info(f"[RECOVERY] SL on recovery | released chain #{pos.recovery_chain_id}, new chain for loss={pnl:.4f}")
-            elif pnl < 0 and not is_rejected:
-                await recovery.report(pnl=pnl)
-            await recovery.report_result(pnl, simulated=is_rejected)
+            orig_direction = pos.direction
+            orig_entry = pos.entry_price
+            orig_qty = pos.remaining_qty
+            orig_sl = pos.sl_price
+            orig_trade_id = getattr(tracker, "_trade_id", None)
+
+            reverse_result = None
+            if not is_rejected and not pos.is_recovery:
+                # Снимаем TP-ордера исходной позиции (SL на бирже не выставляется),
+                # чтобы они не сработали и не закрыли позицию до разворота.
+                try:
+                    await order_mgr.cancel_all_tp_sl(orig_direction, mode=pos_mode)
+                except Exception as e:
+                    log.debug(f"[REVERSE] cancel original TP failed: {e}")
+                reverse_result = await order_mgr.open_reverse_position(
+                    original_direction=orig_direction,
+                    original_entry=orig_entry,
+                    original_qty=orig_qty,
+                    sl_price=orig_sl,
+                    mode=pos_mode,
+                )
+
+            if reverse_result:
+                rev_entry, rev_qty, rev_tp = reverse_result
+                reverse_dir = "SHORT" if orig_direction == "LONG" else "LONG"
+                rev_signal = Signal(
+                    direction=reverse_dir,
+                    entry_price=rev_entry,
+                    sl_price=0.0,
+                    tp1_price=rev_tp,
+                    tp2_price=rev_tp,
+                    timestamp=pd.Timestamp.now(),
+                    preset=preset_before or "reverse",
+                )
+                # Убыток исходной ноги на уровне SL (фиксируется неттингом при
+                # отправке обратного ордера) — войдёт в общий результат REVERSE.
+                orig_realized_pnl = tracker._calc_pnl(orig_direction, orig_entry, current_price, orig_qty)
+                tracker.open(
+                    rev_signal, rev_qty,
+                    is_reverse=True,
+                    reversed_from_pnl=orig_realized_pnl,
+                    reversed_from_direction=orig_direction,
+                    reversed_from_qty=orig_qty,
+                    reversed_from_entry=orig_entry,
+                )
+                # Сохраняем trade_id исходной, чтобы при закрытии reverse та же
+                # запись в БД была обновлена как единый результат REVERSE.
+                tracker._trade_id = orig_trade_id
+                events.info(f"REVERSE_OPEN | {reverse_dir} entry={rev_entry:.4f} qty={rev_qty:.6f} tp={rev_tp:.4f} orig={orig_direction} {orig_qty:.6f}@{orig_entry:.4f}")
+                if is_live:
+                    notifier.send_message(
+                        f"🔄 REVERSE {cfg.symbol} {reverse_dir} | Entry={rev_entry:.4f} Qty={rev_qty:.6f} TP={rev_tp:.4f} Orig={orig_direction} {orig_qty:.6f}@{orig_entry:.4f}"
+                    )
+            else:
+                # Reverse не открыт (recovery/rejected/нулевой объём/ошибка) —
+                # закрываем исходную позицию как обычный SL, чтобы не зависнуть.
+                pnl = await tracker.apply_hit_async("SL", current_price, candle_time_ms)
+                if preset_before and tracker.position is None:
+                    _on_position_closed(preset_before)
+                events.info(f"SL_CLOSE | no reverse opened; pnl={pnl}")
 
         if hit == "SL" and not is_rejected:
             _consecutive_losses += 1
@@ -1671,6 +1725,21 @@ async def _run_live_or_paper(
 
     watchdog_task = asyncio.create_task(_watchdog())
 
+    # Последняя цена из WebSocket (markPrice). Используется для SL/TP-тика и
+    # heartbeat, чтобы не дёргать REST ticker и не упираться в лимиты.
+    ws_price: Dict[str, float] = {}
+
+    async def _latest_price() -> float:
+        price = float(ws_price.get("value", 0) or 0)
+        if price > 0:
+            return price
+        # Fallback на REST, если WS ещё не прислал цену (или отвалился).
+        try:
+            ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
+            return float(ticker.get("price", 0) or 0)
+        except Exception:
+            return 0.0
+
     async def _heartbeat_task():
         # Регулярный heartbeat между свечами: на 1h без него дашборд показывает
         # устаревший last_heartbeat почти час. Обновляем каждые 60 сек.
@@ -1678,18 +1747,17 @@ async def _run_live_or_paper(
             await asyncio.sleep(60)
             if shutdown_event.is_set():
                 break
-            try:
-                ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
-                current_price = float(ticker.get("price", 0))
-            except Exception:
-                continue
+            current_price = await _latest_price()
             if current_price <= 0:
                 continue
             await reporter.report_heartbeat(current_price)
 
     heartbeat_task = asyncio.create_task(_heartbeat_task())
 
+    last_tick_hb_ts = 0.0
+
     async def tick_sl_tp_check():
+        nonlocal last_tick_hb_ts
         while not shutdown_event.is_set():
             try:
                 await asyncio.sleep(5)
@@ -1697,18 +1765,16 @@ async def _run_live_or_paper(
                     break
                 if not tracker.has_open_position():
                     continue
-                try:
-                    ticker = await client.futures_symbol_ticker(symbol=cfg.symbol)
-                    current_price = float(ticker.get("price", 0))
-                except Exception:
-                    continue
+                current_price = await _latest_price()
                 if current_price <= 0:
                     continue
                 # Обновляем live-цену для дашборда, чтобы unrealized PnL в карточке
                 # бота пересчитывался между свечами, а не залипал на цене открытия.
                 # Защита: никогда не перезаписываем цену нулём (Binance может вернуть 0
                 # при лимите/бане — это породит ложный unrealized PnL в дашборде).
-                if reporter is not None and current_price > 0:
+                now_ts = time.time()
+                if reporter is not None and current_price > 0 and (now_ts - last_tick_hb_ts) >= 30:
+                    last_tick_hb_ts = now_ts
                     await reporter.report_heartbeat(current_price)
                 hit = tracker.check(current_price)
                 if hit:
@@ -1799,10 +1865,18 @@ async def _run_live_or_paper(
     if getattr(cfg, "htf2_enabled", False):
         handlers[cfg.htf2_timeframe] = on_htf_candle_2
 
-    await start_kline_polling(
-        client=client, symbol=cfg.symbol, handlers=handlers,
-        logger=log, poll_seconds=10, shutdown_event=shutdown_event,
-    )
+    use_ws = os.getenv("USE_WEBSOCKET", "true").lower() == "true"
+    if use_ws:
+        await start_kline_websocket(
+            client=client, symbol=cfg.symbol, handlers=handlers,
+            logger=log, shutdown_event=shutdown_event,
+            on_price=lambda p: ws_price.__setitem__("value", p),
+        )
+    else:
+        await start_kline_polling(
+            client=client, symbol=cfg.symbol, handlers=handlers,
+            logger=log, poll_seconds=60, shutdown_event=shutdown_event,
+        )
     
     # Останавливаем фоновые задачи
     for task in (check_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task):

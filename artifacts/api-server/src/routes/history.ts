@@ -3,9 +3,18 @@ import { Router } from "express";
 const router = Router();
 const BASE_URL = "https://fapi.binance.com";
 
-const historyStore = new Map<string, { t: number; o: string; h: string; l: string; c: string; v: string }[]>();
+type Kline = { t: number; o: string; h: string; l: string; c: string; v: string };
 
-async function getKlines(symbol: string, interval = "1d", limit = 30) {
+// Короткий TTL: без него график «замерзает» и не совпадает с живой ценой тикера.
+const CACHE_TTL_MS = 10_000;
+const historyStore = new Map<string, { ts: number; data: Kline[] }>();
+
+function limitForInterval(interval: string): number {
+  const m = interval === "5m" ? 1000 : interval === "15m" ? 1000 : interval === "30m" ? 1000 : interval === "1h" ? 720 : interval === "4h" ? 180 : interval === "12h" ? 60 : interval === "1d" ? 30 : 30;
+  return m;
+}
+
+async function getKlines(symbol: string, interval = "1d", limit = 30): Promise<any[]> {
   const url = new URL(`${BASE_URL}/fapi/v1/klines`);
   url.searchParams.set("symbol", symbol);
   url.searchParams.set("interval", interval);
@@ -15,10 +24,11 @@ async function getKlines(symbol: string, interval = "1d", limit = 30) {
     const text = await resp.text().catch(() => "unknown error");
     throw new Error(`Binance klines ${symbol}: ${resp.status} ${text}`);
   }
-  return resp.json();
+  const json = (await resp.json()) as unknown;
+  return Array.isArray(json) ? (json as any[]) : [];
 }
 
-function toCandles(klines: any[]) {
+function toCandles(klines: any[]): Kline[] {
   return klines.map((k) => ({
     t: k[0],
     o: k[1],
@@ -34,14 +44,15 @@ router.get("/:symbol", async (req, res) => {
   const interval = String(req.query.interval || "1d").toLowerCase();
   const cacheKey = `${symbol}::${interval}`;
   const cached = historyStore.get(cacheKey);
-  if (cached && cached.length > 0) {
-    return res.json({ source: "cache", data: cached });
+  if (cached && cached.data.length > 0 && Date.now() - cached.ts < CACHE_TTL_MS) {
+    res.json({ source: "cache", data: cached.data });
+    return;
   }
   try {
-    const limit = interval === "1d" ? 30 : interval === "12h" ? 60 : interval === "4h" ? 180 : interval === "1h" ? 720 : 30;
+    const limit = limitForInterval(interval);
     const klines = await getKlines(symbol, interval, limit);
     const data = toCandles(klines).sort((a, b) => a.t - b.t);
-    historyStore.set(cacheKey, data);
+    historyStore.set(cacheKey, { ts: Date.now(), data });
     res.json({ source: "binance", data });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || "Failed to fetch klines" });
@@ -57,9 +68,9 @@ router.post("/download", async (_req, res) => {
       const symbol = parts[0];
       const interval = parts[1] || "1d";
       try {
-        const limit = interval === "1d" ? 30 : interval === "12h" ? 60 : interval === "4h" ? 90 : interval === "1h" ? 168 : 30;
+        const limit = limitForInterval(interval);
         const klines = await getKlines(symbol, interval, limit);
-        historyStore.set(fullKey, toCandles(klines).sort((a, b) => a.t - b.t));
+        historyStore.set(fullKey, { ts: Date.now(), data: toCandles(klines).sort((a, b) => a.t - b.t) });
         results[fullKey] = klines.length;
       } catch (e: any) {
         results[fullKey] = -1;
