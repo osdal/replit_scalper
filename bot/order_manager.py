@@ -216,29 +216,11 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def _place_sl(self, direction: str, sl_price: float, qty: float = 0.0) -> None:
-        stop_side = _opposite_side(direction)
-        sl_price = await self._adjust_price(sl_price, mode="live")
-
-        if qty > 0:
-            use_qty = await self._adjust_qty(qty, mode="live")
-        else:
-            real_qty = await self._get_real_position_qty(direction)
-            use_qty = await self._adjust_qty(real_qty if real_qty > 0 else 0.001, mode="live")
-
-        try:
-            result = await self.client.futures_create_order(
-                symbol=self.cfg.symbol,
-                side=stop_side,
-                type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                stopPrice=sl_price,
-                quantity=use_qty,
-                reduceOnly=True,
-                priceProtect=True,
-            )
-            self.log.info(f"[LIVE] Stop-loss placed | stopPrice={sl_price} qty={use_qty} algoId={result.get('algoId')}")
-        except Exception as e:
-            self.log.error(f"[LIVE] Failed to place SL: {e}")
-            raise
+        # SL-ордер на биржу НЕ выставляется: при достижении цены SL исходная
+        # позиция не закрывается, а открывается обратная (см. open_reverse_position).
+        # Уровень SL используется только как виртуальный триггер в трекере.
+        self.log.info(f"[SL] Exchange stop-loss skipped (reverse strategy) | level={sl_price:.4f}")
+        return
 
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
         side  = _opposite_side(direction)
@@ -277,6 +259,83 @@ class OrderManager:
         except Exception as e:
             self.log.error(f"[ORDER] Failed to place TP orders: {e}", exc_info=True)
             raise
+
+    async def open_reverse_position(
+        self,
+        original_direction: str,
+        original_entry: float,
+        original_qty: float,
+        sl_price: float,
+        mode: Optional[str] = None,
+    ) -> Optional[Tuple[float, float, float]]:
+        """
+        Разворот при срабатывании SL.
+
+        Исходная позиция НЕ закрывается отдельным ордером. В обратную сторону
+        отправляется рыночный ордер объёмом
+
+            X = |E - S| * Qo / (0.005 * S) + Qo
+
+        (для исходного LONG — SELL). После этого удерживаемый обратный объём
+
+            held = |E - S| * Qo / (0.005 * S)
+
+        и при движении цены ещё на 0.5% суммарный PnL (убыток исходной +
+        прибыль обратной) равен 0. TP обратной ставится ровно на этом уровне.
+
+        Возвращает (entry_price, held_qty, tp_price).
+        """
+        if mode is None:
+            mode = self.cfg.mode
+        reverse_dir = "SHORT" if original_direction == "LONG" else "LONG"
+
+        held_qty = await self._adjust_qty(
+            abs(original_entry - sl_price) * original_qty / (0.005 * sl_price), mode=mode
+        )
+        if held_qty <= 0:
+            self.log.warning(f"[REVERSE] held qty={held_qty} <= 0, skipping reverse")
+            return None
+        send_qty = await self._adjust_qty(held_qty + original_qty, mode=mode)
+        if send_qty <= 0:
+            self.log.warning(f"[REVERSE] send qty={send_qty} <= 0, skipping reverse")
+            return None
+
+        if mode == "live":
+            await self._set_leverage()
+            side = _direction_to_side(reverse_dir)
+            order = await self.client.futures_create_order(
+                symbol=self.cfg.symbol,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=send_qty,
+            )
+            entry_price = await self._get_fill_price(order, sl_price)
+            self.log.info(
+                f"[REVERSE] Sent {side} qty={send_qty} → held {reverse_dir} "
+                f"qty={held_qty} @ {entry_price} (original stays open)"
+            )
+        else:
+            entry_price = sl_price
+            self.log.info(
+                f"[PAPER] Reverse send {reverse_dir} qty={send_qty} → held={held_qty} "
+                f"@ {entry_price} (original stays open)"
+            )
+
+        # TP обратной позиции ровно на уровне, где суммарный PnL = 0 (0.5% от входа)
+        if reverse_dir == "LONG":
+            tp_price = entry_price * 1.005
+        else:
+            tp_price = entry_price * 0.995
+        tp_price = await self._adjust_price(tp_price, mode=mode)
+
+        if mode == "live" and held_qty > 0:
+            try:
+                await self._place_tp_limit(reverse_dir, tp_price, held_qty)
+                self.log.info(f"[REVERSE] TP placed | {reverse_dir} tp={tp_price} qty={held_qty}")
+            except Exception as e:
+                self.log.error(f"[REVERSE] Failed to place TP: {e}", exc_info=True)
+
+        return entry_price, held_qty, tp_price
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #

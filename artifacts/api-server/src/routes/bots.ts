@@ -177,6 +177,7 @@ router.put("/:symbol/config", async (req, res) => {
     delete configUpdates.current_price;
     delete configUpdates.position;
     delete configUpdates.llm_status;
+    delete configUpdates.symbol;
 
     const [updated] = await db.update(botsTable)
       .set({ ...req.body, updated_at: new Date().toISOString() })
@@ -514,17 +515,14 @@ export async function reloadConfigsFromYaml(): Promise<void> {
       auto_mode:        (raw.auto_mode as boolean) ?? true,
       paper_balance:    (raw.paper_balance as number) || 1000,
       log_file:         raw.log_file as string,
-      is_running:       false,
-      position:         null,
       updated_at:       new Date().toISOString(),
     };
     if (existing) {
       await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
     } else {
-      await db.insert(botsTable).values({ symbol, ...values });
+      await db.insert(botsTable).values({ symbol, is_running: false, position: null, ...values });
     }
   }
-  await db.update(botsTable).set({ is_running: false, position: null });
 }
 
 export async function stopAllBots(): Promise<void> {

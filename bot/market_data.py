@@ -1,10 +1,11 @@
 import asyncio
 import json
 import logging
+import random
 from typing import Callable, Dict, Optional
 
 import pandas as pd
-from binance import AsyncClient
+from binance import AsyncClient, BinanceSocketManager
 
 from rate_limit import with_retry
 
@@ -69,15 +70,128 @@ def _klines_to_df(klines: list) -> pd.DataFrame:
     return df
 
 
-def _kline_to_series(kline: dict) -> pd.Series:
-    return pd.Series({
-        "open_time": pd.to_datetime(kline["t"], unit="ms"),
-        "open":  float(kline["o"]),
-        "high":  float(kline["h"]),
-        "low":   float(kline["l"]),
-        "close": float(kline["c"]),
-        "volume": float(kline["v"]),
+def _ws_kline_to_series(k: dict) -> pd.Series:
+    """Свеча из WS-сообщения (@kline). k — вложенный объект 'k' из события."""
+    t = pd.to_datetime(k["t"], unit="ms")
+    candle = pd.Series({
+        "open_time": t,
+        "open":  float(k["o"]),
+        "high":  float(k["h"]),
+        "low":   float(k["l"]),
+        "close": float(k["c"]),
+        "volume": float(k["v"]),
     })
+    candle.name = t
+    return candle
+
+
+async def start_kline_websocket(
+    client: AsyncClient,
+    symbol: str,
+    handlers: Dict[str, Callable],
+    logger: Optional[logging.Logger] = None,
+    shutdown_event: Optional[asyncio.Event] = None,
+    on_price: Optional[Callable[[float], None]] = None,
+    ping_timeout: int = 90,
+) -> None:
+    """
+    WebSocket market data вместо REST-поллинга.
+
+    Подписывается на kline-стримы по всем интервалам из `handlers` и на
+    markPrice. Обработчик вызывается только на ЗАКРЫТОЙ свече (`k.x == True`) —
+    контракт тот же, что у start_kline_polling: callback(pd.Series) с полями
+    open/high/low/close/volume и .name = open_time (pd.Timestamp).
+
+    on_price вызывается на каждом markPrice-апдейте — используется ботом для
+    SL/TP-тика и heartbeat, чтобы не дёргать REST ticker.
+
+    При обрыве — реконнект с экспоненциальным backoff.
+    """
+    bm = BinanceSocketManager(client)
+    sym = symbol.lower()
+    stream_to_interval: Dict[str, str] = {
+        f"{sym}@kline_{iv}": iv for iv in handlers
+    }
+    streams = list(stream_to_interval.keys()) + [f"{sym}@markPrice@1s"]
+
+    if logger:
+        logger.info(
+            f"[WS] Starting market data socket | {symbol} streams={streams}"
+        )
+
+    backoff = 1.0
+    while True:
+        if shutdown_event and shutdown_event.is_set():
+            break
+        try:
+            # category=None — используем базовый URL (совместимо с testnet).
+            async with bm.futures_multiplex_socket(streams, category=None) as stream:
+                if logger:
+                    logger.info(
+                        f"[WS] Connected | {symbol} intervals={list(handlers.keys())}"
+                    )
+                while True:
+                    if shutdown_event and shutdown_event.is_set():
+                        break
+                    try:
+                        msg = await asyncio.wait_for(stream.recv(), timeout=ping_timeout)
+                        # Соединение реально работает — только теперь сбрасываем backoff,
+                        # чтобы не крутить 1-секундный реконнект при «открылся и упал».
+                        backoff = 1.0
+                    except asyncio.TimeoutError:
+                        if logger:
+                            logger.warning(
+                                f"[WS] No message for {ping_timeout}s, reconnecting"
+                            )
+                        break
+                    if not isinstance(msg, dict):
+                        continue
+                    data = msg.get("data", msg)
+                    if not isinstance(data, dict):
+                        continue
+                    event = data.get("e")
+                    if event == "kline":
+                        k = data.get("k") or {}
+                        if not k.get("x"):
+                            continue
+                        iv = stream_to_interval.get(msg.get("stream", ""))
+                        cb = handlers.get(iv) if iv else None
+                        if cb is None:
+                            continue
+                        candle = _ws_kline_to_series(k)
+                        if logger:
+                            logger.info(
+                                f"Candle closed | {iv} "
+                                f"time={candle.name} close={candle['close']:.2f}"
+                            )
+                        try:
+                            result = cb(candle)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception as e:
+                            if logger:
+                                logger.error(
+                                    f"Candle handler error ({iv}): {e}",
+                                    exc_info=True,
+                                )
+                    elif event == "markPriceUpdate" and on_price is not None:
+                        try:
+                            price = float(data.get("p", 0) or 0)
+                            if price > 0:
+                                on_price(price)
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if logger:
+                logger.warning(
+                    f"[WS] socket error: {e}; reconnecting in {backoff:.0f}s"
+                )
+        if shutdown_event and shutdown_event.is_set():
+            break
+        await asyncio.sleep(backoff + random.random())
+        backoff = min(backoff * 2, 60.0)
 
 
 async def start_kline_polling(

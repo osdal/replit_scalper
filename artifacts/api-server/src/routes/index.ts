@@ -11,6 +11,9 @@ import pairsRouter        from "./pairs";
 import historyRouter      from "./history";
 import tickerRouter       from "./ticker";
 import adxRouter          from "./adx";
+import notifyRouter       from "./notify";
+import gridHistoryRouter  from "./grid-history";
+import gridOrdersRouter   from "./grid-orders";
 
 const router = Router();
 
@@ -27,5 +30,8 @@ router.use("/pairs",      pairsRouter);
 router.use("/history",    historyRouter);
 router.use("/ticker",     tickerRouter);
 router.use("/adx",        adxRouter);
+router.use("/notify",     notifyRouter);
+router.use("/grid-history", gridHistoryRouter);
+router.use("/grid-orders",  gridOrdersRouter);
 
 export default router;

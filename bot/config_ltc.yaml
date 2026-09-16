@@ -1,52 +1,52 @@
 ﻿max_open_per_cycle: 0
 enabled_presets:
+  - ema_cross_long
+  - ema_cross_short
+  - sma_cross_long
+  - sma_cross_short
+  - rsi_bounce_long
+  - rsi_bounce_short
+  - rsi_divergence_long
+  - rsi_divergence_short
+  - macd_momentum_long
+  - macd_momentum_short
+  - macd_hist_trend_long
+  - macd_hist_trend_short
+  - bb_bounce_long
+  - bb_bounce_short
+  - bb_squeeze_breakout_long
+  - bb_squeeze_breakout_short
+  - stoch_bounce_long
+  - stoch_bounce_short
+  - stoch_obos_long
+  - stoch_obos_short
+  - vwap_return_long
+  - vwap_return_short
+  - vwap_band_long
+  - vwap_band_short
+  - atr_breakout_long
+  - atr_breakout_short
+  - atr_trailing_long
+  - atr_trailing_short
+  - volume_spike_long
+  - volume_spike_short
+  - volume_trend_long
+  - volume_trend_short
+  - supertrend_long
+  - supertrend_short
+  - supertrend_reentry_long
+  - supertrend_reentry_short
+  - adx_trend_long
+  - adx_trend_short
+  - ichimoku_long
+  - ichimoku_short
+  - ichimoku_tk_cross_long
+  - ichimoku_tk_cross_short
+  - morning_star
+  - evening_star
+  - engulfing_long
+  - engulfing_short
   - inside_bar_rsi_long
-  # - ema_cross_long
-  # - ema_cross_short
-  # - sma_cross_long
-  # - sma_cross_short
-  # - rsi_bounce_long
-  # - rsi_bounce_short
-  # - rsi_divergence_long
-  # - rsi_divergence_short
-  # - macd_momentum_long
-  # - macd_momentum_short
-  # - macd_hist_trend_long
-  # - macd_hist_trend_short
-  # - bb_bounce_long
-  # - bb_bounce_short
-  # - bb_squeeze_breakout_long
-  # - bb_squeeze_breakout_short
-  # - stoch_bounce_long
-  # - stoch_bounce_short
-  # - stoch_obos_long
-  # - stoch_obos_short
-  # - vwap_return_long
-  # - vwap_return_short
-  # - vwap_band_long
-  # - vwap_band_short
-  # - atr_breakout_long
-  # - atr_breakout_short
-  # - atr_trailing_long
-  # - atr_trailing_short
-  # - volume_spike_long
-  # - volume_spike_short
-  # - volume_trend_long
-  # - volume_trend_short
-  # - supertrend_long
-  # - supertrend_short
-  # - supertrend_reentry_long
-  # - supertrend_reentry_short
-  # - adx_trend_long
-  # - adx_trend_short
-  # - ichimoku_long
-  # - ichimoku_short
-  # - ichimoku_tk_cross_long
-  # - ichimoku_tk_cross_short
-  # - morning_star
-  # - evening_star
-  # - engulfing_long
-  # - engulfing_short
 rsi_period: 14
 rsi_low: 30
 rsi_high: 70
@@ -77,12 +77,12 @@ htf_timeframe: 1h
 leverage: 75
 log_file: logs/ltc.log
 margin_pct: 0
-mode: paper
+mode: live
 paper_balance: 1000.0
 risk_pct: 3.0
 sl_pct: 0.5
 symbol: LTCUSDT
-timeframe: 1h
+timeframe: 5m
 tp1_close_pct: 100
 tp1_pct: 1.0
 tp2_pct: 1.0
