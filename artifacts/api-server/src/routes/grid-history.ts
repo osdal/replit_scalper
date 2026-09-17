@@ -76,9 +76,25 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.delete("/", notifyTokenGuard, async (_req, res) => {
+router.delete("/", notifyTokenGuard, async (req, res) => {
   try {
     await ensureTable;
+    const filter = String(req.query.filter ?? "").trim();
+    if (filter === "no-position") {
+      const result = await db.run(
+        sql`DELETE FROM grid_history WHERE COALESCE(positions, 0) = 0`,
+      );
+      return res.json({ deleted: result.rowsAffected });
+    }
+    if (filter === "cancel") {
+      const result = await db.run(
+        sql`DELETE FROM grid_history WHERE exit_reason = 'cancel'`,
+      );
+      return res.json({ deleted: result.rowsAffected });
+    }
+    if (filter) {
+      return res.status(400).json({ ok: false, error: "unknown filter" });
+    }
     await db.run(sql`DELETE FROM grid_history`);
     return res.json({ ok: true });
   } catch (e: any) {

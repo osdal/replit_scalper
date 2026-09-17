@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import datetime
 import asyncio
 from dataclasses import dataclass, field
@@ -20,6 +21,45 @@ STATE_FILE_TEMPLATE = "state_{symbol}.json"
 
 def _state_file(symbol: str) -> str:
     return STATE_FILE_TEMPLATE.replace("{symbol}", symbol.lower())
+
+
+def _to_epoch_ms(value) -> int:
+    """Конвертирует datetime/ISO-строку/epoch в миллисекунды эпохи.
+
+    Naive-времена трактуются как UTC (а не как локальное время), поэтому
+    окно Binance userTrades не смещается на часовой пояс хоста. Принимает
+    trailing 'Z'. Возвращает 0, если значение распарсить не удалось.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        v = float(value)
+        return int(v * 1000) if v < 1e12 else int(v)
+    dt = None
+    if isinstance(value, datetime.datetime):
+        dt = value
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return 0
+        if s.endswith("Z") or s.endswith("z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.datetime.fromisoformat(s)
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.datetime.strptime(s.replace("T", " "), fmt)
+                    break
+                except ValueError:
+                    continue
+    if dt is None:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    else:
+        dt = dt.astimezone(datetime.timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 
 @dataclass
@@ -60,6 +100,7 @@ class Position:
     regime_trend: str = ""           # наклон EMA на входе: "LONG"/"SHORT" (только бэктест)
     intrabar_return: float = 0.0     # движение внутри свечи входа (только бэктест)
     voting_bases: list = field(default_factory=list)  # согласовавшие стратегии (только бэктест)
+    backstop_algo_id: Optional[int] = None  # algoId биржевого safety-net STOP_MARKET (closePosition)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -115,6 +156,7 @@ class PositionTracker:
             "opened_at":       p.opened_at,
             "mode":            p.mode,
             "reject_reason":   p.reject_reason,
+            "backstop_algo_id": p.backstop_algo_id,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -161,6 +203,7 @@ class PositionTracker:
                 opened_at=data.get("opened_at"),
                 mode=data.get("mode"),
                 reject_reason=data.get("reject_reason"),
+                backstop_algo_id=data.get("backstop_algo_id"),
             )
             self._trade_id = data.get("trade_id")
             self.log.info(
@@ -220,61 +263,68 @@ class PositionTracker:
         except Exception as e:
             self.log.debug(f"[REPORTER] report_open error: {e}")
 
-    async def _entry_time_ms(self, trade_id: Optional[int]) -> int:
-        """Возвращает время входа позиции в мс — из самого объекта, либо, для
-        восстановленных с биржи позиций (entry_timestamp=None), из записи в БД."""
-        import datetime
-        if self.position and self.position.entry_timestamp:
-            try:
-                if isinstance(self.position.entry_timestamp, str):
-                    return int(datetime.datetime.fromisoformat(self.position.entry_timestamp).timestamp() * 1000)
-                return int(self.position.entry_timestamp.timestamp() * 1000)
-            except (ValueError, AttributeError):
-                pass
+    async def _entry_time_ms(self, trade_id: Optional[int], prefer_db: bool = False) -> int:
+        """Возвращает время входа позиции/цикла в мс — из самого объекта, либо из
+        записи в БД. Все naive-времена трактуются как UTC. Для reverse-цикла
+        (prefer_db=True) берётся entry_time исходной ноги из БД, чтобы окно
+        покрывало весь цикл. Если время отсутствует или находится в будущем —
+        fallback now-24h (с предупреждением)."""
+        now_ms = int(time.time() * 1000)
+        pos_ts = getattr(self.position, "entry_timestamp", None) if self.position else None
+        entry_ms = 0
+        if pos_ts and not prefer_db:
+            entry_ms = _to_epoch_ms(pos_ts)
         # Fallback: entry_time из БД по trade_id
-        if trade_id and self.reporter:
+        if entry_ms <= 0 and trade_id and self.reporter:
             try:
                 rec = await self.reporter.get_trade(trade_id)
                 if rec and rec.get("entry_time"):
-                    et = str(rec["entry_time"]).replace("Z", "")
-                    if et.endswith("Z"):
-                        et = et[:-1]
-                    if "T" in et:
-                        return int(datetime.datetime.fromisoformat(et).timestamp() * 1000)
-                    else:
-                        return int(datetime.datetime.strptime(et, "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+                    entry_ms = _to_epoch_ms(rec["entry_time"])
             except Exception:
                 pass
-        return 0
+        if entry_ms <= 0 and pos_ts:
+            entry_ms = _to_epoch_ms(pos_ts)
+        if entry_ms <= 0 or entry_ms > now_ms:
+            fallback_ms = now_ms - 24 * 60 * 60 * 1000
+            self.log.warning(
+                f"[TIME] Invalid entry time (entry_ms={entry_ms}) for trade {trade_id}; "
+                f"falling back to now-24h ({fallback_ms})"
+            )
+            return fallback_ms
+        return entry_ms
 
-    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None) -> None:
+    async def _report_close(self, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None, commission: Optional[float] = None) -> None:
         if not self.reporter or not self._trade_id:
             return
         try:
-            import datetime
-            commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
-            # Try to get real PnL from Binance to match position history
-            real_pnl = None
-            if self.order_mgr and not reject_reason:
-                entry_time_ms = await self._entry_time_ms(self._trade_id)
-                if entry_time_ms > 0:
-                    try:
-                        exit_time_ms = int(__import__("time").time() * 1000)
-                        real_pnl = await self.order_mgr.get_realized_pnl(
-                            self.cfg.symbol, entry_time_ms, exit_time_ms,
-                        )
-                    except Exception:
-                        pass
-            if real_pnl is not None and abs(real_pnl) > 0.0001:
-                pnl_to_use = real_pnl
-                # В live-режиме комиссия уже учтена в реальном PnL, показываем её как расчётную.
-                commission = self._estimated_commission(entry_price, exit_price, qty)
+            if commission is not None:
+                # Реальные значения с биржи: PnL уже net, комиссия — фактическая.
+                commission_to_use = commission
+                pnl_to_use = pnl
+            else:
+                commission_to_use, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
+                # Try to get real PnL from Binance to match position history
+                real_pnl = None
+                if self.order_mgr and not reject_reason:
+                    entry_time_ms = await self._entry_time_ms(self._trade_id)
+                    if entry_time_ms > 0:
+                        try:
+                            exit_time_ms = int(time.time() * 1000)
+                            real_pnl = await self.order_mgr.get_realized_pnl(
+                                self.cfg.symbol, entry_time_ms, exit_time_ms,
+                            )
+                        except Exception:
+                            pass
+                if real_pnl is not None and abs(real_pnl) > 0.0001:
+                    pnl_to_use = real_pnl
+                    # В live-режиме комиссия уже учтена в реальном PnL, показываем её как расчётную.
+                    commission_to_use = self._estimated_commission(entry_price, exit_price, qty)
             status = "rejected" if reject_reason else "closed"
             success = await self.reporter.patch_trade(self._trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl_to_use,
-                "commission":  commission,
+                "commission":  commission_to_use,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -291,7 +341,7 @@ class PositionTracker:
                     "exit_price":  exit_price,
                     "qty":         qty,
                     "pnl":         pnl_to_use,
-                    "commission":  commission,
+                    "commission":  commission_to_use,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -306,7 +356,7 @@ class PositionTracker:
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close error: {e}")
 
-    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None) -> None:
+    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None, commission: Optional[float] = None) -> None:
         """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
@@ -314,29 +364,33 @@ class PositionTracker:
             self.log.warning("[REPORTER] _report_close_with_id called without trade_id; skip")
             return
         try:
-            import datetime
-            commission, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
-            # Try to get real PnL from Binance to match position history
-            real_pnl = None
-            if self.order_mgr and not reject_reason:
-                entry_time_ms = await self._entry_time_ms(trade_id)
-                if entry_time_ms > 0:
-                    try:
-                        exit_time_ms = int(__import__("time").time() * 1000)
-                        real_pnl = await self.order_mgr.get_realized_pnl(
-                            self.cfg.symbol, entry_time_ms, exit_time_ms,
-                        )
-                    except Exception:
-                        pass
-            if real_pnl is not None and abs(real_pnl) > 0.0001:
-                pnl_to_use = real_pnl
-                commission = self._estimated_commission(entry_price, exit_price, qty)
+            if commission is not None:
+                # Реальные значения с биржи: PnL уже net, комиссия — фактическая.
+                commission_to_use = commission
+                pnl_to_use = pnl
+            else:
+                commission_to_use, pnl_to_use = self._apply_commission(entry_price, exit_price, qty, pnl)
+                # Try to get real PnL from Binance to match position history
+                real_pnl = None
+                if self.order_mgr and not reject_reason:
+                    entry_time_ms = await self._entry_time_ms(trade_id)
+                    if entry_time_ms > 0:
+                        try:
+                            exit_time_ms = int(time.time() * 1000)
+                            real_pnl = await self.order_mgr.get_realized_pnl(
+                                self.cfg.symbol, entry_time_ms, exit_time_ms,
+                            )
+                        except Exception:
+                            pass
+                if real_pnl is not None and abs(real_pnl) > 0.0001:
+                    pnl_to_use = real_pnl
+                    commission_to_use = self._estimated_commission(entry_price, exit_price, qty)
             status = "rejected" if reject_reason else "closed"
             success = await self.reporter.patch_trade(trade_id, {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl_to_use,
-                "commission":  commission,
+                "commission":  commission_to_use,
                 "exit_reason": reason,
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
@@ -353,7 +407,7 @@ class PositionTracker:
                     "exit_price":  exit_price,
                     "qty":         qty,
                     "pnl":         pnl_to_use,
-                    "commission":  commission,
+                    "commission":  commission_to_use,
                     "exit_reason": reason,
                     "entry_time":  str(p.entry_timestamp).replace(" ", "T") if p and p.entry_timestamp else datetime.datetime.utcnow().isoformat(),
                     "exit_time":   datetime.datetime.utcnow().isoformat(),
@@ -619,38 +673,60 @@ class PositionTracker:
         tp1_hit_before = p.tp1_hit if p else False
         entry_price_before = p.entry_price if p else close_price
         reject_before = p.reject_reason if p else None
-        # entry_timestamp может быть строкой из JSON или datetime объектом
-        entry_time_ms = 0
-        if p and p.entry_timestamp:
-            try:
-                if isinstance(p.entry_timestamp, str):
-                    entry_time_ms = int(datetime.datetime.fromisoformat(p.entry_timestamp).timestamp() * 1000)
-                else:
-                    entry_time_ms = int(p.entry_timestamp.timestamp() * 1000)
-            except (ValueError, AttributeError):
-                entry_time_ms = 0
         accumulated_pnl_before = p.realized_pnl if p else 0.0
+        is_reverse_before = bool(p and getattr(p, "is_reverse", False))
+        direction_before = p.direction if p else "LONG"
+        # Время входа текущей ноги в мс (UTC). Для reverse-цикла начало окна
+        # берём из записи в БД (вход исходной ноги), чтобы покрыть весь цикл.
+        cycle_entry_ms = await self._entry_time_ms(trade_id_before, prefer_db=is_reverse_before)
         last_event_pnl, exit_reason_override = self.apply_hit(hit, close_price)
         total_trade_pnl = accumulated_pnl_before + last_event_pnl
 
         # Сохраняем данные исходной ноги ДО того, как apply_hit очистит позицию
         p_before = p
-        is_reverse = p_before and getattr(p_before, "is_reverse", False)
+        is_reverse = is_reverse_before
         orig_dir = getattr(p_before, "reversed_from_direction", "") if p_before else ""
         orig_entry = getattr(p_before, "reversed_from_entry", 0.0) if p_before else 0.0
         orig_qty = getattr(p_before, "reversed_from_qty", 0.0) if p_before else 0.0
         orig_leg_pnl = getattr(p_before, "reversed_from_pnl", 0.0) if p_before else 0.0
         pos_mode = getattr(p_before, "mode", "live") if p_before else "live"
 
+        # Реальные данные о сделке с биржи: цена выхода, комиссия и net-PnL цикла.
+        # Для rejected-сделок биржи не касаемся — остаётся расчётная логика.
+        exchange = None
+        if trade_id_before and not reject_before:
+            exchange = await self._exchange_cycle_summary(cycle_entry_ms, direction_before)
+        if exchange is not None:
+            self.log.info(
+                f"[FILLS] trade_id={trade_id_before} fills={exchange['fills_count']} "
+                f"net_pnl={exchange['pnl']:.4f} exit={exchange['exit_price']} "
+                f"commission={exchange['commission']:.6f}"
+            )
+        else:
+            self.log.warning(
+                f"[FILLS] Exchange fills unavailable for trade {trade_id_before}; "
+                f"falling back to calculated values"
+            )
+
+        def _close_values(fallback_exit: float, fallback_pnl: float, fallback_qty: float):
+            """(exit_price, qty, pnl, commission) из биржи либо fallback (commission=None)."""
+            if exchange is None:
+                return fallback_exit, fallback_qty, fallback_pnl, None
+            return (exchange["exit_price"] or fallback_exit), fallback_qty, exchange["pnl"], exchange["commission"]
+
         if not is_reverse:
             exit_reason = exit_reason_override or hit
 
         if is_recovery_tp1_full_close:
             await self._verify_position_closed(p.direction, 10)
-            real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+            real_pnl = await self._fetch_binance_pnl(cycle_entry_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
-            await self._report_close(close_price, remaining_before, pnl_to_use, "TP1", entry_price_before, reject_reason=reject_before)
-            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
+            ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, pnl_to_use, remaining_before)
+            await self._report_close(ex_exit, ex_qty, ex_pnl, "TP1", entry_price_before, reject_reason=reject_before, commission=ex_comm)
+            if exchange is None:
+                await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
+            else:
+                total_trade_pnl = ex_pnl
         elif hit == "TP1":
             # Полное закрытие по TP1 (tp1_close_pct=100, схема TP=2xSL без разделения):
             # позиция закрывается целиком. Обрабатываем как полное закрытие —
@@ -660,45 +736,57 @@ class PositionTracker:
             fully_closed = self.position is not None and self.position.remaining_qty <= 0.000001
             if fully_closed:
                 await self._verify_position_closed(p.direction, 10)
-                real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+                real_pnl = await self._fetch_binance_pnl(cycle_entry_ms, trade_id_before)
                 pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
                 if trade_id_before:
                     qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                    await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before, reject_reason=reject_before)
-                await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
-                if real_pnl is not None:
-                    total_trade_pnl = real_pnl
+                    ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, pnl_to_use, qty_to_report)
+                    await self._report_close_with_id(trade_id_before, ex_exit, ex_qty, ex_pnl, exit_reason, entry_price_before, reject_reason=reject_before, commission=ex_comm)
+                if exchange is None:
+                    await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
+                    if real_pnl is not None:
+                        total_trade_pnl = real_pnl
+                else:
+                    total_trade_pnl = ex_pnl
                 self.position = None
                 self._clear_state()
             else:
                 self._save_state()
         elif hit in ("SL", "TP2"):
-            if p and not getattr(p, "is_reverse", False):
+            if p and not is_reverse:
                 exit_reason = exit_reason_override or ("TP1" if (hit == "SL" and tp1_hit_before) else hit)
             await self._verify_position_closed(p.direction if p else "LONG", 10)
-            real_pnl = await self._fetch_binance_pnl(entry_time_ms, trade_id_before)
+            real_pnl = await self._fetch_binance_pnl(cycle_entry_ms, trade_id_before)
             pnl_to_use = real_pnl if real_pnl is not None else total_trade_pnl
             if trade_id_before:
                 # qty для БД: если remaining уже 0 (позиция полностью закрыта
                 # TP1 на 100%), сохраняем исходный объём позиции, а не 0.
                 qty_to_report = remaining_before if remaining_before > 0.0 else total_qty_before
-                await self._report_close_with_id(trade_id_before, close_price, qty_to_report, pnl_to_use, exit_reason, entry_price_before, reject_reason=reject_before)
-            await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
-            # Update local PnL with real value for return
-            if real_pnl is not None:
-                total_trade_pnl = real_pnl
+                ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, pnl_to_use, qty_to_report)
+                await self._report_close_with_id(trade_id_before, ex_exit, ex_qty, ex_pnl, exit_reason, entry_price_before, reject_reason=reject_before, commission=ex_comm)
+            if exchange is None:
+                await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
+                # Update local PnL with real value for return
+                if real_pnl is not None:
+                    total_trade_pnl = real_pnl
+            else:
+                total_trade_pnl = ex_pnl
 
         # Если закрылась reverse-позиция — пишем единый результат REVERSE.
         # Убыток исходной ноги (на уровне SL) сохранён в orig_leg_pnl при развороте;
         # отдельно исходную закрывать не нужно — она уже сведена неттингом.
         if is_reverse and self.position is None:
             total_pnl = total_trade_pnl + orig_leg_pnl
+            # Объём в БД — реальный размер исходной ноги, а не reverse-ноги.
+            report_qty = orig_qty if orig_qty > 0.0 else total_qty_before
+            ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, total_pnl, report_qty)
             if trade_id_before is not None:
-                await self._report_close_with_id(trade_id_before, close_price, total_qty_before, total_pnl, "REVERSE", entry_price_before, reject_reason=reject_before)
-                await self._sync_pnl_from_exchange(entry_time_ms, trade_id_before, candle_time_ms)
+                await self._report_close_with_id(trade_id_before, ex_exit, report_qty, ex_pnl, "REVERSE", entry_price_before, reject_reason=reject_before, commission=ex_comm)
+                if exchange is None:
+                    await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
             else:
                 self.log.warning("[REVERSE] No trade_id to report combined result; skip DB close")
-            total_trade_pnl = total_pnl
+            total_trade_pnl = ex_pnl
 
         return total_trade_pnl
 
@@ -718,10 +806,110 @@ class PositionTracker:
         if not self.order_mgr or not trade_id or entry_time_ms <= 0:
             return None
         try:
-            exit_ms = int(__import__("time").time() * 1000)
+            exit_ms = int(time.time() * 1000)
             return await self.order_mgr.get_realized_pnl(self.cfg.symbol, entry_time_ms, exit_ms)
         except Exception:
             return None
+
+    async def _fetch_cycle_fills(self, entry_ms: int, exit_ms: int) -> Optional[list]:
+        """Возвращает userTrades-филлы за UTC-корректное окно [entry_ms, exit_ms].
+
+        Валидирует startTime/endTime (положительные, start <= end, end <= now)
+        и на ошибке -4181 (Invalid start time) повторяет запрос один раз без
+        startTime. Возвращает None, если данные недоступны.
+        """
+        if not self.order_mgr or not getattr(self.order_mgr, "client", None):
+            return None
+        now_ms = int(time.time() * 1000)
+        if entry_ms is None or entry_ms <= 0 or entry_ms > now_ms:
+            self.log.warning(f"[FILLS] Invalid startTime={entry_ms}; using now-24h")
+            entry_ms = now_ms - 24 * 60 * 60 * 1000
+        if exit_ms is None or exit_ms <= 0 or exit_ms > now_ms:
+            exit_ms = now_ms
+        if exit_ms < entry_ms:
+            entry_ms, exit_ms = exit_ms, entry_ms
+        start_ms = int(entry_ms)
+        end_ms = int(min(exit_ms + 60000, now_ms))
+        try:
+            return await asyncio.wait_for(
+                self.order_mgr.client.futures_account_trades(
+                    symbol=self.cfg.symbol,
+                    startTime=start_ms,
+                    endTime=end_ms,
+                ),
+                timeout=30,
+            )
+        except Exception as e:
+            if "-4181" in str(e):
+                self.log.warning(
+                    f"[FILLS] -4181 Invalid start time (start={start_ms}); "
+                    f"retrying once without startTime"
+                )
+                try:
+                    return await asyncio.wait_for(
+                        self.order_mgr.client.futures_account_trades(
+                            symbol=self.cfg.symbol,
+                            endTime=end_ms,
+                        ),
+                        timeout=30,
+                    )
+                except Exception as e2:
+                    self.log.warning(f"[FILLS] retry without startTime failed: {e2}")
+                    return None
+            self.log.warning(f"[FILLS] userTrades fetch failed: {e}")
+            return None
+
+    async def _exchange_cycle_summary(self, cycle_entry_ms: int, position_direction: str) -> Optional[dict]:
+        """Считает реальные параметры закрытия цикла по userTrades.
+
+        exit_price — средневзвешенная цена закрывающих филлов (последняя нога),
+        commission — суммарная комиссия филлов цикла (USDT),
+        pnl — net (сумма realizedPnl минус комиссия).
+        Возвращает None, если филлов нет (тогда используется fallback).
+        """
+        if not self.order_mgr or not getattr(self.order_mgr, "client", None):
+            return None
+        fills = await self._fetch_cycle_fills(cycle_entry_ms, int(time.time() * 1000))
+        if not fills:
+            return None
+        position_side = "BUY" if position_direction == "LONG" else "SELL"
+        close_side = "SELL" if position_side == "BUY" else "BUY"
+        # Время последнего открывающего филла текущей ноги — отсекает филлы
+        # предыдущих ног цикла (важно для reverse, где стороны повторяются).
+        last_open_ms = 0
+        for f in fills:
+            if f.get("side") == position_side:
+                try:
+                    last_open_ms = max(last_open_ms, int(f.get("time", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+        close_qty = 0.0
+        close_notional = 0.0
+        commission = 0.0
+        realized = 0.0
+        for f in fills:
+            try:
+                realized += float(f.get("realizedPnl", 0) or 0)
+                if (f.get("commissionAsset") or "") == "USDT":
+                    commission += float(f.get("commission", 0) or 0)
+                if f.get("side") != close_side:
+                    continue
+                if last_open_ms and int(f.get("time", 0) or 0) < last_open_ms:
+                    continue
+                q = float(f.get("qty", 0) or 0)
+                pr = float(f.get("price", 0) or 0)
+                close_qty += q
+                close_notional += q * pr
+            except (TypeError, ValueError):
+                continue
+        exit_price = (close_notional / close_qty) if close_qty > 0 else None
+        return {
+            "exit_price": exit_price,
+            "close_qty": close_qty,
+            "commission": commission,
+            "pnl": realized - commission,
+            "fills_count": len(fills),
+        }
 
     async def _sync_pnl_from_exchange(self, entry_time_ms: int, trade_id: Optional[int], exit_time_ms: Optional[int] = None) -> None:
         """

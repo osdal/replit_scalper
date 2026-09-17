@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from typing import Callable, Dict, Optional
 
 import pandas as pd
@@ -10,6 +11,24 @@ from binance import AsyncClient, BinanceSocketManager
 from rate_limit import with_retry
 
 logger = logging.getLogger("market_data")
+
+# WS-цена считается свежей не дольше этого порога; после — падаем на REST ticker.
+PRICE_WS_MAX_AGE_SEC = 5.0
+# Окно дедупликации klines: одинаковый запрос в пределах окна берётся из кэша,
+# чтобы не делать одну и ту же работу дважды в одном цикле свечи.
+KLINES_DEDUPE_TTL_SEC = 3.0
+_KLINES_CACHE_MAX_KEYS = 64
+
+_klines_cache: Dict[tuple, tuple] = {}
+_klines_locks: Dict[tuple, asyncio.Lock] = {}
+
+
+def _prune_klines_cache() -> None:
+    if len(_klines_cache) <= _KLINES_CACHE_MAX_KEYS:
+        return
+    oldest = sorted(_klines_cache.items(), key=lambda kv: kv[1][0])
+    for key, _ in oldest[: _KLINES_CACHE_MAX_KEYS // 4]:
+        _klines_cache.pop(key, None)
 
 
 async def get_historical_klines(
@@ -35,24 +54,85 @@ async def get_recent_klines(
     limit: int = 200,
     start_ms: Optional[int] = None,
 ) -> pd.DataFrame:
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit,
-    }
-    if start_ms is not None:
-        params["startTime"] = start_ms
+    key = (symbol, interval, limit, start_ms)
+    cached = _klines_cache.get(key)
+    if cached is not None and (time.monotonic() - cached[0]) < KLINES_DEDUPE_TTL_SEC:
+        logger.debug(f"[CACHE] klines hit | {symbol} {interval} limit={limit}")
+        return cached[1].copy()
 
-    async def _fetch():
-        return await client.futures_klines(**params)
+    lock = _klines_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        # Повторная проверка под локом — другой корутин мог уже сходить за свечами.
+        cached = _klines_cache.get(key)
+        if cached is not None and (time.monotonic() - cached[0]) < KLINES_DEDUPE_TTL_SEC:
+            logger.debug(f"[CACHE] klines hit | {symbol} {interval} limit={limit}")
+            return cached[1].copy()
 
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        }
+        if start_ms is not None:
+            params["startTime"] = start_ms
+
+        async def _fetch():
+            return await client.futures_klines(**params)
+
+        try:
+            klines = await asyncio.wait_for(with_retry(_fetch, log=logger), timeout=120)
+        except asyncio.TimeoutError:
+            if logger:
+                logger.error(f"[POLL] get_recent_klines timeout for {symbol} {interval}")
+            raise
+        df = _klines_to_df(klines)
+        _klines_cache[key] = (time.monotonic(), df)
+        _prune_klines_cache()
+        # Копия — чтобы caller/индикаторы не мутировали закэшированный DataFrame.
+        return df.copy()
+
+
+async def get_current_price(
+    client: AsyncClient,
+    symbol: str,
+    ws_price: float = 0.0,
+    ws_ts: float = 0.0,
+    logger: Optional[logging.Logger] = None,
+    max_age: float = PRICE_WS_MAX_AGE_SEC,
+) -> float:
+    """
+    Цена для SL/TP-тика и heartbeat.
+
+    Предпочитает WS-цену (markPrice), пока она присутствует и не старше max_age;
+    REST ticker дёргается ТОЛЬКО если WS-значение отсутствует или устарело.
+    Никогда не бросает: при ошибке REST возвращает последнюю известную WS-цену
+    (или 0.0), чтобы не ронять SL/TP-тик.
+    """
+    price = float(ws_price or 0.0)
+    ws_ts = float(ws_ts or 0.0)
+    age = time.time() - ws_ts
+    has_ws = price > 0
+    if has_ws and ws_ts > 0 and age <= max_age:
+        return price
+
+    if logger:
+        if not has_ws:
+            logger.debug(f"[PRICE] WS price missing for {symbol}, falling back to REST ticker")
+        else:
+            logger.debug(
+                f"[PRICE] WS price stale ({age:.1f}s > {max_age:.0f}s) for {symbol}, "
+                f"falling back to REST ticker"
+            )
     try:
-        klines = await asyncio.wait_for(with_retry(_fetch, log=logger), timeout=120)
-    except asyncio.TimeoutError:
+        ticker = await client.futures_symbol_ticker(symbol=symbol)
+        rest_price = float(ticker.get("price", 0) or 0)
+        if rest_price > 0:
+            return rest_price
+    except Exception as e:
         if logger:
-            logger.error(f"[POLL] get_recent_klines timeout for {symbol} {interval}")
-        raise
-    return _klines_to_df(klines)
+            logger.warning(f"[PRICE] REST ticker failed for {symbol}: {e}")
+    # Фолбэк — последняя известная цена (никогда не роняем тик).
+    return price if price > 0 else 0.0
 
 
 def _klines_to_df(klines: list) -> pd.DataFrame:

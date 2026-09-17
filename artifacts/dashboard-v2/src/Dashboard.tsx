@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus } from "./hooks/useApi";
+import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids } from "./hooks/useApi";
 import { timeframePassesGridGate, getTimeframeAdx } from "./lib/gridGate";
 import { Button } from "./components/ui/button";
 import * as lightweightCharts from "lightweight-charts";
@@ -14,7 +14,7 @@ export interface Candle {
 
 type GridPhase = "waiting" | "active" | "done" | "stopped";
 
-type GridFill = { level: number; side: "BUY" | "SELL"; qty: number; entry: number; cumQuote: number };
+type GridFill = { level: number; side: "BUY" | "SELL"; qty: number; entry: number; cumQuote: number; time?: number };
 
 type CloseReason = "tp" | "sl" | "stop";
 
@@ -38,9 +38,15 @@ interface GridTpRequest {
 
 interface GridInstance {
   id: number;
+  // Phase 3: uid строки в БД /api/grids (для PATCH/DELETE). В browser-режиме не задаётся.
+  uid?: string;
   pair: string;
   timeframe: string;
   tpPct: number;
+  // Стоп-лосс: slPct% от средней цены входа (ограничивает риск на инвентарь),
+  // edgePct% от крайнего ордера сетки (бэкстоп, когда усреднения ещё нет).
+  slPct: number;
+  edgePct: number;
   gate: number;
   levels: number;
   lo: number;
@@ -71,6 +77,9 @@ interface GridInstance {
   failedLevels?: number[];
   skippedLevels?: number[];
   fillEntries?: GridFill[];
+  // Resting-ордера сетки с ценой и стороной: нужны, чтобы изменить размер
+  // (resize) по каждому orderId до первого филла.
+  entryOrders?: { orderId: number; price: number; side: "BUY" | "SELL" }[];
   positionAmt?: number | null;
   longExitInFlight?: boolean;
   shortExitInFlight?: boolean;
@@ -127,6 +136,9 @@ export function gridLevelPrices(lo: number, hi: number, nLevels: number): number
 function nLevelsOf(g: GridInstance): number {
   return g.levelPrices.length > 0 ? g.levelPrices.length + 1 : g.levels + 1;
 }
+
+const hadPosition = (g: GridInstance) =>
+  (g.fillEntries?.length ?? 0) > 0 || (g.openLots?.length ?? 0) > 0;
 
 // Размер ордера фиксирован в $: qty_i = orderSizeUsd / entry_i, поэтому средняя
 // цена входа, дающая ровно tpPct% прибыли на весь инвентарь, — гармоническое
@@ -244,9 +256,28 @@ export function sidePnlUsd(
   return gross - fees + fundingUsd;
 }
 
-// Стоп-лосс инвентаря: цена ниже lo с буфером — закрываем все лоты
-// (как stop-loss в bot/backtest_grid_gated.py).
-const SL_BUFFER = 0.02;
+// Стоп-лосс сетки по двум параметрам: SL% от средней цены входа (ограничивает
+// риск на инвентарь) и Edge% от крайнего ордера сетки (бэкстоп, когда входа
+// ещё нет). Из двух значений применяется более близкое к цене.
+export function computeGridStops(
+  g: GridInstance,
+  avgLong: number,
+  avgShort: number,
+): { long: number; short: number } {
+  const longLevelsOf = (x: GridInstance) => x.levelPrices.filter((l) => l < x.midPrice);
+  const shortLevelsOf = (x: GridInstance) => x.levelPrices.filter((l) => l > x.midPrice);
+  const outerLong = longLevelsOf(g).length ? Math.min(...longLevelsOf(g)) : g.lo;
+  const outerShort = shortLevelsOf(g).length ? Math.max(...shortLevelsOf(g)) : g.hi;
+  const longSl =
+    avgLong > 0
+      ? Math.max(avgLong * (1 - g.slPct / 100), outerLong * (1 - g.edgePct / 100))
+      : outerLong * (1 - g.edgePct / 100);
+  const shortSl =
+    avgShort > 0
+      ? Math.min(avgShort * (1 + g.slPct / 100), outerShort * (1 + g.edgePct / 100))
+      : outerShort * (1 + g.edgePct / 100);
+  return { long: longSl, short: shortSl };
+}
 
 // Algo-ордер считается исполненным по этим статусам Binance Algo API.
 function isTriggeredAlgo(status: unknown): boolean {
@@ -255,7 +286,13 @@ function isTriggeredAlgo(status: unknown): boolean {
 }
 
 const PERSIST_KEY = "gridsim.state.v1";
+// Phase 3: архив мигрированного в БД состояния браузера (данные не теряются).
+const PERSIST_MIGRATED_KEY = "gridsim.state.v1.migrated";
 const RESET_SEEN_KEY = "gridsim.resetSeenAt";
+
+// Phase 3: режим движка сеток. "browser" (по умолчанию) — всё как раньше;
+// "server" — дашборд становится наблюдателем, источник истины — БД /api/grids.
+const SERVER_ENGINE = (import.meta.env.VITE_GRID_ENGINE ?? "browser") === "server";
 
 interface PersistedState {
   grids?: GridInstance[];
@@ -325,6 +362,14 @@ function loadPersistedGrids(): GridInstance[] {
       pair: String(x.pair),
       timeframe: String(x.timeframe ?? "1d"),
       tpPct: Number(x.tpPct ?? 0),
+      slPct: (() => {
+        const n = Number(x.slPct);
+        return Number.isFinite(n) && n > 0 ? n : 2;
+      })(),
+      edgePct: (() => {
+        const n = Number(x.edgePct);
+        return Number.isFinite(n) && n > 0 ? n : 2;
+      })(),
       gate: Number(x.gate ?? 0),
       levels: Number(x.levels ?? 10),
       lo: Number(x.lo ?? 0),
@@ -370,6 +415,7 @@ function loadPersistedGrids(): GridInstance[] {
               qty: Number(f?.qty ?? 0),
               entry: Number(f?.entry ?? 0),
               cumQuote: Number(f?.cumQuote ?? 0),
+              time: Number.isFinite(Number(f?.time)) ? Number(f?.time) : undefined,
             }))
             .filter(
               (f: GridFill) =>
@@ -379,11 +425,138 @@ function loadPersistedGrids(): GridInstance[] {
                 Number.isFinite(f.cumQuote),
             )
         : undefined,
+      entryOrders: Array.isArray(x.entryOrders)
+        ? x.entryOrders
+            .map((o: any) => ({
+              orderId: Number(o?.orderId),
+              price: Number(o?.price),
+              side: (o?.side === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL",
+            }))
+            .filter((o: any) => Number.isFinite(o.orderId) && Number.isFinite(o.price))
+        : undefined,
       positionAmt:
         typeof x.positionAmt === "number" && Number.isFinite(x.positionAmt)
           ? x.positionAmt
           : undefined,
     }));
+}
+
+// Phase 3: uid строки серверной сетки (PATCH/DELETE идут по uid; для
+// мигрированных браузерных сеток uid = их числовой id).
+function gridUid(g: GridInstance): string {
+  return g.uid != null && g.uid !== "" ? g.uid : String(g.id);
+}
+
+// Phase 3: строка GET /api/grids (JSON-колонки уже распарсены API) -> GridInstance.
+function mapServerGrid(row: any): GridInstance {
+  const phases: GridPhase[] = ["waiting", "active", "done", "stopped"];
+  const numOr = (v: unknown, dflt: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : dflt;
+  };
+  const numArr = (v: unknown): number[] =>
+    Array.isArray(v) ? v.map(Number).filter((n: number) => Number.isFinite(n)) : [];
+  const createdAt = (() => {
+    const t = row?.created_at ?? row?.createdAt;
+    if (typeof t === "number" && Number.isFinite(t)) return t;
+    const parsed = Date.parse(String(t ?? ""));
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  })();
+  const midPrice = numOr(row?.midPrice, 0);
+  const fillEntries: GridFill[] | undefined = Array.isArray(row?.fillEntries)
+    ? (row.fillEntries as any[])
+        .map((f: any) => ({
+          level: Number(f?.level ?? 0),
+          side: (f?.side === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL",
+          qty: Number(f?.qty ?? 0),
+          entry: Number(f?.entry ?? 0),
+          cumQuote: Number(f?.cumQuote ?? 0),
+          time: Number.isFinite(Number(f?.time)) ? Number(f?.time) : undefined,
+        }))
+        .filter(
+          (f: GridFill) =>
+            Number.isFinite(f.level) &&
+            Number.isFinite(f.qty) &&
+            Number.isFinite(f.entry) &&
+            Number.isFinite(f.cumQuote),
+        )
+    : undefined;
+  return {
+    id: numOr(row?.id, 0),
+    uid: row?.uid != null ? String(row.uid) : undefined,
+    pair: String(row?.symbol ?? ""),
+    timeframe: String(row?.timeframe ?? "1d"),
+    tpPct: numOr(row?.tpPct, 0),
+    slPct: (() => {
+      const n = Number(row?.slPct);
+      return Number.isFinite(n) && n > 0 ? n : 2;
+    })(),
+    edgePct: (() => {
+      const n = Number(row?.edgePct);
+      return Number.isFinite(n) && n > 0 ? n : 2;
+    })(),
+    gate: numOr(row?.gate, 0),
+    levels: numOr(row?.levels, 10),
+    lo: numOr(row?.lo, 0),
+    hi: numOr(row?.hi, 0),
+    midPrice,
+    startPrice: midPrice,
+    startSide: "below",
+    phase: phases.includes(row?.phase) ? row.phase : "waiting",
+    unrealizedPnl: null,
+    realizedPnl: numOr(row?.realizedPnl, 0),
+    realizedUsd: numOr(row?.realizedUsd, 0),
+    lastResult: null,
+    createdAt,
+    orderSizeUsd: numOr(row?.orderSizeUsd, 100),
+    levelPrices: numArr(row?.levelPrices),
+    openLots: numArr(row?.openLots),
+    lastPrice: row?.lastPrice == null ? null : Number(row.lastPrice),
+    testnetOrderIds: numArr(row?.testnetOrderIds),
+    stopOrderIds: Array.isArray(row?.stopOrderIds) ? numArr(row.stopOrderIds) : undefined,
+    tpOrderIds: parseTpMap(row?.tpOrderIds),
+    tpOrderPrices: parseTpMap(row?.tpOrderPrices),
+    lastPlacementError: row?.lastPlacementError ?? undefined,
+    fillEntries,
+    positionAmt:
+      typeof row?.positionAmt === "number" && Number.isFinite(row.positionAmt)
+        ? row.positionAmt
+        : undefined,
+  };
+}
+
+// Phase 3: GridInstance -> тело POST /api/grids/import (поля схемы /api/grids).
+function gridToServerImport(g: GridInstance): Record<string, unknown> {
+  return {
+    uid: String(g.id),
+    symbol: g.pair,
+    timeframe: g.timeframe,
+    phase: g.phase,
+    lo: g.lo,
+    hi: g.hi,
+    midPrice: g.midPrice,
+    gate: g.gate,
+    levels: g.levels,
+    levelPrices: g.levelPrices,
+    tpPct: g.tpPct,
+    slPct: g.slPct,
+    edgePct: g.edgePct,
+    orderSizeUsd: g.orderSizeUsd,
+    leverage: 50,
+    testnetOrderIds: g.testnetOrderIds ?? [],
+    stopOrderIds: g.stopOrderIds ?? [],
+    tpOrderIds: g.tpOrderIds ?? {},
+    tpOrderPrices: g.tpOrderPrices ?? {},
+    fillEntries: g.fillEntries ?? [],
+    openLots: g.openLots ?? [],
+    positionAmt: g.positionAmt ?? null,
+    realizedPnl: g.realizedPnl,
+    realizedUsd: g.realizedUsd,
+    lastPrice: g.lastPrice,
+    lastPlacementError: g.lastPlacementError ?? null,
+    engine: "server",
+    createdAt: g.createdAt,
+  };
 }
 
 export default function Dashboard() {
@@ -402,7 +575,15 @@ export default function Dashboard() {
   const [gridGate, setGridGate] = useState<number>(() => readPersisted().gridGate ?? 15);
   const [tpPct, setTpPct] = useState<number | null>(() => readPersisted().tpPct ?? null);
   const [orderSizeUsd, setOrderSizeUsd] = useState<number>(() => readPersisted().orderSizeUsd ?? 100);
-  const [grids, setGrids] = useState<GridInstance[]>(() => loadPersistedGrids());
+  // Phase 3: в server-режиме источник истины — БД, стартуем с пустого списка.
+  const [grids, setGrids] = useState<GridInstance[]>(() => (SERVER_ENGINE ? [] : loadPersistedGrids()));
+  // Phase 3: ошибка разовой миграции localStorage -> БД (показывается один раз).
+  const [serverMigrationError, setServerMigrationError] = useState<string | null>(null);
+  const serverMigrationRanRef = useRef(false);
+  // Черновик поля Order $ по сетке: правится только здесь, g.orderSizeUsd не трогаем.
+  const [orderSizeDrafts, setOrderSizeDrafts] = useState<Record<number, string>>({});
+  // Сетки, для которых сейчас идёт resize на бирже.
+  const [resizingIds, setResizingIds] = useState<Set<number>>(() => new Set());
   const [resetBusy, setResetBusy] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [resetCountdown, setResetCountdown] = useState(5);
@@ -428,6 +609,8 @@ export default function Dashboard() {
 
   // Переживаем перезагрузку страницы: сохраняем сетки и настройки в localStorage.
   useEffect(() => {
+    // Phase 3: в server-режиме состояние сеток живёт в БД, localStorage не пишем.
+    if (SERVER_ENGINE) return;
     try {
       localStorage.setItem(
         PERSIST_KEY,
@@ -437,6 +620,78 @@ export default function Dashboard() {
       // ignore quota/security errors
     }
   }, [grids, timeframe, gridGate, gridNLevels, tpPct, selectedPair, activeTab, tradeMode, orderSizeUsd]);
+
+  // Phase 3: загрузка сеток из БД (источник истины в server-режиме).
+  const loadServerGrids = useCallback(async () => {
+    try {
+      const res = await fetchServerGrids();
+      const rows = Array.isArray(res?.results) ? res.results : [];
+      setGrids(rows.map(mapServerGrid));
+    } catch (e) {
+      console.error("[GRID] server grids fetch failed", e);
+    }
+  }, []);
+
+  // Phase 3: разовая миграция localStorage -> БД. Выполняется только когда
+  // SERVER_ENGINE=true и существует ключ gridsim.state.v1. При успехе ключ
+  // переносится в gridsim.state.v1.migrated (данные сохраняются); при ошибке
+  // исходный ключ остаётся нетронутым и показывается ошибка. Повторно не мигрируем.
+  useEffect(() => {
+    if (!SERVER_ENGINE) return;
+    if (serverMigrationRanRef.current) return;
+    serverMigrationRanRef.current = true;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(PERSIST_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    void (async () => {
+      try {
+        // Валидируем JSON и парсим через тот же нормализатор, что и browser-режим.
+        const parsed = JSON.parse(raw) as PersistedState;
+        if (!parsed || typeof parsed !== "object") throw new Error("invalid persisted state");
+        const payload = loadPersistedGrids().map(gridToServerImport);
+        const res = await importServerGrids(payload);
+        if (!res.ok) throw new Error(res.error ?? "import failed");
+        localStorage.setItem(PERSIST_MIGRATED_KEY, raw);
+        localStorage.removeItem(PERSIST_KEY);
+        console.log("[GRID] migration: browser state imported to DB", {
+          imported: res.imported,
+          count: payload.length,
+        });
+        await loadServerGrids();
+      } catch (e: any) {
+        console.error("[GRID] migration failed; local state kept", e);
+        setServerMigrationError(e?.message || "migration failed");
+      }
+    })();
+  }, [loadServerGrids]);
+
+  // Phase 3: поллинг GET /api/grids (~5 c) — состояние сеток для viewer-режима.
+  // В browser-режиме не запускается: поведение остаётся прежним.
+  useEffect(() => {
+    if (!SERVER_ENGINE) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetchServerGrids();
+        if (cancelled) return;
+        const rows = Array.isArray(res?.results) ? res.results : [];
+        setGrids(rows.map(mapServerGrid));
+      } catch {
+        // transient fetch errors keep the last known state
+      }
+    };
+    poll();
+    const id = setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   // Авто-очистка сеток после серверного сброса: если resetAt новее уже
   // обработанного маркера, стираем сохранённые сетки в этом браузере.
@@ -475,6 +730,8 @@ export default function Dashboard() {
   // Реальное закрытие позиции по сетке: market-close через API, затем финализация
   // по фактическим fill/cumQuote. Общий путь для TP/SL из тика и ручного stop.
   const finalizeRealClose = useCallback(async (c: GridCloseRequest) => {
+    // Phase 3: финализацию/закрытие в server-режиме выполняет серверный движок.
+    if (SERVER_ENGINE) return;
     const res = await closeGridPosition({
       symbol: c.pair,
       direction: c.direction,
@@ -601,27 +858,29 @@ export default function Dashboard() {
       startPrice: entry,
       closePrice: Number.isFinite(exitAvgPrice) && exitAvgPrice > 0 ? exitAvgPrice : g?.lastPrice ?? 0,
     }).catch(() => {});
-    saveGridResult({
-      uid: `${c.id}-${c.sinceMs}`,
-      symbol: c.pair,
-      timeframe: g?.timeframe ?? "",
-      phase,
-      exitReason: c.reason === "stop" ? "manual" : c.reason,
-      tpPct: c.tpPct,
-      gate: g?.gate ?? 0,
-      levels: g?.levels ?? 0,
-      lo: g?.lo ?? 0,
-      hi: g?.hi ?? 0,
-      mid: g?.midPrice ?? 0,
-      entry,
-      exit: Number.isFinite(exitAvgPrice) && exitAvgPrice > 0 ? exitAvgPrice : null,
-      pnl: totalPnl,
-      pnlUsd: totalUsd,
-      positions: closedFills.length,
-      createdAt: new Date(c.sinceMs).toISOString(),
-      finishedAt: new Date().toISOString(),
-      orderSizeUsd: g?.orderSizeUsd,
-    }).catch(() => {});
+    if (g && hadPosition(g)) {
+      saveGridResult({
+        uid: `${c.id}-${c.sinceMs}`,
+        symbol: c.pair,
+        timeframe: g?.timeframe ?? "",
+        phase,
+        exitReason: c.reason === "stop" ? "manual" : c.reason,
+        tpPct: c.tpPct,
+        gate: g?.gate ?? 0,
+        levels: g?.levels ?? 0,
+        lo: g?.lo ?? 0,
+        hi: g?.hi ?? 0,
+        mid: g?.midPrice ?? 0,
+        entry,
+        exit: Number.isFinite(exitAvgPrice) && exitAvgPrice > 0 ? exitAvgPrice : null,
+        pnl: totalPnl,
+        pnlUsd: totalUsd,
+        positions: closedFills.length,
+        createdAt: new Date(c.sinceMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        orderSizeUsd: g?.orderSizeUsd,
+      }).catch(() => {});
+    }
   }, []);
 
   // Синхронизация защитного TP на бирже: ставим/меняем/снимаем
@@ -640,6 +899,29 @@ export default function Dashboard() {
         tpPrice: r.tpPrice,
         error: res.error,
       });
+      return;
+    }
+    // Phase 3: TP выставляем на бирже, а состояние пишем в БД (viewer не держит истину).
+    if (SERVER_ENGINE) {
+      const g = gridsRef.current.find((x) => x.id === r.id);
+      const nextIds = { ...(g?.tpOrderIds ?? {}) };
+      const nextPrices = { ...(g?.tpOrderPrices ?? {}) };
+      const newId = Number(res.tpOrderId);
+      if (r.tpPrice == null || !Number.isFinite(newId) || newId <= 0) {
+        delete nextIds[r.direction];
+        delete nextPrices[r.direction];
+      } else {
+        nextIds[r.direction] = newId;
+        nextPrices[r.direction] = r.tpPrice;
+      }
+      const ids = nextIds.long == null && nextIds.short == null ? undefined : nextIds;
+      const prices = nextPrices.long == null && nextPrices.short == null ? undefined : nextPrices;
+      const uid = g ? gridUid(g) : String(r.id);
+      await patchGrid(uid, {
+        tpOrderIds: ids ?? {},
+        tpOrderPrices: prices ?? {},
+      }).catch((e) => console.error("[GRID] tp patch failed", { uid, error: e }));
+      setGrids((prev) => prev.map((x) => (x.id === r.id ? { ...x, tpOrderIds: ids, tpOrderPrices: prices } : x)));
       return;
     }
     setGrids((prev) =>
@@ -674,6 +956,8 @@ export default function Dashboard() {
   // Re-placement on restore: for each restored grid with phase === "active",
   // run the same placement logic as for fresh activated grids.
   useEffect(() => {
+    // Phase 3: восстановление/перевыставление — задача browser-движка.
+    if (SERVER_ENGINE) return;
     if (rePlacementDoneRef.current) return;
     const activeGrids = grids.filter((g) => g.phase === "active" && g.levelPrices.length > 0);
     if (activeGrids.length === 0) {
@@ -699,7 +983,7 @@ export default function Dashboard() {
           leverage: 50,
           lo: g.lo,
           hi: g.hi,
-          slBufferPct: SL_BUFFER * 100,
+          slBufferPct: g.edgePct * 100,
         });
         if (!res.ok || !Array.isArray(res.results)) {
           console.error("[GRID] Placement failed", {
@@ -770,6 +1054,9 @@ export default function Dashboard() {
   }, [selectedPair, timeframe]);
 
   useEffect(() => {
+    // Phase 3: активация waiting->active, TP/SL-триггеры, аннигиляция/ролл и
+    // закрытия — всё это в server-режиме делает серверный движок.
+    if (SERVER_ENGINE) return;
     const notifications: {
       pair: string;
       pnl: number;
@@ -811,27 +1098,6 @@ export default function Dashboard() {
 
         if (hasAdx && !gateOk) {
           changed = true;
-          saves.push({
-            uid: `${g.id}-${g.createdAt}`,
-            symbol: g.pair,
-            timeframe: g.timeframe,
-            phase: "stopped",
-            exitReason: "cancel",
-            tpPct: g.tpPct,
-            gate: g.gate,
-            levels: g.levels,
-            lo: g.lo,
-            hi: g.hi,
-            mid: g.midPrice,
-            entry: g.midPrice,
-            exit: null,
-            pnl: 0,
-            pnlUsd: 0,
-            positions: 0,
-            createdAt: new Date(g.createdAt).toISOString(),
-            finishedAt: new Date().toISOString(),
-            orderSizeUsd: g.orderSizeUsd,
-          });
           trackCancel(g);
           return { ...g, phase: "stopped" as GridPhase, unrealizedPnl: null, testnetOrderIds: [], stopOrderIds: [], tpOrderIds: undefined, tpOrderPrices: undefined };
         }
@@ -931,9 +1197,9 @@ export default function Dashboard() {
       const shortTp =
         avgShort > 0 ? Math.max(avgShort * (1 - g.tpPct / 100), g.midPrice) : null;
 
-      // Стоп-лосс по границам диапазона: long — вниз от lo, short — вверх от hi.
-      const slLow = g.lo > 0 ? g.lo * (1 - SL_BUFFER) : null;
-      const slHigh = g.hi > 0 ? g.hi * (1 + SL_BUFFER) : null;
+      // Стоп-лосс по параметрам сетки: SL% от средней входа и Edge% от крайнего
+      // ордера; применяется более близкий к цене (меньший риск) стоп.
+      const { long: longSl, short: shortSl } = computeGridStops(g, avgLong, avgShort);
 
       let working: GridInstance = realMode ? g : { ...g, openLots: lots };
       let dirty = false;
@@ -970,8 +1236,8 @@ export default function Dashboard() {
           working = { ...working, shortExitInFlight: true };
           dirty = true;
         };
-        if (hasLong && slLow != null && price <= slLow) requestLongExit("sl");
-        if (hasShort && slHigh != null && price >= slHigh) requestShortExit("sl");
+        if (hasLong && price <= longSl) requestLongExit("sl");
+        if (hasShort && price >= shortSl) requestShortExit("sl");
         if (hasLong && longTp != null && price >= longTp) requestLongExit("tp");
         if (hasShort && shortTp != null && price <= shortTp) requestShortExit("tp");
 
@@ -1095,8 +1361,8 @@ export default function Dashboard() {
             fillEntries: [],
           };
         };
-        if (hasLong && slLow != null && price <= slLow) closeSimSide("long", "sl");
-        if (hasShort && slHigh != null && price >= slHigh) closeSimSide("short", "sl");
+        if (hasLong && price <= longSl) closeSimSide("long", "sl");
+        if (hasShort && price >= shortSl) closeSimSide("short", "sl");
         if (hasLong && longTp != null && price >= longTp) closeSimSide("long", "tp");
         if (hasShort && shortTp != null && price <= shortTp) closeSimSide("short", "tp");
       }
@@ -1157,7 +1423,7 @@ export default function Dashboard() {
           leverage: 50,
           lo: g.lo,
           hi: g.hi,
-          slBufferPct: SL_BUFFER * 100,
+          slBufferPct: g.edgePct * 100,
         });
         if (!res.ok || !Array.isArray(res.results)) {
           console.error("[GRID] Placement failed", {
@@ -1334,6 +1600,8 @@ export default function Dashboard() {
   // фактические филлы Binance и синхронизируем fillEntries/openLots. При ошибке
   // оставляем предыдущее состояние (без обнуления).
   useEffect(() => {
+    // Phase 3: филлы Binance в server-режиме опрашивает серверный движок.
+    if (SERVER_ENGINE) return;
     let cancelled = false;
     const pollFills = async () => {
       const targets = gridsRef.current.filter(
@@ -1362,6 +1630,7 @@ export default function Dashboard() {
               qty: Number(r?.executedQty ?? 0),
               entry: Number(r?.avgPrice ?? r?.price ?? 0),
               cumQuote: Number(r?.cumQuote ?? 0),
+              time: Number.isFinite(Number(r?.time)) ? Number(r?.time) : undefined,
             };
           })
           .filter(
@@ -1371,6 +1640,21 @@ export default function Dashboard() {
               Number.isFinite(f.entry) &&
               Number.isFinite(f.cumQuote),
           );
+        // orderId -> price/side из того же ответа /fills: resize шлёт бирже
+        // именно эти resting-ордера, поэтому цена и сторона нужны на каждый id.
+        const entryOrders = results
+          .filter((r: any) => Number.isFinite(Number(r?.orderId)))
+          .map((r: any) => {
+            const px = Number(r?.price ?? 0);
+            const rawSide = typeof r?.side === "string" ? r.side.toUpperCase() : "";
+            const side: "BUY" | "SELL" =
+              rawSide === "BUY" || rawSide === "SELL"
+                ? rawSide
+                : px > g.midPrice
+                  ? "SELL"
+                  : "BUY";
+            return { orderId: Number(r.orderId), price: px, side };
+          });
         const openLots = fillEntries.map((f) => f.level).sort((a, b) => a - b);
         const sumExecuted = fillEntries.reduce((s, f) => s + f.qty, 0);
         const positionAmt = res.positionAmt == null ? null : Number(res.positionAmt);
@@ -1394,9 +1678,14 @@ export default function Dashboard() {
           const fills = g.fillEntries ?? [];
           const stopIds = g.stopOrderIds ?? [];
           const tpIds = tpOrderIdList(g);
-          let reason: "tp" | "sl" = "sl";
+          // Reason подтверждаем только по реально сработавшему защитному ордеру:
+          // иначе нейтральный "closed", а не выдуманный "sl".
+          let reason: "tp" | "sl" | "closed" = "closed";
           let exitAvgPrice = Number(g.lastPrice ?? 0);
           let exitQty = sumQty(fills);
+          // orderId реально сработавшего защитного algo-ордера: по нему берём
+          // фактические закрывающие филлы (фолбэк — actualPrice/actualQty).
+          let hitOrderId: number | null = null;
           // Защита теперь algo-ордера: сработавший определяем по algoStatus,
           // а не по филлам обычного ордера.
           const algoIds = Array.from(new Set([...tpIds, ...stopIds]));
@@ -1409,6 +1698,8 @@ export default function Dashboard() {
             const tpHit = tpIds.map(triggered).find((r: any) => r != null);
             if (tpHit) {
               reason = "tp";
+              const hitOrderIdRaw = Number(tpHit.actualOrderId ?? 0);
+              if (Number.isFinite(hitOrderIdRaw) && hitOrderIdRaw > 0) hitOrderId = hitOrderIdRaw;
               const hitPx = Number(tpHit.actualPrice ?? 0);
               const hitQty = Number(tpHit.actualQty ?? 0);
               if (Number.isFinite(hitPx) && hitPx > 0) exitAvgPrice = hitPx;
@@ -1416,6 +1707,9 @@ export default function Dashboard() {
             } else {
               const slHit = stopIds.map(triggered).find((r: any) => r != null);
               if (slHit) {
+                reason = "sl";
+                const hitOrderIdRaw = Number(slHit.actualOrderId ?? 0);
+                if (Number.isFinite(hitOrderIdRaw) && hitOrderIdRaw > 0) hitOrderId = hitOrderIdRaw;
                 const hitPx = Number(slHit.actualPrice ?? 0);
                 const hitQty = Number(slHit.actualQty ?? 0);
                 if (Number.isFinite(hitPx) && hitPx > 0) exitAvgPrice = hitPx;
@@ -1423,9 +1717,70 @@ export default function Dashboard() {
               }
             }
           }
-          const closedNotional = realNotionalUsd(fills);
-          const netUsd = realPnlUsd(fills, exitAvgPrice, exitQty, 0);
-          const pct = closedNotional > 0 ? (netUsd / closedNotional) * 100 : 0;
+          if (reason !== "closed" && hitOrderId != null) {
+            // Подтверждённая защита: настоящие цена/объём закрытия из userTrades.
+            const tr = await fetchUserTrades({ symbol: g.pair, orderId: hitOrderId }).catch(() => null);
+            if (cancelled) return;
+            const tradeQty = (tr?.trades ?? []).reduce((s, t) => s + Number(t?.qty ?? 0), 0);
+            const tradeQuote = (tr?.trades ?? []).reduce((s, t) => s + Number(t?.quoteQty ?? 0), 0);
+            const totQty = Number.isFinite(Number(tr?.totalQty)) ? Number(tr?.totalQty) : tradeQty;
+            const totQuote = Number.isFinite(Number(tr?.totalQuoteQty)) ? Number(tr?.totalQuoteQty) : tradeQuote;
+            if (totQty > 0 && Number.isFinite(totQuote)) {
+              exitQty = totQty;
+              exitAvgPrice = totQuote / totQty;
+            }
+          } else if (reason === "closed") {
+            // Защита не подтверждена: закрывающая сторона — противоположная
+            // стороне, державшей лоты; берём только её сделки после последнего
+            // входа, иначе fallback на lastPrice.
+            const buyFills = sideFills(fills, "BUY");
+            const sellFills = sideFills(fills, "SELL");
+            let heldSide: "BUY" | "SELL" | null = null;
+            if (buyFills.length > 0 && sellFills.length === 0) heldSide = "BUY";
+            else if (sellFills.length > 0 && buyFills.length === 0) heldSide = "SELL";
+            else if (buyFills.length > 0 && sellFills.length > 0) {
+              heldSide = realNotionalUsd(buyFills) >= realNotionalUsd(sellFills) ? "BUY" : "SELL";
+            }
+            if (heldSide != null) {
+              const closingSide: "BUY" | "SELL" = heldSide === "BUY" ? "SELL" : "BUY";
+              const entryFills = heldSide === "BUY" ? buyFills : sellFills;
+              let lastEntryTime = 0;
+              for (const f of entryFills) {
+                const t = Number(f.time ?? 0);
+                if (Number.isFinite(t) && t > lastEntryTime) lastEntryTime = t;
+              }
+              const minTime = lastEntryTime > 0 ? lastEntryTime : g.createdAt;
+              const tr = await fetchUserTrades({ symbol: g.pair, sinceMs: g.createdAt }).catch(() => null);
+              if (cancelled) return;
+              const closing = (tr?.trades ?? []).filter(
+                (t) =>
+                  String(t?.side ?? "").toUpperCase() === closingSide &&
+                  Number.isFinite(Number(t?.time)) &&
+                  Number(t?.time) >= minTime,
+              );
+              let qty = 0;
+              let quote = 0;
+              for (const t of closing) {
+                qty += Number(t?.qty ?? 0);
+                quote += Number(t?.quoteQty ?? 0);
+              }
+              if (qty > 0 && Number.isFinite(quote)) {
+                exitQty = qty;
+                exitAvgPrice = quote / qty;
+              }
+            }
+          }
+          // PnL по сторонам: BUY (long) зарабатывает на росте, SELL (short) — на падении.
+          // При двух сторонах суммируем; процент — от суммарного номинала входа.
+          let netUsd = 0;
+          let entryNotional = 0;
+          for (const side of ["BUY", "SELL"] as const) {
+            const sideFillSet = sideFills(fills, side);
+            if (sideFillSet.length === 0) continue;
+            netUsd += sidePnlUsd(side, sideFillSet, exitAvgPrice, sumQty(sideFillSet), 0);
+            entryNotional += realNotionalUsd(sideFillSet);
+          }
+          const pct = entryNotional > 0 ? (netUsd / entryNotional) * 100 : 0;
           const totalPnl = g.realizedPnl + pct;
           const totalUsd = g.realizedUsd + netUsd;
           const entry = realEntryAvg(fills) || g.startPrice;
@@ -1438,27 +1793,29 @@ export default function Dashboard() {
             // Снимаем ордер-сиблинг (исполненный всё равно уже FILLED).
             cancelGridStops({ symbol: g.pair, orderIds: protectiveIds }).catch(() => {});
           }
-          saveGridResult({
-            uid: `${g.id}-${g.createdAt}`,
-            symbol: g.pair,
-            timeframe: g.timeframe,
-            phase,
-            exitReason: reason,
-            tpPct: g.tpPct,
-            gate: g.gate,
-            levels: g.levels,
-            lo: g.lo,
-            hi: g.hi,
-            mid: g.midPrice,
-            entry,
-            exit: Number.isFinite(exitAvgPrice) && exitAvgPrice > 0 ? exitAvgPrice : g.lastPrice,
-            pnl: totalPnl,
-            pnlUsd: totalUsd,
-            positions: fills.length,
-            createdAt: new Date(g.createdAt).toISOString(),
-            finishedAt: new Date().toISOString(),
-            orderSizeUsd: g.orderSizeUsd,
-          }).catch(() => {});
+          if (hadPosition(g)) {
+            saveGridResult({
+              uid: `${g.id}-${g.createdAt}`,
+              symbol: g.pair,
+              timeframe: g.timeframe,
+              phase,
+              exitReason: reason,
+              tpPct: g.tpPct,
+              gate: g.gate,
+              levels: g.levels,
+              lo: g.lo,
+              hi: g.hi,
+              mid: g.midPrice,
+              entry,
+              exit: Number.isFinite(exitAvgPrice) && exitAvgPrice > 0 ? exitAvgPrice : g.lastPrice,
+              pnl: totalPnl,
+              pnlUsd: totalUsd,
+              positions: fills.length,
+              createdAt: new Date(g.createdAt).toISOString(),
+              finishedAt: new Date().toISOString(),
+              orderSizeUsd: g.orderSizeUsd,
+            }).catch(() => {});
+          }
           console.warn("[GRID] exchange protective order detected, grid finalized", {
             pair: g.pair,
             reason,
@@ -1477,6 +1834,7 @@ export default function Dashboard() {
                     lastResult: `${totalPnl.toFixed(2)}%`,
                     openLots: [],
                     fillEntries: [],
+                    entryOrders: undefined,
                     testnetOrderIds: [],
                     stopOrderIds: [],
                     tpOrderIds: undefined,
@@ -1494,6 +1852,7 @@ export default function Dashboard() {
               ? {
                   ...x,
                   fillEntries,
+                  entryOrders,
                   openLots,
                   ...(posUpdate !== undefined ? { positionAmt: posUpdate } : {}),
                 }
@@ -1514,6 +1873,8 @@ export default function Dashboard() {
   // раза в ~30 с на пару принимаем уже выставленные stop/tp по clientAlgoId,
   // добиваем отсутствующий STOP и TP. Защита должна жить на бирже без клиента.
   useEffect(() => {
+    // Phase 3: защитную STOP/TP-синхронизацию в server-режиме ведёт серверный движок.
+    if (SERVER_ENGINE) return;
     let cancelled = false;
     const sync = async () => {
       const targets = gridsRef.current.filter(
@@ -1532,6 +1893,7 @@ export default function Dashboard() {
         if (cancelled || !openRes || !openRes.ok) continue;
         // Разбираем открытые algo-ордера по префиксу (stop/tp) и суффиксу (сторона).
         const stopBy: { long?: number; short?: number } = {};
+        const stopPriceBy: { long?: number; short?: number } = {};
         const tpBy: { long?: number; short?: number } = {};
         const tpPriceBy: { long?: number; short?: number } = {};
         for (const o of openRes.orders) {
@@ -1542,6 +1904,8 @@ export default function Dashboard() {
           if (!side) continue;
           if (cid.startsWith("gridsl_")) {
             stopBy[side] = id;
+            const p = Number(o?.triggerPrice);
+            if (Number.isFinite(p) && p > 0) stopPriceBy[side] = p;
           } else if (cid.startsWith("gridtp_")) {
             tpBy[side] = id;
             const p = Number(o?.triggerPrice);
@@ -1592,23 +1956,39 @@ export default function Dashboard() {
           const hasLongPos = pos != null && pos > 0;
           const hasShortPos = pos != null && pos < 0;
 
-          // STOP: сторона со входами/филлами и без algo-стопа — ставим по границе.
+          const avgLong = avgEntry(sideFills(fills, "BUY"));
+          const avgShort = avgEntry(sideFills(fills, "SELL"));
+          const desiredStops = computeGridStops(g, avgLong, avgShort);
+
+          // STOP: ставим, если стопа нет, и заменяем, если выставленный триггер
+          // расходится с нужным по параметрам сетки (SL% / Edge%) больше чем на 1e-4.
           const placeStop = async (sideName: "long" | "short", triggerPrice: number) => {
             const key = `${pair}:${sideName}`;
             if (protectiveInFlightRef.current.has(key)) return;
             protectiveInFlightRef.current.add(key);
             try {
-              const res = await placeGridStop({ symbol: pair, direction: sideName, triggerPrice });
+              // Замена: сервер снимает переданный algoId и ставит новый стоп.
+              const liveId = stopBy[sideName];
+              const res = await placeGridStop({
+                symbol: pair,
+                direction: sideName,
+                triggerPrice,
+                algoId: liveId,
+              });
               if (cancelled) return;
               const newId = Number(res.algoId);
               if (res.ok && Number.isFinite(newId) && newId > 0) {
                 stopBy[sideName] = newId;
+                stopPriceBy[sideName] = triggerPrice;
                 setGrids((prev) =>
-                  prev.map((x) =>
-                    x.id === g.id
-                      ? { ...x, stopOrderIds: Array.from(new Set([...(x.stopOrderIds ?? []), newId])) }
-                      : x,
-                  ),
+                  prev.map((x) => {
+                    if (x.id !== g.id) return x;
+                    // Заменённый id убираем, новый кладём вместо него.
+                    const ids = new Set(x.stopOrderIds ?? []);
+                    if (liveId != null) ids.delete(liveId);
+                    ids.add(newId);
+                    return { ...x, stopOrderIds: Array.from(ids) };
+                  }),
                 );
               } else if (res.error) {
                 console.error("[GRID] stop placement failed", { pair, direction: sideName, error: res.error });
@@ -1617,11 +1997,18 @@ export default function Dashboard() {
               protectiveInFlightRef.current.delete(key);
             }
           };
-          if (hasLongPos && stopBy.long == null && g.lo > 0) {
-            await placeStop("long", g.lo * (1 - SL_BUFFER));
+          const stopNeedsReplace = (sideName: "long" | "short", want: number) => {
+            if (stopBy[sideName] == null) return true;
+            const live = stopPriceBy[sideName];
+            // Неизвестный триггер не трогаем, чтобы не дёргать стоп каждый цикл.
+            if (!Number.isFinite(live as number) || (live as number) <= 0) return false;
+            return Math.abs((live as number) - want) / Math.max(Math.abs(want), 1e-9) > 1e-4;
+          };
+          if (hasLongPos && stopNeedsReplace("long", desiredStops.long)) {
+            await placeStop("long", desiredStops.long);
           }
-          if (hasShortPos && stopBy.short == null && g.hi > 0) {
-            await placeStop("short", g.hi * (1 + SL_BUFFER));
+          if (hasShortPos && stopNeedsReplace("short", desiredStops.short)) {
+            await placeStop("short", desiredStops.short);
           }
 
           // TP: сторона с филлами и без algo-TP — ставим текущую цель (avg по
@@ -1647,8 +2034,6 @@ export default function Dashboard() {
                 protectiveInFlightRef.current.delete(pKey);
               });
           };
-          const avgLong = avgEntry(sideFills(fills, "BUY"));
-          const avgShort = avgEntry(sideFills(fills, "SELL"));
           const longTp = avgLong > 0 ? Math.min(avgLong * (1 + g.tpPct / 100), g.midPrice) : null;
           const shortTp = avgShort > 0 ? Math.max(avgShort * (1 - g.tpPct / 100), g.midPrice) : null;
           enqueueTp("long", longHasFills, avgLong, longTp);
@@ -1667,6 +2052,9 @@ export default function Dashboard() {
   // AUTO-режим: как только по паре появляется рассчитанная сетка (ADX < гейта 15
   // на любом ТФ), сразу запускаем торговлю с TP 1%. Одна сетка на монету.
   useEffect(() => {
+    // Phase 3: авто-создание сеток в server-режиме выполняет серверный движок
+    // (GRID_AUTO_ENABLED); viewer новых сеток не создаёт.
+    if (SERVER_ENGINE) return;
     if (tradeMode !== "auto") return;
     let cancelled = false;
     const AUTO_GATE = 15;
@@ -1751,6 +2139,8 @@ export default function Dashboard() {
                 pair,
                 timeframe: tf,
                 tpPct: AUTO_TP,
+                slPct: 2,
+                edgePct: 2,
                 gate: AUTO_GATE,
                 levels: gridNLevels,
                 lo: b.lo,
@@ -2212,9 +2602,86 @@ export default function Dashboard() {
         ? "No current price"
         : undefined;
 
+  // Phase 3: ручной stop в server-режиме — снимаем tracked-ордера, закрываем
+  // позиции по рынку через /grid-orders/close и пишем итог в БД.
+  const stopGridServer = useCallback(
+    async (g: GridInstance) => {
+      const uid = gridUid(g);
+      if (g.testnetOrderIds.length > 0) {
+        cancelTestnetGridOrders({ symbol: g.pair, orderIds: g.testnetOrderIds }).catch(() => {});
+      }
+      const protectiveIds = [...(g.stopOrderIds ?? []), ...tpOrderIdList(g)];
+      if (protectiveIds.length > 0) {
+        cancelGridStops({ symbol: g.pair, orderIds: protectiveIds }).catch(() => {});
+      }
+      const fills = g.fillEntries ?? [];
+      let realizedPnl = g.realizedPnl;
+      let realizedUsd = g.realizedUsd;
+      const closeSide = async (direction: "long" | "short", sideFillsArr: GridFill[]) => {
+        if (sideFillsArr.length === 0) return;
+        const res = await closeGridPosition({
+          symbol: g.pair,
+          direction,
+          quantity: sumQty(sideFillsArr),
+          sinceMs: g.createdAt,
+        }).catch(() => null);
+        const exitAvgPrice = Number(res?.avgPrice ?? 0);
+        const exitQty = Number(res?.executedQty ?? 0);
+        const fundingUsd = Number(res?.fundingUsd ?? 0);
+        if (!res?.ok || !(exitAvgPrice > 0)) {
+          console.error("[GRID] server stop close failed", {
+            pair: g.pair,
+            direction,
+            error: res?.error,
+          });
+          return;
+        }
+        const side: "BUY" | "SELL" = direction === "long" ? "BUY" : "SELL";
+        const entryNotional = notional(sideFillsArr);
+        const net = sidePnlUsd(side, sideFillsArr, exitAvgPrice, exitQty, fundingUsd);
+        realizedPnl += entryNotional > 0 ? (net / entryNotional) * 100 : 0;
+        realizedUsd += net;
+      };
+      await closeSide("long", sideFills(fills, "BUY"));
+      await closeSide("short", sideFills(fills, "SELL"));
+      const patch = {
+        phase: "stopped" as GridPhase,
+        realizedPnl,
+        realizedUsd,
+        lastResult: `${realizedPnl.toFixed(2)}%`,
+        openLots: [] as number[],
+        fillEntries: [] as GridFill[],
+        testnetOrderIds: [] as number[],
+        stopOrderIds: [] as number[],
+        tpOrderIds: {},
+        tpOrderPrices: {},
+      };
+      await patchGrid(uid, patch).catch(() => {});
+      setGrids((prev) =>
+        prev.map((x) =>
+          x.id === g.id
+            ? {
+                ...x,
+                ...patch,
+                unrealizedPnl: null,
+                tpOrderIds: undefined,
+                tpOrderPrices: undefined,
+              }
+            : x,
+        ),
+      );
+    },
+    [],
+  );
+
   const stopGrid = (id: number) => {
     const g = grids.find((x) => x.id === id);
     if (!g || (g.phase !== "waiting" && g.phase !== "active")) return;
+    // Phase 3: в server-режиме stop целиком идёт через API + запись в БД.
+    if (SERVER_ENGINE) {
+      void stopGridServer(g);
+      return;
+    }
     if (g.testnetOrderIds.length > 0) {
       // Реальный stop: отменяем resting-ордера и закрываем каждую сторону по рынку.
       if (g.longExitInFlight || g.shortExitInFlight) return;
@@ -2271,27 +2738,29 @@ export default function Dashboard() {
                 },
       ),
     );
-    saveGridResult({
-      uid: `${g.id}-${g.createdAt}`,
-      symbol: g.pair,
-      timeframe: g.timeframe,
-      phase: "stopped",
-      exitReason: "manual",
-      tpPct: g.tpPct,
-      gate: g.gate,
-      levels: g.levels,
-      lo: g.lo,
-      hi: g.hi,
-      mid: g.midPrice,
-      entry: avgEntryByNotional(g.openLots) ?? g.startPrice,
-      exit: active && prices[g.pair] != null ? prices[g.pair] : null,
-      pnl: active ? total : 0,
-      pnlUsd: active ? usdTotal : 0,
-      positions: active ? g.openLots.length : 0,
-      createdAt: new Date(g.createdAt).toISOString(),
-      finishedAt: new Date().toISOString(),
-      orderSizeUsd: g.orderSizeUsd,
-    }).catch(() => {});
+    if (hadPosition(g)) {
+      saveGridResult({
+        uid: `${g.id}-${g.createdAt}`,
+        symbol: g.pair,
+        timeframe: g.timeframe,
+        phase: "stopped",
+        exitReason: "manual",
+        tpPct: g.tpPct,
+        gate: g.gate,
+        levels: g.levels,
+        lo: g.lo,
+        hi: g.hi,
+        mid: g.midPrice,
+        entry: avgEntryByNotional(g.openLots) ?? g.startPrice,
+        exit: active && prices[g.pair] != null ? prices[g.pair] : null,
+        pnl: active ? total : 0,
+        pnlUsd: active ? usdTotal : 0,
+        positions: active ? g.openLots.length : 0,
+        createdAt: new Date(g.createdAt).toISOString(),
+        finishedAt: new Date().toISOString(),
+        orderSizeUsd: g.orderSizeUsd,
+      }).catch(() => {});
+    }
     if (g.testnetOrderIds.length > 0) {
       cancelTestnetGridOrders({ symbol: g.pair, orderIds: g.testnetOrderIds }).catch(() => {});
     }
@@ -2310,6 +2779,32 @@ export default function Dashboard() {
     setGrids((prev) =>
       prev.map((g) => (g.id === id ? { ...g, tpPct: clamped } : g)),
     );
+    // Phase 3: серверный движок применит tpPct на следующем tick.
+    if (SERVER_ENGINE) {
+      const g = gridsRef.current.find((x) => x.id === id);
+      if (g) void patchGrid(gridUid(g), { tpPct: clamped }).catch(() => {});
+    }
+  };
+
+  // Изменение SL% / Edge% сетки: только правит сохранённое значение и
+  // ограничивает его диапазоном 0.1..50. Защитный стоп на бирже подтягивает
+  // protective-sync в течение ~30 с — отдельная кнопка Apply не нужна.
+  const updateGridSl = (id: number, which: "sl" | "edge", value: number) => {
+    if (!Number.isFinite(value)) return;
+    const clamped = Math.min(Math.max(value, 0.1), 50);
+    setGrids((prev) =>
+      prev.map((g) =>
+        g.id === id ? { ...g, [which === "sl" ? "slPct" : "edgePct"]: clamped } : g,
+      ),
+    );
+    // Phase 3: серверный движок применит SL%/Edge% на следующем tick.
+    if (SERVER_ENGINE) {
+      const g = gridsRef.current.find((x) => x.id === id);
+      if (g) {
+        const patch = which === "sl" ? { slPct: clamped } : { edgePct: clamped };
+        void patchGrid(gridUid(g), patch).catch(() => {});
+      }
+    }
   };
 
   // Ручное выставление TP на биржу: пересчитывает цель по текущему tpPct и
@@ -2362,6 +2857,154 @@ export default function Dashboard() {
     });
   };
 
+  // Изменение размера ордера сетки. waiting (ордера ещё не выставлены) —
+  // только локально; active с resting-ордерами и без филлов — resize на бирже.
+  const applyGridOrderSize = (id: number, rawDraft: string) => {
+    const g = gridsRef.current.find((x) => x.id === id);
+    if (!g) return;
+    const next = Number(rawDraft);
+    const locked =
+      (g.phase !== "waiting" && g.phase !== "active") || (g.fillEntries?.length ?? 0) > 0;
+    if (locked || !Number.isFinite(next) || next <= 0 || next === g.orderSizeUsd) return;
+    if (resizingIds.has(id)) return;
+
+    // Phase 3: в server-режиме размер пишем в БД, а активные resting-ордера
+    // пересчитываем через /grid-orders/resize (цены/стороны — из /grid-orders/fills).
+    if (SERVER_ENGINE) {
+      setResizingIds((prev) => new Set(prev).add(id));
+      void (async () => {
+        try {
+          const patch: { orderSizeUsd: number; testnetOrderIds?: number[] } = { orderSizeUsd: next };
+          if (g.phase === "active" && g.testnetOrderIds.length > 0) {
+            const fillsRes = await fetchGridFills({
+              symbol: g.pair,
+              orderIds: g.testnetOrderIds,
+              sinceMs: g.createdAt,
+            }).catch(() => null);
+            const results = Array.isArray(fillsRes?.results) ? (fillsRes as any).results : [];
+            const orders = results
+              .filter((r: any) => Number.isFinite(Number(r?.orderId)))
+              .map((r: any) => {
+                const px = Number(r?.price ?? 0);
+                const rawSide = typeof r?.side === "string" ? r.side.toUpperCase() : "";
+                const side: "BUY" | "SELL" =
+                  rawSide === "BUY" || rawSide === "SELL"
+                    ? rawSide
+                    : px > g.midPrice
+                      ? "SELL"
+                      : "BUY";
+                return { orderId: Number(r.orderId), price: px, side };
+              });
+            if (orders.length > 0) {
+              const res = await resizeGridOrders({ symbol: g.pair, orderSizeUsd: next, orders });
+              if (!res.ok) {
+                console.error("[GRID] resize failed", {
+                  pair: g.pair,
+                  orderSizeUsd: next,
+                  error: res.error,
+                  errors: res.errors,
+                });
+                return;
+              }
+              const byOldId = new Map<number, any>();
+              for (const r of res.results ?? []) byOldId.set(Number(r?.orderId), r);
+              patch.testnetOrderIds = g.testnetOrderIds.map((oldId) => {
+                const r = byOldId.get(oldId);
+                const newId = Number(r?.newOrderId);
+                return r && Number.isFinite(newId) && newId > 0 ? newId : oldId;
+              });
+              const confirmed = Number(res.orderSizeUsd);
+              patch.orderSizeUsd = Number.isFinite(confirmed) && confirmed > 0 ? confirmed : next;
+            }
+          }
+          await patchGrid(gridUid(g), patch).catch(() => {});
+          setGrids((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+          setOrderSizeDrafts((prev) => ({ ...prev, [id]: String(patch.orderSizeUsd) }));
+        } catch (e: any) {
+          console.error("[GRID] resize failed", {
+            pair: g.pair,
+            orderSizeUsd: next,
+            error: e?.message || e,
+          });
+        } finally {
+          setResizingIds((prev) => {
+            const set = new Set(prev);
+            set.delete(id);
+            return set;
+          });
+        }
+      })();
+      return;
+    }
+
+    const entries = g.entryOrders ?? [];
+    if (g.phase === "waiting" || entries.length === 0) {
+      setGrids((prev) => prev.map((x) => (x.id === id ? { ...x, orderSizeUsd: next } : x)));
+      setOrderSizeDrafts((prev) => ({ ...prev, [id]: String(next) }));
+      return;
+    }
+
+    setResizingIds((prev) => new Set(prev).add(id));
+    void (async () => {
+      try {
+        const res = await resizeGridOrders({
+          symbol: g.pair,
+          orderSizeUsd: next,
+          orders: entries.map((o) => ({ orderId: o.orderId, price: o.price, side: o.side })),
+        });
+        if (!res.ok) {
+          console.error("[GRID] resize failed", {
+            pair: g.pair,
+            orderSizeUsd: next,
+            error: res.error,
+            errors: res.errors,
+          });
+          return;
+        }
+        const results = Array.isArray(res.results) ? res.results : [];
+        const byOldId = new Map<number, any>();
+        for (const r of results) byOldId.set(Number(r?.orderId), r);
+        const confirmed = Number(res.orderSizeUsd);
+        const size = Number.isFinite(confirmed) && confirmed > 0 ? confirmed : next;
+        setGrids((prev) =>
+          prev.map((x) => {
+            if (x.id !== id) return x;
+            const testnetOrderIds = x.testnetOrderIds.map((oldId) => {
+              const r = byOldId.get(oldId);
+              const newId = Number(r?.newOrderId);
+              return r && Number.isFinite(newId) && newId > 0 ? newId : oldId;
+            });
+            const entryOrders = (x.entryOrders ?? []).map((o) => {
+              const r = byOldId.get(o.orderId);
+              if (!r) return o;
+              const newId = Number(r?.newOrderId);
+              const price = Number(r?.price);
+              return {
+                orderId: Number.isFinite(newId) && newId > 0 ? newId : o.orderId,
+                price: Number.isFinite(price) ? price : o.price,
+                side: o.side,
+              };
+            });
+            return { ...x, orderSizeUsd: size, testnetOrderIds, entryOrders };
+          }),
+        );
+        setOrderSizeDrafts((prev) => ({ ...prev, [id]: String(size) }));
+      } catch (e: any) {
+        console.error("[GRID] resize failed", {
+          pair: g.pair,
+          orderSizeUsd: next,
+          error: e?.message || e,
+        });
+      } finally {
+        setResizingIds((prev) => {
+          const set = new Set(prev);
+          set.delete(id);
+          return set;
+        });
+      }
+    })();
+  };
+
   const clearFinished = () => {
     // Best-effort: снимаем оставшиеся защитные ордера завершённых сеток.
     for (const g of gridsRef.current) {
@@ -2402,6 +3045,16 @@ export default function Dashboard() {
     try {
       const stop = await stopAllBotsAndReset();
       const reset = await resetGridAccount();
+      // Phase 3: в server-режиме дополнительно чистим таблицу grids в БД.
+      let serverGridsDeleted: number | undefined;
+      if (SERVER_ENGINE) {
+        const del = await deleteAllGrids();
+        if (!del.ok) {
+          console.error("[RESET] server grids delete failed", del.error);
+        } else {
+          serverGridsDeleted = del.deleted;
+        }
+      }
       localStorage.removeItem(PERSIST_KEY);
       localStorage.setItem(RESET_SEEN_KEY, String(reset?.resetAt ?? Date.now()));
       // Защитные STOP/TP-ордера снимаем явно (серверный /reset чистит аккаунт целиком).
@@ -2420,7 +3073,9 @@ export default function Dashboard() {
         ? reset.errors.map((e: any) => e?.error ?? String(e))
         : [];
       const errors = [stop?.error, reset?.error, ...resetErrors].filter(Boolean);
-      const summary = `Bots stopped: ${botsStopped}; orders canceled: ${canceledOrders}; positions closed: ${closedPositions}; grid_history stopped: ${gridHistoryUpdated}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`;
+      const serverPart =
+        serverGridsDeleted != null ? `; server grids deleted: ${serverGridsDeleted}` : "";
+      const summary = `Bots stopped: ${botsStopped}; orders canceled: ${canceledOrders}; positions closed: ${closedPositions}; grid_history stopped: ${gridHistoryUpdated}${serverPart}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`;
       console.log("[RESET] reset everything", { stop, reset, summary });
       alert(summary);
     } finally {
@@ -2468,6 +3123,12 @@ export default function Dashboard() {
           </Button>
         </div>
       </div>
+      {serverMigrationError && (
+        <div className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-xs text-red-700">
+          Local state migration to the server failed: {serverMigrationError}. The browser
+          state was kept, so the migration will not run twice.
+        </div>
+      )}
       {pairs.length === 0 ? (
         <p className="text-zinc-500">No pairs found</p>
       ) : (
@@ -2654,6 +3315,8 @@ export default function Dashboard() {
                     pair,
                     timeframe,
                     tpPct,
+                    slPct: 2,
+                    edgePct: 2,
                     gate: gridGate,
                     levels: currentGridLevels.length,
                     lo: currentGridBounds.lo,
@@ -2799,7 +3462,22 @@ export default function Dashboard() {
                   </span>
                 </div>
               </div>
-              <div className="font-semibold mt-2 mb-1">Grids</div>
+              <div className="mt-2 mb-1 flex items-center gap-2">
+                <span className="font-semibold">Grids</span>
+                {/* Phase 3: активный режим движка — server (viewer) или browser. */}
+                <span
+                  className={`inline-flex items-center rounded px-2 py-0.5 text-[10px] font-semibold ${
+                    SERVER_ENGINE ? "bg-indigo-100 text-indigo-700" : "bg-zinc-200 text-zinc-700"
+                  }`}
+                  title={
+                    SERVER_ENGINE
+                      ? "Server engine: grids run in the api-server; this tab is a viewer"
+                      : "Browser engine: grids run in this browser tab"
+                  }
+                >
+                  engine: {SERVER_ENGINE ? "server" : "browser"}
+                </span>
+              </div>
               {grids.length === 0 ? (
                 <div className="text-zinc-500">No running grids</div>
               ) : (
@@ -2812,6 +3490,10 @@ export default function Dashboard() {
                         <th className="pr-3">TF</th>
                         <th className="pr-3">L</th>
                         <th className="pr-3">TP%</th>
+                        <th className="pr-3">TP price</th>
+                        <th className="pr-3">SL%</th>
+                        <th className="pr-3">Edge%</th>
+                        <th className="pr-3">Order $</th>
                         <th className="pr-3">mid</th>
                         <th className="pr-3">phase</th>
                         <th className="pr-3">pos</th>
@@ -2905,6 +3587,146 @@ export default function Dashboard() {
                             ) : (
                               <span className="font-mono">{g.tpPct}%</span>
                             )}
+                          </td>
+                          <td className="pr-3 font-mono">
+                            {(() => {
+                              const fills = g.fillEntries ?? [];
+                              const realMode = g.testnetOrderIds.length > 0;
+                              const longFills = sideFills(fills, "BUY");
+                              const shortFills = sideFills(fills, "SELL");
+                              const avgLong = realMode
+                                ? avgEntry(longFills)
+                                : avgEntryByNotional(g.openLots.filter((l) => l < g.midPrice)) ?? 0;
+                              const avgShort = realMode
+                                ? avgEntry(shortFills)
+                                : avgEntryByNotional(g.openLots.filter((l) => l > g.midPrice)) ?? 0;
+                              const longTp =
+                                avgLong > 0 ? Math.min(avgLong * (1 + g.tpPct / 100), g.midPrice) : null;
+                              const shortTp =
+                                avgShort > 0 ? Math.max(avgShort * (1 - g.tpPct / 100), g.midPrice) : null;
+                              const fmtPrice = (p: number) =>
+                                p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(4) : p.toFixed(6);
+                              const onExchange = (v?: number) =>
+                                typeof v === "number" && Number.isFinite(v) ? fmtPrice(v) : "—";
+                              const title = `Expected: long ${
+                                longTp != null ? fmtPrice(longTp) : "—"
+                              }, short ${shortTp != null ? fmtPrice(shortTp) : "—"} | On exchange: long ${onExchange(
+                                g.tpOrderPrices?.long,
+                              )}, short ${onExchange(g.tpOrderPrices?.short)}`;
+                              if (longTp != null && shortTp != null) {
+                                return (
+                                  <span title={title}>
+                                    L {fmtPrice(longTp)} / S {fmtPrice(shortTp)}
+                                  </span>
+                                );
+                              }
+                              if (longTp != null) {
+                                return <span title={title}>{fmtPrice(longTp)}</span>;
+                              }
+                              if (shortTp != null) {
+                                return <span title={title}>{fmtPrice(shortTp)}</span>;
+                              }
+                              return (
+                                <span className="text-zinc-500" title={title}>
+                                  —
+                                </span>
+                              );
+                            })()}
+                          </td>
+                          <td className="pr-3">
+                            {g.phase === "waiting" || g.phase === "active" ? (
+                              (() => {
+                                const stops = computeGridStops(
+                                  g,
+                                  avgEntry(sideFills(g.fillEntries, "BUY")),
+                                  avgEntry(sideFills(g.fillEntries, "SELL")),
+                                );
+                                return (
+                                  <span className="inline-flex items-center gap-1">
+                                    <input
+                                      type="number"
+                                      min="0.1"
+                                      max="50"
+                                      step="0.1"
+                                      value={g.slPct}
+                                      onChange={(e) => updateGridSl(g.id, "sl", Number(e.target.value))}
+                                      className="w-16 rounded border border-gray-300 px-1 py-0.5 text-black"
+                                      title={`Stop-loss % from the average entry\nlong \u2248 ${stops.long.toFixed(4)}, short \u2248 ${stops.short.toFixed(4)}`}
+                                    />
+                                    <span>%</span>
+                                  </span>
+                                );
+                              })()
+                            ) : (
+                              <span className="font-mono">{g.slPct}%</span>
+                            )}
+                          </td>
+                          <td className="pr-3">
+                            {g.phase === "waiting" || g.phase === "active" ? (
+                              <span className="inline-flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="0.1"
+                                  max="50"
+                                  step="0.1"
+                                  value={g.edgePct}
+                                  onChange={(e) => updateGridSl(g.id, "edge", Number(e.target.value))}
+                                  className="w-16 rounded border border-gray-300 px-1 py-0.5 text-black"
+                                  title="Stop offset % from the outermost grid order (backstop)"
+                                />
+                                <span>%</span>
+                              </span>
+                            ) : (
+                              <span className="font-mono">{g.edgePct}%</span>
+                            )}
+                          </td>
+                          <td className="pr-3">
+                            {(() => {
+                              const locked = !(
+                                (g.phase === "waiting" || g.phase === "active") &&
+                                (g.fillEntries?.length ?? 0) === 0
+                              );
+                              if (locked) {
+                                return (
+                                  <span
+                                    className="font-mono"
+                                    title="Lot size is locked after the first fill"
+                                  >
+                                    {g.orderSizeUsd}
+                                  </span>
+                                );
+                              }
+                              const draft = orderSizeDrafts[g.id] ?? String(g.orderSizeUsd);
+                              const parsed = Number(draft);
+                              const busy = resizingIds.has(g.id);
+                              const invalid =
+                                !Number.isFinite(parsed) || parsed <= 0 || parsed === g.orderSizeUsd;
+                              return (
+                                <span className="inline-flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    min="0.1"
+                                    step="1"
+                                    value={draft}
+                                    onChange={(e) =>
+                                      setOrderSizeDrafts((prev) => ({ ...prev, [g.id]: e.target.value }))
+                                    }
+                                    className="w-16 rounded border border-gray-300 px-1 py-0.5 text-black"
+                                    title="Size of one grid order (in dollars)"
+                                  />
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={invalid || busy}
+                                    onClick={() => applyGridOrderSize(g.id, draft)}
+                                    className="whitespace-nowrap bg-white text-black border-gray-300 hover:bg-gray-100"
+                                  >
+                                    {busy ? "Applying…" : "Apply"}
+                                  </Button>
+                                  <span className="text-zinc-500">can be changed until the first fill</span>
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="pr-3 font-mono">{g.midPrice.toFixed(4)}</td>
                           <td className="pr-3">

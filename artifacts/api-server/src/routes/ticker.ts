@@ -144,6 +144,18 @@ function ensureMarkPriceFeed(): void {
 
 ensureMarkPriceFeed();
 
+/**
+ * Текущая mark-цена из живого кэша фида (без REST-фолбэка). Возвращает null,
+ * если по символу ещё нет цены. Используется серверным grid-движком.
+ */
+export function getMarkPrice(symbol: string): number | null {
+  ensureMarkPriceFeed();
+  const sym = String(symbol ?? "").trim().toUpperCase();
+  if (!sym) return null;
+  const cached = markPriceCache.get(sym);
+  return typeof cached === "number" && Number.isFinite(cached) ? cached : null;
+}
+
 router.get("/price/:symbol", async (req, res) => {
   try {
     ensureMarkPriceFeed();

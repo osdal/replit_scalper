@@ -4,12 +4,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { db, botsTable } from "@workspace/db";
+import { getKlines, computeAdx } from "../adx-lib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = Router();
-const BASE_URL = "https://fapi.binance.com";
 
 /**
  * Ограничитель параллелизма: не более `limit` одновременных вызовов `fn`.
@@ -72,76 +72,6 @@ async function getSymbols(): Promise<string[]> {
     }
   }
   return [...new Set(symbols)].sort();
-}
-
-async function getKlines(symbol: string, interval = "1h", limit = 100) {
-  const url = new URL(`${BASE_URL}/fapi/v1/klines`);
-  url.searchParams.set("symbol", symbol);
-  url.searchParams.set("interval", interval);
-  url.searchParams.set("limit", String(limit));
-  const resp = await fetch(url.toString());
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "unknown error");
-    throw new Error(`Binance klines ${symbol}: ${resp.status} ${text}`);
-  }
-  return (await resp.json()) as any[];
-}
-
-function computeAdx(highs: number[], lows: number[], closes: number[], period = 14): number {
-  const n = closes.length;
-  if (n < period + 1) return NaN;
-
-  const tr: number[] = [];
-  const plusDm: number[] = [];
-  const minusDm: number[] = [];
-
-  for (let i = 1; i < n; i++) {
-    const h = highs[i];
-    const l = lows[i];
-    const c = closes[i - 1];
-    const up = highs[i] - highs[i - 1];
-    const dn = lows[i - 1] - lows[i];
-    tr.push(Math.max(h - l, Math.abs(h - c), Math.abs(l - c)));
-    plusDm.push(up > dn && up > 0 ? up : 0);
-    minusDm.push(dn > up && dn > 0 ? dn : 0);
-  }
-
-  const smooth = (src: number[]) => {
-    const out: number[] = [];
-    let sum = src.slice(0, period).reduce((a, b) => a + b, 0);
-    out.push(sum);
-    for (let i = period; i < src.length; i++) {
-      sum = sum - sum / period + src[i];
-      out.push(sum);
-    }
-    return out;
-  };
-
-  const smoothTr = smooth(tr);
-  const smoothPlus = smooth(plusDm);
-  const smoothMinus = smooth(minusDm);
-
-  const dx: number[] = [];
-  for (let i = 0; i < smoothTr.length; i++) {
-    const trVal = smoothTr[i];
-    if (trVal === 0) {
-      dx.push(0);
-      continue;
-    }
-    const pdi = 100 * smoothPlus[i] / trVal;
-    const mdi = 100 * smoothMinus[i] / trVal;
-    const denom = pdi + mdi;
-    dx.push(denom === 0 ? 0 : 100 * Math.abs(pdi - mdi) / denom);
-  }
-
-  if (dx.length === 0) return NaN;
-  let adxSum = dx.slice(0, period).reduce((a, b) => a + b, 0);
-  let adx = adxSum / period;
-  for (let i = period; i < dx.length; i++) {
-    adxSum = adxSum - adxSum / period + dx[i];
-    adx = adxSum / period;
-  }
-  return Number.isFinite(adx) ? adx : NaN;
 }
 
 type TfResult = { adx: number | null; gate: number; ok: boolean };

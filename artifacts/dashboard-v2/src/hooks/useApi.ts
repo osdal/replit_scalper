@@ -352,6 +352,9 @@ export async function placeGridStop(payload: {
   symbol: string;
   direction: "long" | "short";
   triggerPrice: number;
+  // Если задан, сервер сначала снимает старый algo-ордер, затем ставит новый
+  // и возвращает его algoId (замена стопа без «беззащитного» окна).
+  algoId?: number;
 }): Promise<{ ok: boolean; algoId?: number; orderId?: number; triggerPrice?: number; error?: string }> {
   try {
     const r = await fetch(`${API}/grid-orders/stop`, {
@@ -402,6 +405,7 @@ export interface AlgoStatusResult {
   algoId?: number;
   algoStatus?: string;
   triggerPrice?: number;
+  actualOrderId?: number;
   actualPrice?: number | string;
   actualQty?: number | string;
 }
@@ -425,6 +429,52 @@ export async function fetchAlgoStatus(payload: {
     };
   } catch (e: any) {
     return { ok: false, results: [], error: e?.message || "failed" };
+  }
+}
+
+export interface UserTrade {
+  orderId?: number;
+  side?: string;
+  price?: number | string;
+  qty?: number | string;
+  quoteQty?: number | string;
+  commission?: number | string;
+  realizedPnl?: number | string;
+  time?: number;
+}
+
+// Реальные userTrades символа: закрывающие филлы по orderId сработавшего
+// защитного algo-ордера либо все сделки с sinceMs для противоположной стороны.
+export async function fetchUserTrades(payload: {
+  symbol: string;
+  orderId?: number;
+  sinceMs?: number;
+  limit?: number;
+}): Promise<{
+  ok: boolean;
+  trades: UserTrade[];
+  totalQty?: number;
+  totalQuoteQty?: number;
+  avgPrice?: number;
+  error?: string;
+}> {
+  try {
+    const r = await fetch(`${API}/grid-orders/trades`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ok: r.ok && !data.error,
+      trades: Array.isArray(data.trades) ? data.trades : [],
+      totalQty: typeof data.totalQty === "number" ? data.totalQty : undefined,
+      totalQuoteQty: typeof data.totalQuoteQty === "number" ? data.totalQuoteQty : undefined,
+      avgPrice: typeof data.avgPrice === "number" ? data.avgPrice : undefined,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, trades: [], error: e?.message || "failed" };
   }
 }
 
@@ -491,6 +541,41 @@ export async function fetchGridFills(payload: {
   }
 }
 
+export async function resizeGridOrders(payload: {
+  symbol: string;
+  orderSizeUsd: number;
+  orders: { orderId: number; price: number; side: "BUY" | "SELL" }[];
+}): Promise<{
+  ok: boolean;
+  orderSizeUsd?: number;
+  results?: {
+    orderId: number;
+    newOrderId?: number;
+    price: number;
+    side: "BUY" | "SELL";
+    qty?: number;
+    amended?: boolean;
+  }[];
+  errors?: any[];
+  error?: string;
+}> {
+  try {
+    const r = await fetch(`${API}/grid-orders/resize`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ...data,
+      ok: r.ok && !data.error,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
 export async function closeGridPosition(payload: {
   symbol: string;
   direction?: "long" | "short";
@@ -541,6 +626,78 @@ export async function fetchGridResetStatus(): Promise<{ ok: boolean; resetAt?: n
     return {
       ok: r.ok && !data.error,
       resetAt: data.resetAt,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
+// --- Phase 3: серверные сетки (/api/grids) ---------------------------------
+// GET /api/grids открыт; import/patch/delete защищены notifyTokenGuard.
+
+export async function fetchServerGrids(): Promise<{ results: any[]; total?: number }> {
+  const url = new URL(`${API}/grids`);
+  url.searchParams.set("_ts", String(Date.now()));
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => ({}));
+  return {
+    results: Array.isArray(data?.results) ? data.results : [],
+    total: typeof data?.total === "number" ? data.total : undefined,
+  };
+}
+
+// Разовая миграция состояния браузера: bulk upsert по uid (id сетки).
+export async function importServerGrids(
+  grids: unknown[],
+): Promise<{ ok: boolean; imported?: number; error?: string }> {
+  try {
+    const r = await fetch(`${API}/grids/import`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ grids }),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ok: r.ok && !data.error,
+      imported: typeof data.imported === "number" ? data.imported : undefined,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
+export async function patchGrid(
+  uid: string,
+  fields: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const r = await fetch(`${API}/grids/${encodeURIComponent(uid)}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(fields),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ok: r.ok && !data.error,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
+export async function deleteAllGrids(): Promise<{ ok: boolean; deleted?: number; error?: string }> {
+  try {
+    const r = await fetch(`${API}/grids`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ok: r.ok && !data.error,
+      deleted: typeof data.deleted === "number" ? data.deleted : undefined,
       error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
     };
   } catch (e: any) {

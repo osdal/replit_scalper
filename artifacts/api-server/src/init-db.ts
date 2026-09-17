@@ -1,6 +1,6 @@
 import { db } from "@workspace/db";
 import { botsTable } from "@workspace/db/schema";
-import { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS } from "@workspace/db";
+import { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } from "@workspace/db";
 import { sql, eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
@@ -127,6 +127,13 @@ await db.run(sql.raw(GRID_HISTORY_CREATE_SQL));
 
 // Миграции: добавляем недостающие колонки в уже созданных БД.
 for (const migration of GRID_HISTORY_MIGRATIONS) {
+  await db.run(sql.raw(migration)).catch(() => { /* колонка уже есть */ });
+}
+
+await db.run(sql.raw(GRID_CREATE_SQL));
+
+// То же для таблицы grids: DDL + идемпотентные миграции для старых БД.
+for (const migration of GRID_MIGRATIONS) {
   await db.run(sql.raw(migration)).catch(() => { /* колонка уже есть */ });
 }
 
