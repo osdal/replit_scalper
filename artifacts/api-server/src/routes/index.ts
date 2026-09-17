@@ -14,6 +14,7 @@ import adxRouter          from "./adx";
 import notifyRouter       from "./notify";
 import gridHistoryRouter  from "./grid-history";
 import gridOrdersRouter   from "./grid-orders";
+import gridsRouter        from "./grids";
 
 const router = Router();
 
@@ -33,5 +34,6 @@ router.use("/adx",        adxRouter);
 router.use("/notify",     notifyRouter);
 router.use("/grid-history", gridHistoryRouter);
 router.use("/grid-orders",  gridOrdersRouter);
+router.use("/grids",        gridsRouter);
 
 export default router;

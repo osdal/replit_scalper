@@ -33,6 +33,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { reloadConfigsFromYaml } from "./routes/bots";
 import { recoverStaleChains } from "./routes/recovery";
+import { startGridEngine } from "./grid-engine";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -93,6 +94,7 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 // При старте сбрасываем статус ботов у которых нет реального процесса
+let stopGridEngine: (() => void) | null = null;
 resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
   app.listen(port, (err) => {
     if (err) {
@@ -100,8 +102,18 @@ resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
       process.exit(1);
     }
     logger.info({ port }, "Server listening");
+    stopGridEngine = startGridEngine();
   });
 });
+
+// Останавливаем таймер grid-движка при завершении процесса.
+function shutdown(signal: string): void {
+  logger.info({ signal }, "Shutting down");
+  if (stopGridEngine) stopGridEngine();
+  process.exit(0);
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // Восстанавливаем "зависшие" locked recovery-цепочки: на старте и периодически.
 // Если бот-владелец цепочки мёртв (упал между claim и открытием позиции) —

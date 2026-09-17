@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import math
+import time
 from typing import Optional, Tuple
 
 from binance import AsyncClient
+from binance.exceptions import BinanceAPIException
 from binance.enums import (
     SIDE_BUY, SIDE_SELL,
     ORDER_TYPE_MARKET, ORDER_TYPE_LIMIT,
@@ -12,7 +14,14 @@ from binance.enums import (
 )
 
 from config import Config
+from rate_limit import is_ban_error, reset_ban_state, wait_for_ban
 from strategy import Signal
+
+# TTL кэшей для дорогих read-only вызовов. Баланс — короткий, но достаточный,
+# чтобы не дёргать REST несколько раз в одном цикле; инвалидируется после
+# любой торговой операции. Позиции — ещё короче (повторные опросы внутри свечи).
+BALANCE_CACHE_TTL_SEC = 10.0
+POSITION_CACHE_TTL_SEC = 5.0
 
 
 def _direction_to_side(direction: str) -> str:
@@ -50,6 +59,27 @@ class OrderManager:
         self._step_size: Optional[float] = None
         self._price_precision: Optional[int] = None
         self._tick_size: Optional[float] = None
+        # AlgoId живого биржевого backstop-стопа (STOP_MARKET, closePosition=true).
+        # None = защиты на бирже нет. Персистится через Position.backstop_algo_id.
+        self.backstop_algo_id: Optional[int] = None
+        # Read-only кэши дорогих вызовов (balance / position info).
+        self._balance_cache = {"value": None, "ts": 0.0, "mode": None}
+        self._position_cache = {"value": None, "ts": 0.0, "symbol": None}
+
+    # ------------------------------------------------------------------ #
+    #  Read-only cache helpers                                             #
+    # ------------------------------------------------------------------ #
+
+    def _invalidate_balance_cache(self) -> None:
+        self._balance_cache.update(value=None, ts=0.0, mode=None)
+
+    def _invalidate_position_cache(self) -> None:
+        self._position_cache.update(value=None, ts=0.0, symbol=None)
+
+    def _invalidate_caches(self) -> None:
+        """Сбрасывает оба кэша после торговой операции (entry/close/reverse)."""
+        self._invalidate_balance_cache()
+        self._invalidate_position_cache()
 
     # ------------------------------------------------------------------ #
     #  Symbol filters                                                      #
@@ -93,52 +123,76 @@ class OrderManager:
     #  Position info                                                       #
     # ------------------------------------------------------------------ #
 
-    async def _get_real_position_qty(self, direction: str) -> float:
+    async def _fetch_positions(self):
+        """futures_position_information(cfg.symbol) с коротким TTL-кэшем.
+
+        Никогда не бросает: при ошибке API возвращает последний кэш или None.
+        При -1003 дожидается снятия бана (rate_limit) и отдаёт кэш/None, чтобы
+        caller пропустил цикл, а не долбил REST во время бана.
+        """
+        now = time.monotonic()
+        cache = self._position_cache
+        if (cache["value"] is not None and cache["symbol"] == self.cfg.symbol
+                and (now - cache["ts"]) < POSITION_CACHE_TTL_SEC):
+            self.log.debug(f"[CACHE] position hit | {self.cfg.symbol}")
+            return cache["value"]
         try:
             positions = await self.client.futures_position_information(symbol=self.cfg.symbol)
-            for p in positions:
-                amt = float(p.get("positionAmt", 0))
-                if direction == "LONG" and amt > 0:
-                    return amt
-                if direction == "SHORT" and amt < 0:
-                    return abs(amt)
-            return 0.0
+            reset_ban_state()
+            cache.update(value=positions, ts=now, symbol=self.cfg.symbol)
+            return positions
+        except BinanceAPIException as e:
+            if is_ban_error(e):
+                await wait_for_ban(e, log=self.log)
+            else:
+                self.log.warning(f"[LIVE] Could not fetch position info: {e}")
         except Exception as e:
-            self.log.warning(f"[LIVE] Could not fetch position qty: {e}")
+            self.log.warning(f"[LIVE] Could not fetch position info: {e}")
+        if cache["value"] is not None and cache["symbol"] == self.cfg.symbol:
+            self.log.warning(f"[CACHE] using cached position | {self.cfg.symbol}")
+            return cache["value"]
+        return None
+
+    async def _get_real_position_qty(self, direction: str) -> float:
+        positions = await self._fetch_positions()
+        if positions is None:
             return -1.0
+        for p in positions:
+            amt = float(p.get("positionAmt", 0))
+            if direction == "LONG" and amt > 0:
+                return amt
+            if direction == "SHORT" and amt < 0:
+                return abs(amt)
+        return 0.0
 
     async def _get_real_position_entry(self, direction: str) -> Optional[float]:
-        try:
-            positions = await self.client.futures_position_information(symbol=self.cfg.symbol)
-            for p in positions:
-                amt = float(p.get("positionAmt", 0))
-                if (direction == "LONG" and amt > 0) or (direction == "SHORT" and amt < 0):
-                    return float(p.get("entryPrice", 0))
+        positions = await self._fetch_positions()
+        if positions is None:
             return None
-        except Exception as e:
-            self.log.warning(f"[LIVE] Could not fetch position entry: {e}")
-            return None
+        for p in positions:
+            amt = float(p.get("positionAmt", 0))
+            if (direction == "LONG" and amt > 0) or (direction == "SHORT" and amt < 0):
+                return float(p.get("entryPrice", 0))
+        return None
 
     async def get_position_info(self) -> dict | None:
         """
         Возвращает информацию о текущей позиции на Бинансе.
         Returns: {qty, entry_price, unrealized_pnl, direction} or None
         """
-        try:
-            positions = await self.client.futures_position_information(symbol=self.cfg.symbol)
-            for p in positions:
-                amt = float(p.get("positionAmt", 0))
-                if abs(amt) > 0:
-                    return {
-                        "qty": abs(amt),
-                        "entry_price": float(p.get("entryPrice", 0)),
-                        "unrealized_pnl": float(p.get("unrealizedProfit", 0)),
-                        "direction": "LONG" if amt > 0 else "SHORT",
-                    }
+        positions = await self._fetch_positions()
+        if positions is None:
             return None
-        except Exception as e:
-            self.log.warning(f"[LIVE] Could not fetch position info: {e}")
-            return None
+        for p in positions:
+            amt = float(p.get("positionAmt", 0))
+            if abs(amt) > 0:
+                return {
+                    "qty": abs(amt),
+                    "entry_price": float(p.get("entryPrice", 0)),
+                    "unrealized_pnl": float(p.get("unrealizedProfit", 0)),
+                    "direction": "LONG" if amt > 0 else "SHORT",
+                }
+        return None
 
     async def _get_fill_price(self, order: dict, fallback: float) -> float:
         avg = float(order.get("avgPrice", 0))
@@ -168,14 +222,40 @@ class OrderManager:
     async def get_balance(self, mode: Optional[str] = None) -> float:
         if mode is None:
             mode = self.cfg.mode
-        if mode == "live":
+        if mode != "live":
+            return self.cfg.paper_balance
+
+        now = time.monotonic()
+        cache = self._balance_cache
+        if (cache["value"] is not None and cache["mode"] == mode
+                and (now - cache["ts"]) < BALANCE_CACHE_TTL_SEC):
+            self.log.debug(f"[CACHE] balance hit | mode={mode}")
+            return cache["value"]
+
+        try:
             account = await self.client.futures_account_balance()
             for asset in account:
                 if asset["asset"] == "USDT":
-                    return float(asset["balance"])
+                    balance = float(asset["balance"])
+                    reset_ban_state()
+                    cache.update(value=balance, ts=now, mode=mode)
+                    return balance
             raise RuntimeError("USDT balance not found")
-        else:
-            return self.cfg.paper_balance
+        except BinanceAPIException as e:
+            if is_ban_error(e):
+                await wait_for_ban(e, log=self.log)
+            else:
+                self.log.warning(f"[LIVE] balance fetch failed: {e}")
+        except Exception as e:
+            self.log.warning(f"[LIVE] balance fetch failed: {e}")
+
+        # Никогда не роняем бота: отдаём последний известный баланс, иначе 0.0
+        # (open_position в этом случае безопасно пропустит вход по qty <= 0).
+        if cache["value"] is not None and cache["mode"] == mode:
+            self.log.warning(f"[CACHE] using cached balance ${cache['value']:.2f}")
+            return cache["value"]
+        self.log.warning("[CACHE] no cached balance available, returning 0.0")
+        return 0.0
 
     # ------------------------------------------------------------------ #
     #  Cancel helpers                                                      #
@@ -186,6 +266,10 @@ class OrderManager:
             mode = self.cfg.mode
         if mode != "live":
             return
+
+        # Снимаем биржевой backstop первым: closePosition-ордер закрыл бы позицию
+        # при срабатывании, если бы остался висеть после выхода/разворота.
+        await self._cancel_exchange_backstop(self.backstop_algo_id)
 
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.cfg.symbol)
@@ -222,6 +306,112 @@ class OrderManager:
         self.log.info(f"[SL] Exchange stop-loss skipped (reverse strategy) | level={sl_price:.4f}")
         return
 
+    # ------------------------------------------------------------------ #
+    #  Exchange-side backstop stop (safety net, NOT the virtual SL)        #
+    # ------------------------------------------------------------------ #
+    #
+    # Виртуальный SL остаётся виртуальным: при его достижении бот разворачивается
+    # (см. open_reverse_position), а не закрывает позицию. Биржевой backstop — это
+    # ШИРОКИЙ STOP_MARKET с closePosition=true, который нужен только если бот
+    # офлайн/забанен и виртуальный SL некому обработать. Он всегда матчится с
+    # размером позиции (closePosition=true), поэтому qty в ордер не передаётся.
+
+    async def _place_exchange_backstop(
+        self, direction: str, sl_price: float, qty: float = 0.0
+    ) -> Optional[int]:
+        """Ставит широкий биржевой STOP_MARKET (closePosition=true) как safety-net.
+
+        trigger = LONG: sl_price * (1 - pct/100), SHORT: sl_price * (1 + pct/100),
+        где pct = cfg.exchange_sl_backstop_pct, округлённый по tickSize символа.
+        Возвращает algoId или None. Никогда не бросает исключение.
+        """
+        if not getattr(self.cfg, "exchange_sl_backstop_enabled", True):
+            self.log.debug("[BACKSTOP] Exchange backstop disabled — skipping")
+            return None
+        if sl_price is None or sl_price <= 0:
+            self.log.debug(f"[BACKSTOP] Skipped: invalid sl_price={sl_price}")
+            return None
+        if self.client is None or self.cfg.mode != "live":
+            self.log.debug("[BACKSTOP] Not live/paper without exchange — skipping")
+            return None
+        try:
+            # Защита от дубля clientAlgoId: снимаем ранее известный backstop,
+            # если он почему-то ещё жив (entry/reverse обычно уже отменили его).
+            if self.backstop_algo_id:
+                await self._cancel_exchange_backstop(self.backstop_algo_id)
+            pct = float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            if direction == "LONG":
+                trigger_raw = sl_price * (1 - pct / 100)
+                side = SIDE_SELL
+                key = "long"
+            else:
+                trigger_raw = sl_price * (1 + pct / 100)
+                side = SIDE_BUY
+                key = "short"
+            trigger_price = await self._adjust_price(trigger_raw, mode="live")
+            if trigger_price <= 0:
+                self.log.error(
+                    f"[BACKSTOP] Computed trigger price <= 0 | raw={trigger_raw} — skipping"
+                )
+                return None
+
+            client_algo_id = f"botsl_{self.cfg.symbol[:10]}_{key}"
+            resp = await self.client.futures_create_algo_order(
+                algoType="CONDITIONAL",
+                symbol=self.cfg.symbol,
+                side=side,
+                type="STOP_MARKET",
+                triggerPrice=trigger_price,
+                closePosition="true",
+                workingType="MARK_PRICE",
+                clientAlgoId=client_algo_id,
+            )
+            algo_id = None
+            if resp:
+                raw_id = resp.get("algoId")
+                if raw_id is not None:
+                    try:
+                        algo_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        algo_id = None
+            if algo_id is None:
+                self.log.error(f"[BACKSTOP] No algoId in response: {resp}")
+                return None
+            self.backstop_algo_id = algo_id
+            self.log.info(
+                f"[BACKSTOP] Exchange stop placed | {direction} side={side} "
+                f"trigger={trigger_price} sl={sl_price} pct={pct}% "
+                f"qty={qty} clientAlgoId={client_algo_id} algoId={algo_id}"
+            )
+            return algo_id
+        except Exception as e:
+            self.log.error(f"[BACKSTOP] Failed to place exchange stop: {e}", exc_info=True)
+            return None
+
+    async def _cancel_exchange_backstop(self, algo_id: Optional[int]) -> None:
+        """Снимает биржевой backstop best-effort. Никогда не бросает исключение.
+
+        DELETE /fapi/v1/algoOrder?algoId=<id>: подписанные параметры идут в query
+        string (force_params=True), а не в body — как в рабочем algoDelete
+        (grid-orders.ts). Для POST же (см. _place_exchange_backstop) подпись идёт
+        в form body, а НЕ в URL (иначе Binance отдаёт -1022).
+        """
+        if not algo_id:
+            return
+        if self.client is None or self.cfg.mode != "live":
+            return
+        try:
+            await self.client._request_futures_api(
+                "delete", "algoOrder", True,
+                force_params=True, data={"algoId": int(algo_id)},
+            )
+            self.log.info(f"[BACKSTOP] Exchange stop cancelled | algoId={algo_id}")
+        except Exception as e:
+            self.log.warning(f"[BACKSTOP] Could not cancel exchange stop algoId={algo_id}: {e}")
+        finally:
+            if self.backstop_algo_id == algo_id:
+                self.backstop_algo_id = None
+
     async def _place_tp_limit(self, direction: str, price: float, qty: float) -> None:
         side  = _opposite_side(direction)
         price = await self._adjust_price(price, mode="live")
@@ -255,10 +445,21 @@ class OrderManager:
         await self._place_sl(direction, sl_price, qty=total_qty)
         try:
             await self._place_tp_limit(direction, tp1_price, tp1_qty)
-            await self._place_tp_limit(direction, tp2_price, tp2_qty)
+            if tp2_qty <= 0 or self.cfg.tp1_close_pct >= 100:
+                # TP1 закрывает весь объём — TP2 не нужен, не спамим warning'ами.
+                self.log.debug(
+                    f"[ORDER] TP2 skipped | tp1_close_pct={self.cfg.tp1_close_pct} tp2_qty={tp2_qty}"
+                )
+            else:
+                await self._place_tp_limit(direction, tp2_price, tp2_qty)
         except Exception as e:
             self.log.error(f"[ORDER] Failed to place TP orders: {e}", exc_info=True)
             raise
+
+        # Широкий биржевой safety-net поверх виртуального SL (reverse-логика не
+        # затрагивается: _place_sl остаётся no-op). Ставим последним, чтобы при
+        # провале TP-ордеров не оставить висячий backstop без позиции в трекере.
+        await self._place_exchange_backstop(direction, sl_price, qty=total_qty)
 
     async def open_reverse_position(
         self,
@@ -309,6 +510,8 @@ class OrderManager:
                 type=ORDER_TYPE_MARKET,
                 quantity=send_qty,
             )
+            # Разворот изменил позицию/баланс — кэши невалидны.
+            self._invalidate_caches()
             entry_price = await self._get_fill_price(order, sl_price)
             self.log.info(
                 f"[REVERSE] Sent {side} qty={send_qty} → held {reverse_dir} "
@@ -351,6 +554,22 @@ class OrderManager:
         balance = await self.get_balance(mode)
         is_recovery = recovery_target is not None
 
+        # Effective SL distance actually used for the position: the ATR-based SL
+        # from the signal when use_fixed_tp_sl=false, otherwise the fixed sl_pct.
+        # Sizing uses this so qty * |entry - sl| matches the configured risk budget.
+        if (signal.entry_price > 0 and signal.sl_price > 0
+                and not getattr(self.cfg, "use_fixed_tp_sl", False)):
+            effective_sl_price = signal.sl_price
+        elif signal.entry_price > 0:
+            if signal.direction == "LONG":
+                effective_sl_price = signal.entry_price * (1 - self.cfg.sl_pct / 100)
+            else:
+                effective_sl_price = signal.entry_price * (1 + self.cfg.sl_pct / 100)
+        else:
+            effective_sl_price = signal.sl_price
+        sl_distance = abs(signal.entry_price - effective_sl_price)
+        sl_distance_pct = (sl_distance / signal.entry_price * 100) if signal.entry_price > 0 else 0.0
+
         if is_recovery:
             # Recovery FIRST — must size to cover debt, ignore fixed sizing
             # Recovery: qty = target_profit / (entry * tp1_pct%)
@@ -383,17 +602,36 @@ class OrderManager:
         elif self.cfg.fixed_qty > 0:
             raw_qty = self.cfg.fixed_qty
         elif self.cfg.fixed_risk_usd > 0:
-            # Fixed loss in USD at SL: qty = risk_usd / (entry * sl_pct%)
-            raw_qty = self.cfg.fixed_risk_usd / (signal.entry_price * self.cfg.sl_pct / 100)
+            # Fixed loss in USD at SL: qty = risk_usd / |entry - effective_sl|
+            if sl_distance > 0:
+                raw_qty = self.cfg.fixed_risk_usd / sl_distance
+            else:
+                raw_qty = self.cfg.fixed_risk_usd / (signal.entry_price * self.cfg.sl_pct / 100)
         else:
-            raw_qty = calc_quantity(
-                balance=balance,
-                risk_pct=self.cfg.risk_pct,
-                sl_pct=self.cfg.sl_pct,
-                entry_price=signal.entry_price,
-                leverage=self.cfg.leverage,
-            )
+            if sl_distance > 0 and balance > 0:
+                # risk_pct of balance over the actual SL distance
+                raw_qty = (balance * self.cfg.risk_pct / 100) / sl_distance
+            else:
+                if balance <= 0:
+                    self.log.warning(
+                        f"[RISK] Balance unavailable (${balance}) — falling back to "
+                        f"sl_pct={self.cfg.sl_pct}% for sizing"
+                    )
+                raw_qty = calc_quantity(
+                    balance=balance,
+                    risk_pct=self.cfg.risk_pct,
+                    sl_pct=self.cfg.sl_pct,
+                    entry_price=signal.entry_price,
+                    leverage=self.cfg.leverage,
+                )
         qty = await self._adjust_qty(raw_qty, mode=mode)
+
+        if qty > 0 and sl_distance > 0:
+            self.log.info(
+                f"[RISK] entry={signal.entry_price:.6f} sl={effective_sl_price:.6f} "
+                f"sl_dist={sl_distance_pct:.3f}% qty={qty} "
+                f"risk_usd=${qty * sl_distance:.4f}"
+            )
 
         if qty <= 0:
             self.log.error(
@@ -413,6 +651,8 @@ class OrderManager:
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
             )
+            # Вход изменил позицию/баланс — кэши невалидны.
+            self._invalidate_caches()
             entry_price = await self._get_fill_price(order, signal.entry_price)
             self.log.info(
                 f"[LIVE] Market order placed | {signal.direction} {self.cfg.symbol} "
@@ -424,6 +664,9 @@ class OrderManager:
             real_qty = 0.0
             for attempt in range(3):
                 await asyncio.sleep(1.0)
+                # Свежий опрос на каждой попытке — кэш не должен маскировать
+                # задержку появления позиции на бирже.
+                self._invalidate_position_cache()
                 real_qty = await self._get_real_position_qty(signal.direction)
                 if real_qty > 0:
                     break
@@ -460,6 +703,7 @@ class OrderManager:
                 )
                 await self._place_sl(signal.direction, adjusted_sl, qty=qty)
                 await self._place_tp_limit(signal.direction, adjusted_tp1, qty)
+                await self._place_exchange_backstop(signal.direction, adjusted_sl, qty=qty)
                 return entry_price, qty, tp1_price
             else:
                 await self._place_all_orders(
@@ -542,6 +786,8 @@ class OrderManager:
                 quantity=min_qty,
                 reduceOnly=True,
             )
+            # Закрытие изменило позицию/баланс — кэши невалидны.
+            self._invalidate_caches()
             self.log.info(f"[LIVE] Dust closed | {direction} qty={min_qty} actual_qty={real_qty} notional=${notional:.4f}")
             return True
         except Exception as e:
@@ -570,6 +816,8 @@ class OrderManager:
                 quantity=qty,
                 reduceOnly=True,
             )
+            # Закрытие изменило позицию/баланс — кэши невалидны.
+            self._invalidate_caches()
             self.log.info(f"[LIVE] Force closed | {direction} qty={qty}")
             return True
         except Exception as e:

@@ -428,10 +428,14 @@ def get_signal_rsi_divergence(df: pd.DataFrame, cfg: Config,
     window = df.iloc[-6:-1]
     if len(window) < 3:
         return None
-    price_min_idx = window["close"].idxmin()
-    price_max_idx = window["close"].idxmax()
-    rsi_at_min = float(window.loc[price_min_idx, "rsi"]) if not pd.isna(window.loc[price_min_idx, "rsi"]) else 0.0
-    rsi_at_max = float(window.loc[price_max_idx, "rsi"]) if not pd.isna(window.loc[price_max_idx, "rsi"]) else 0.0
+    close_vals = window["close"].to_numpy()
+    rsi_vals = window["rsi"].to_numpy()
+    price_min_pos = int(close_vals.argmin())
+    price_max_pos = int(close_vals.argmax())
+    rsi_at_min_raw = rsi_vals[price_min_pos]
+    rsi_at_max_raw = rsi_vals[price_max_pos]
+    rsi_at_min = float(rsi_at_min_raw) if not pd.isna(rsi_at_min_raw) else 0.0
+    rsi_at_max = float(rsi_at_max_raw) if not pd.isna(rsi_at_max_raw) else 0.0
     curr_close = float(curr["close"])
     prev_close = float(prev["close"])
     curr_rsi = float(curr["rsi"])

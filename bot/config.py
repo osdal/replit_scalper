@@ -72,6 +72,10 @@ class Config:
                                    # (БЕЗ динамического ATR SL/TP). Для честного теста 1.2%/0.4% на бэктесте.
     preset_sl_pct: Optional[float] = None  # Переопределение SL пресета в % (None = использовать PRESET_CONFIG)
     preset_tp_pct: Optional[float] = None  # Переопределение TP пресета в % (None = использовать PRESET_CONFIG)
+    exchange_sl_backstop_enabled: bool = True  # True = держать на бирже ШИРОКИЙ STOP_MARKET (safety-net на случай офлайна/бана)
+                                               # сверх виртуального SL. Виртуальный SL (reverse-стратегия) НЕ трогается.
+    exchange_sl_backstop_pct: float = 2.0      # Насколько backstop шире виртуального SL: LONG trigger = sl*(1-pct/100),
+                                               # SHORT trigger = sl*(1+pct/100). 2.0 = на 2% дальше уровня SL.
     atr_tp_multiplier: float = 2.0         # RR для ATR-стопов: TP = atr_tp_multiplier * SL (2.0 = RR 2:1)
     atr_tp_multiplier_long: Optional[float] = None  # Переопределение RR для LONG (None = atr_tp_multiplier)
     atr_tp_multiplier_short: Optional[float] = None  # Переопределение RR для SHORT (None = atr_tp_multiplier)

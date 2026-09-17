@@ -311,6 +311,20 @@ BOT_PYTHON=
 # Пример: BOT_PYTHON=C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe
 
 # ============================================
+# Grid engine (phase 2a/2b)
+# ============================================
+# Серверный grid-движок: активация, филлы, защита + закрытие/финализация.
+# INERT по умолчанию; работает только со строками grids.engine='server'.
+# GRID_ENGINE_ENABLED=false
+# GRID_ENGINE_INTERVAL_MS=15000
+# Auto-mode (создание waiting-сеток из символов ботов): по умолчанию выключен.
+# GRID_AUTO_ENABLED=false
+# GRID_AUTO_MAX=3
+# GRID_AUTO_TOTAL_MAX=10
+# GRID_AUTO_ORDER_USD=10
+# GRID_AUTO_LEVERAGE=50
+
+# ============================================
 # Dashboard / Recovery
 # ============================================
 DASHBOARD_API_URL=http://localhost:5000/api
@@ -332,6 +346,27 @@ SUPPORT_CHAT_ID=your_chat_id
 SUPPORT_BOT_MASTER_KEY=base64_32_bytes
 SUPPORT_BOT_DB=./support-bot/data/support_bot.db
 ```
+
+### 5.1 Серверный grid-движок (phase 2a/2b)
+
+Состояние grid-сеток вынесено из localStorage браузера на сервер: таблица `grids` (lazy DDL)
+и REST `/api/grids` (list / import / upsert / patch / delete). Движок
+(`artifacts/api-server/src/grid-engine.ts`) по умолчанию **INERT**: без
+`GRID_ENGINE_ENABLED=true` он не стартует и ничего не трогает, а при включении работает
+**только со строками `grids.engine='server'`** — браузерные сетки (`engine='browser'`)
+и Python-бот не затрагиваются.
+
+Что делает движок:
+- **2a** — активация `waiting`-сетки по касанию середины, опрос филлов активных сеток,
+  синхронизация защитных STOP/TP-ордеров;
+- **2b** — триггер TP/SL по марк-цене и закрытие стороны по рынку общим close-хелпером
+  (`grid-orders-lib.ts`), финализация (`phase='done'|'stopped'`, realized PnL, запись в
+  `grid_history`), реконсиляция сработавшей на бирже защиты (`positionAmt === 0` при
+  наличии филлов), авто-создание `waiting`-сеток (auto-mode).
+
+Переменные: `GRID_ENGINE_ENABLED` (по умолчанию `false`), `GRID_ENGINE_INTERVAL_MS`
+(15000 мс), `GRID_AUTO_ENABLED` (`false`), `GRID_AUTO_MAX` (3 новых сетки за tick),
+`GRID_AUTO_TOTAL_MAX` (10 active/waiting), `GRID_AUTO_ORDER_USD` (10), `GRID_AUTO_LEVERAGE` (50).
 
 ---
 

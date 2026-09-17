@@ -102,3 +102,5 @@ llm_backoff_sec: 60.0
 llm_short_backoff_sec: 5.0
 llm_provider_retry_delay_sec: 1.0
 commission_pct: 0.05
+exchange_sl_backstop_enabled: true
+exchange_sl_backstop_pct: 2.0
