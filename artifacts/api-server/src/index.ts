@@ -31,7 +31,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { reloadConfigsFromYaml } from "./routes/bots";
+import { reloadConfigsFromYaml, autoRestartBots } from "./routes/bots";
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
 
@@ -41,7 +41,14 @@ const __dirname = path.dirname(__filename);
 
 loadRootEnv();
 
-async function resetStaleRunningBots(): Promise<void> {
+/**
+ * Помечает is_running=0 у ботов, чей процесс не найден, и возвращает список
+ * таких символов — их затем пытается поднять autoRestartBots(). Возврат списка
+ * (а не просто сброс) нужен, чтобы отличить "бот был запущен и его надо
+ * вернуть" от "бот и так стоял".
+ */
+async function resetStaleRunningBots(): Promise<string[]> {
+  const staleSymbols: string[] = [];
   try {
     const bots = await db.select().from(botsTable);
     for (const bot of bots) {
@@ -72,11 +79,13 @@ async function resetStaleRunningBots(): Promise<void> {
           .set({ is_running: false, updated_at: new Date().toISOString() })
           .where(eq(botsTable.symbol, bot.symbol));
         logger.info({ symbol: bot.symbol }, "Reset stale bot status to stopped");
+        staleSymbols.push(bot.symbol);
       }
     }
   } catch (e) {
     logger.warn({ err: e }, "Could not reset stale bot statuses");
   }
+  return staleSymbols;
 }
 
 const rawPort = process.env["PORT"];
@@ -93,18 +102,23 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-// При старте сбрасываем статус ботов у которых нет реального процесса
+// При старте: сброс "мёртвых" is_running -> подтягиваем конфиги из YAML ->
+// автоматически поднимаем ботов, которые были запущены (AUTO_RESTART_BOTS) ->
+// только затем слушаем порт.
 let stopGridEngine: (() => void) | null = null;
-resetStaleRunningBots().then(() => reloadConfigsFromYaml()).then(() => {
-  app.listen(port, (err) => {
-    if (err) {
-      logger.error({ err }, "Error listening on port");
-      process.exit(1);
-    }
-    logger.info({ port }, "Server listening");
-    stopGridEngine = startGridEngine();
+resetStaleRunningBots()
+  .then((stale) => reloadConfigsFromYaml().then(() => stale))
+  .then((stale) => autoRestartBots(stale))
+  .then(() => {
+    app.listen(port, (err) => {
+      if (err) {
+        logger.error({ err }, "Error listening on port");
+        process.exit(1);
+      }
+      logger.info({ port }, "Server listening");
+      stopGridEngine = startGridEngine();
+    });
   });
-});
 
 // Останавливаем таймер grid-движка при завершении процесса.
 function shutdown(signal: string): void {

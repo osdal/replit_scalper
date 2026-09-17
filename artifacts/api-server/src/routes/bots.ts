@@ -240,122 +240,169 @@ router.post("/refresh", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+export type StartBotResult = {
+  ok: boolean;
+  message?: string;
+  pid?: number;
+  /** Если задано — роут обязан ответить 500 { error } (Python не найден и т.п.). */
+  error?: string;
+};
+
+/**
+ * Запускает Python-бота для символа. Процесс отвязывается от api-server
+ * (`detached` + `unref`) и пишет stdio в файл `logs/api_<symbol>_stdout.log`,
+ * чтобы рестарт/падение api-server не рвало pipe и не убивало бота.
+ * Используется роутом POST /bots/:symbol/start и авто-рестартом на старте
+ * (index.ts -> autoRestartBots).
+ */
+export async function startBotProcess(
+  symbol: string,
+  configFile: string,
+): Promise<StartBotResult> {
+  // Проверяем не запущен ли уже (через Map или через поиск PID)
+  const existingProc = botProcesses.get(symbol);
+  if (existingProc && !existingProc.killed) {
+    return { ok: false, message: "Bot already running (dashboard)" };
+  }
+  if (existingProc?.killed) {
+    botProcesses.delete(symbol);
+  }
+  const existingPid = await findBotPid(symbol);
+  if (existingPid) {
+    return { ok: false, message: `Bot already running (PID ${existingPid}). Stop it first.` };
+  }
+
+  // Find Python executable. Priority:
+  //   1. process.env.BOT_PYTHON (explicit path from .env)
+  //   2. 'python'/'python.exe' from PATH, but only if it has the bot deps
+  let pythonCmd = process.env.BOT_PYTHON || process.env.PYTHON || "";
+  if (!pythonCmd) {
+    if (process.platform === 'win32') {
+      pythonCmd = 'python.exe';
+    } else {
+      pythonCmd = 'python3';
+    }
+  }
+  // Verify the chosen python actually has the bot dependencies. If not, search
+  // for one that does, because the system default may point to a pip-user/env
+  // install without pandas.
+  const hasDeps = (cand: string): boolean => {
+    try {
+      execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!hasDeps(pythonCmd)) {
+    // Try common explicit paths for the Python that has the deps installed.
+    const candidates = [
+      process.env.BOT_PYTHON,
+      'C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe',
+      'C:/Python311/python.exe',
+      'python',
+      'python3',
+    ].filter(Boolean) as string[];
+    const found = candidates.find((c) => hasDeps(c));
+    if (!found) {
+      return { ok: false, error: "Python with bot dependencies (pandas, python-binance) not found. Check BOT_PYTHON in .env." };
+    }
+    pythonCmd = found;
+  }
+
+  const botTag = `[BOT ${symbol}]`;
+  const debugLogPath = path.join(BOT_DIR, "logs", `api_${symbol.toLowerCase()}.log`);
+  const debugWrite = (msg: string) => {
+    console.log(msg);
+    try {
+      fs.appendFileSync(debugLogPath, `${new Date().toISOString()} ${msg}\n`);
+    } catch { /* ignore */ }
+  };
+
+  // stdio ребёнка направляем в файл: если api-server умрёт, закрытый pipe
+  // не сломает отвязанный процесс (нет EPIPE/BrokenPipe).
+  const logsDir = path.join(BOT_DIR, "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  const outFd = fs.openSync(
+    path.join(logsDir, `api_${symbol.toLowerCase()}_stdout.log`),
+    "a",
+  );
+
+  let proc: ChildProcess;
+  try {
+    proc = spawn(pythonCmd, ["main.py", configFile], {
+      cwd: BOT_DIR,
+      detached: true,
+      stdio: ["ignore", outFd, outFd],
+      windowsHide: true,
+      env: process.env,
+    });
+  } catch (err) {
+    try { fs.closeSync(outFd); } catch { /* ignore */ }
+    return { ok: false, error: `Failed to spawn bot process: ${String(err)}` };
+  }
+  botProcesses.set(symbol, proc);
+  // Отвязываем дочерний процесс: он должен пережить рестарт api-server.
+  proc.unref();
+
+  proc.on("error", (err) => {
+    const msg = `${botTag} spawn error: ${err.message}`;
+    debugWrite(msg);
+    try { fs.closeSync(outFd); } catch { /* ignore */ }
+    botProcesses.delete(symbol);
+    db.update(botsTable)
+      .set({ is_running: false, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol))
+      .catch(() => {});
+  });
+  proc.on("spawn", () => {
+    debugWrite(`${botTag} process spawned (pid=${proc.pid})`);
+  });
+  // stdio больше не pipe, поэтому данные обработчики не срабатывают; оставлены
+  // безвредными (optional chaining) на случай смены режима stdio. Дебаг-трейл
+  // теперь идёт из spawn/error/exit.
+  proc.stdout?.on("data", (d) => {
+    const lines = d.toString().trim().split("\n");
+    for (const line of lines) {
+      if (line.trim()) debugWrite(`${botTag} [stdout] ${line}`);
+    }
+  });
+  proc.stderr?.on("data", (d) => {
+    const lines = d.toString().trim().split("\n");
+    for (const line of lines) {
+      if (line.trim()) debugWrite(`${botTag} ${line}`);
+    }
+  });
+  proc.on("exit", async (code, signal) => {
+    debugWrite(`${botTag} exited (code=${code} signal=${signal})`);
+    try { fs.closeSync(outFd); } catch { /* ignore */ }
+    botProcesses.delete(symbol);
+    await db.update(botsTable)
+      .set({ is_running: false, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol))
+      .catch(() => {});
+  });
+
+  await db.update(botsTable)
+    .set({ is_running: true, updated_at: new Date().toISOString() })
+    .where(eq(botsTable.symbol, symbol));
+
+  return { ok: true, message: `Bot ${symbol} started`, pid: proc.pid };
+}
+
 router.post("/:symbol/start", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
-    // Проверяем не запущен ли уже (через Map или через поиск PID)
-    const existingProc = botProcesses.get(symbol);
-    if (existingProc && !existingProc.killed) {
-      return res.json({ success: false, message: "Bot already running (dashboard)" });
-    }
-    if (existingProc?.killed) {
-      botProcesses.delete(symbol);
-    }
-    const existingPid = await findBotPid(symbol);
-    if (existingPid) {
-      return res.json({ success: false, message: `Bot already running (PID ${existingPid}). Stop it first.` });
-    }
-
     const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-
-    // Find Python executable. Priority:
-    //   1. process.env.BOT_PYTHON (explicit path from .env)
-    //   2. 'python'/'python.exe' from PATH, but only if it has the bot deps
-    let pythonCmd = process.env.BOT_PYTHON || process.env.PYTHON || "";
-    if (!pythonCmd) {
-      if (process.platform === 'win32') {
-        pythonCmd = 'python.exe';
-      } else {
-        pythonCmd = 'python3';
-      }
+    const result = await startBotProcess(symbol, configFile);
+    if (!result.ok) {
+      if (result.error) return res.status(500).json({ error: result.error });
+      return res.json({ success: false, message: result.message });
     }
-    // Verify the chosen python actually has the bot dependencies. If not, search
-    // for one that does, because the system default may point to a pip-user/env
-    // install without pandas.
-    const hasDeps = (cand: string): boolean => {
-      try {
-        execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe' });
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    if (!hasDeps(pythonCmd)) {
-      // Try common explicit paths for the Python that has the deps installed.
-      const candidates = [
-        process.env.BOT_PYTHON,
-        'C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe',
-        'C:/Python311/python.exe',
-        'python',
-        'python3',
-      ].filter(Boolean) as string[];
-      const found = candidates.find((c) => hasDeps(c));
-      if (!found) {
-        return res.status(500).json({ error: "Python with bot dependencies (pandas, python-binance) not found. Check BOT_PYTHON in .env." });
-      }
-      pythonCmd = found;
-    }
-    
-    const proc = spawn(pythonCmd, ["main.py", configFile], {
-      cwd: BOT_DIR,
-      detached: false,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      env: process.env,
-    });
-    botProcesses.set(symbol, proc);
-
-    const botTag = `[BOT ${symbol}]`;
-    const debugLogPath = path.join(BOT_DIR, "logs", `api_${symbol.toLowerCase()}.log`);
-    const debugWrite = (msg: string) => {
-      console.log(msg);
-      try {
-        fs.appendFileSync(debugLogPath, `${new Date().toISOString()} ${msg}\n`);
-      } catch { /* ignore */ }
-    };
-    proc.on("error", (err) => {
-      const msg = `${botTag} spawn error: ${err.message}`;
-      debugWrite(msg);
-      botProcesses.delete(symbol);
-      db.update(botsTable)
-        .set({ is_running: false, updated_at: new Date().toISOString() })
-        .where(eq(botsTable.symbol, symbol))
-        .catch(() => {});
-    });
-    proc.on("spawn", () => {
-      debugWrite(`${botTag} process spawned (pid=${proc.pid})`);
-    });
-    proc.stdout?.on("data", (d) => {
-      const lines = d.toString().trim().split("\n");
-      for (const line of lines) {
-        if (line.trim()) debugWrite(`${botTag} [stdout] ${line}`);
-      }
-    });
-    proc.stderr?.on("data", (d) => {
-      const lines = d.toString().trim().split("\n");
-      for (const line of lines) {
-        if (line.trim()) debugWrite(`${botTag} ${line}`);
-      }
-    });
-    proc.on("exit", (code, signal) => {
-      debugWrite(`${botTag} exited (code=${code} signal=${signal})`);
-    });
-
-    await db.update(botsTable)
-      .set({ is_running: true, updated_at: new Date().toISOString() })
-      .where(eq(botsTable.symbol, symbol));
-
-    proc.on("exit", async () => {
-      botProcesses.delete(symbol);
-      await db.update(botsTable)
-        .set({ is_running: false, updated_at: new Date().toISOString() })
-        .where(eq(botsTable.symbol, symbol));
-    });
-
-    res.json({ success: true, message: `Bot ${symbol} started` });
+    return res.json({ success: true, message: result.message });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -521,6 +568,50 @@ export async function reloadConfigsFromYaml(): Promise<void> {
       await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
     } else {
       await db.insert(botsTable).values({ symbol, is_running: false, position: null, ...values });
+    }
+  }
+}
+
+/**
+ * Авто-рестарт ботов, которые были помечены is_running=1, но чей процесс не
+ * выжил (список собирает resetStaleRunningBots в index.ts). Вызывается один раз
+ * на старте api-server, ДО app.listen. Ограничено: не более 3 попыток на символ,
+ * каждая попытка логируется, функция никогда не бросает.
+ * Выключается через AUTO_RESTART_BOTS=false (по умолчанию включено).
+ */
+export async function autoRestartBots(symbols: string[]): Promise<void> {
+  const flag = (process.env.AUTO_RESTART_BOTS ?? "true").trim().toLowerCase();
+  if (flag === "false") {
+    if (symbols && symbols.length > 0) {
+      console.log(`[auto-restart] AUTO_RESTART_BOTS=false — пропуск ${symbols.length} бот(ов): ${symbols.join(", ")}`);
+    }
+    return;
+  }
+  if (!symbols || symbols.length === 0) return;
+
+  const MAX_ATTEMPTS = 3;
+  for (const symbol of symbols) {
+    const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
+    let started = false;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !started; attempt++) {
+      try {
+        console.log(`[auto-restart] ${symbol}: attempt ${attempt}/${MAX_ATTEMPTS} (${configFile})`);
+        const result = await startBotProcess(symbol, configFile);
+        if (result.ok) {
+          started = true;
+          console.log(`[auto-restart] ${symbol}: started (pid=${result.pid})`);
+        } else {
+          console.warn(`[auto-restart] ${symbol}: not started — ${result.error || result.message}`);
+        }
+      } catch (e) {
+        console.warn(`[auto-restart] ${symbol}: attempt ${attempt} threw — ${String(e)}`);
+      }
+      if (!started && attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (!started) {
+      console.error(`[auto-restart] ${symbol}: gave up after ${MAX_ATTEMPTS} attempts`);
     }
   }
 }
