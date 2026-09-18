@@ -483,15 +483,12 @@ router.post("/:symbol/stop", async (req, res) => {
       return res.json({ success: false, message: "Bot not running" });
     }
 
-    // Удаляем файл состояния позиции
+    // State file is intentionally kept: a later Start restores the saved SL/TP
+    // from state_<symbol>.json instead of recalculating from config, which could
+    // immediately breach the SL and force an unwanted market close.
     const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
-    try {
-      if (fs.existsSync(stateFile)) {
-        fs.unlinkSync(stateFile);
-        console.log(`[STOP] Deleted state file: ${stateFile}`);
-      }
-    } catch (e) {
-      console.warn(`[STOP] Could not delete state file: ${e}`);
+    if (fs.existsSync(stateFile)) {
+      console.log(`[STOP] Keeping state file for restore: ${stateFile}`);
     }
 
     await db.update(botsTable)
