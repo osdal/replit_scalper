@@ -3017,6 +3017,29 @@ export default function Dashboard() {
         cancelTestnetGridOrders({ symbol: g.pair, orderIds: g.testnetOrderIds }).catch(() => {});
       }
     }
+    // В server-режиме список сеток поллится из GET /api/grids, поэтому без
+    // удаления в БД завершённые строки вернутся через ~5 с. Удаляем их на
+    // сервере фоном, не блокируя локальный фильтр (оптимистичный UI).
+    if (SERVER_ENGINE) {
+      void (async () => {
+        for (const phase of ["done", "stopped"] as const) {
+          try {
+            const res = await deleteAllGrids(phase);
+            if (!res.ok) {
+              console.error("[GRID] clear finished: server delete failed", {
+                phase,
+                error: res.error,
+              });
+            }
+          } catch (e: any) {
+            console.error("[GRID] clear finished: server delete failed", {
+              phase,
+              error: e?.message || e,
+            });
+          }
+        }
+      })();
+    }
     setGrids((prev) => prev.filter((g) => g.phase === "waiting" || g.phase === "active"));
   };
 

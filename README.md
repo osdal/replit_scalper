@@ -320,6 +320,9 @@ BOT_PYTHON=
 # INERT по умолчанию; работает только со строками grids.engine='server'.
 # GRID_ENGINE_ENABLED=false
 # GRID_ENGINE_INTERVAL_MS=15000
+# Сколько минут active-сетка может держать tracked entry-ордера при positionAmt=0
+# и пустых fillEntries, прежде чем движок залогирует предупреждение (по умолчанию 120).
+# GRID_STALE_ACTIVE_MINUTES=120
 # Auto-mode (создание waiting-сеток из символов ботов): по умолчанию выключен.
 # GRID_AUTO_ENABLED=false
 # GRID_AUTO_MAX=3
@@ -369,7 +372,18 @@ SUPPORT_BOT_DB=./support-bot/data/support_bot.db
 
 Переменные: `GRID_ENGINE_ENABLED` (по умолчанию `false`), `GRID_ENGINE_INTERVAL_MS`
 (15000 мс), `GRID_AUTO_ENABLED` (`false`), `GRID_AUTO_MAX` (3 новых сетки за tick),
-`GRID_AUTO_TOTAL_MAX` (10 active/waiting), `GRID_AUTO_ORDER_USD` (10), `GRID_AUTO_LEVERAGE` (50).
+`GRID_AUTO_TOTAL_MAX` (10 active/waiting), `GRID_AUTO_ORDER_USD` (10), `GRID_AUTO_LEVERAGE` (50),
+`GRID_STALE_ACTIVE_MINUTES` (120 — порог лога о «зависшей» active-сетке; движок только
+логирует и не аннулирует её автоматически).
+
+Также движок каждый tick делает **orphan sweep**: для `engine='server'` сеток в
+`waiting`/`active` читает открытые ордера символа и снимает лимитные ордера с
+`clientOrderId`, начинающимся на `grid_`, которых нет в `testnetOrderIds` (остатки
+прошлых циклов/удалений). Не более 10 отмен за tick; ошибка отмены не прерывает tick.
+Удаление сеток (`DELETE /api/grids/:uid` и `DELETE /api/grids[?phase=]`) сначала
+best-effort снимает entry-ордера (`cancelOrderIds`) и защитные STOP/TP
+(`cancelAlgoOrderIds`), а затем удаляет строки, возвращая `canceledOrders` и
+`cancelErrors`.
 
 ---
 

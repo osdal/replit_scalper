@@ -873,6 +873,35 @@ export function aggregateTradesByOrderId(trades: any[]): Map<number, TradeAggreg
   return byOrderId;
 }
 
+export interface OpenOrder {
+  orderId: number;
+  clientOrderId: string;
+  side: string;
+  price: number;
+  status: string;
+  executedQty: number;
+  avgPrice: number;
+  cumQuote: number;
+}
+
+/** Нормализованный список открытых ордеров символа (GET /fapi/v1/openOrders). */
+export async function fetchOpenOrders(symbol: string): Promise<OpenOrder[]> {
+  const raw = await binanceGet("/fapi/v1/openOrders", { symbol });
+  const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return list
+    .map((o: any) => ({
+      orderId: numOr0(o?.orderId),
+      clientOrderId: String(o?.clientOrderId ?? ""),
+      side: String(o?.side ?? ""),
+      price: numOr0(o?.price),
+      status: String(o?.status ?? ""),
+      executedQty: numOr0(o?.executedQty),
+      avgPrice: numOr0(o?.avgPrice),
+      cumQuote: numOr0(o?.cumQuote),
+    }))
+    .filter((o) => o.orderId > 0);
+}
+
 export type FillOrderResult =
   | {
       orderId: number;
@@ -911,13 +940,9 @@ export async function fetchGridFills(
   let batched = false;
   if (hasSinceMs) {
     try {
-      const openRaw = await binanceGet("/fapi/v1/openOrders", { symbol: sym });
-      const openOrders: any[] = Array.isArray(openRaw) ? openRaw : openRaw ? [openRaw] : [];
-      const openByOrderId = new Map<number, any>();
-      for (const o of openOrders) {
-        const id = Number(o?.orderId);
-        if (Number.isFinite(id)) openByOrderId.set(id, o);
-      }
+      const openOrders = await fetchOpenOrders(sym);
+      const openByOrderId = new Map<number, OpenOrder>();
+      for (const o of openOrders) openByOrderId.set(o.orderId, o);
 
       const tradesRaw = await binanceGet("/fapi/v1/userTrades", {
         symbol: sym,

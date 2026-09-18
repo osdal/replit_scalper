@@ -26,6 +26,7 @@ import {
   syncGridTp,
   fetchGridFills,
   fetchOpenAlgoOrders,
+  fetchOpenOrders,
   fetchAlgoStatus,
   closeGridPosition,
   getExchangeFilters,
@@ -36,6 +37,7 @@ import {
   type CreateStops,
   type LevelSide,
   type OpenAlgoOrder,
+  type OpenOrder,
   type OrderPlanItem,
 } from "./grid-orders-lib";
 
@@ -62,6 +64,12 @@ const DEFAULT_AUTO_MAX = 3;
 const DEFAULT_AUTO_TOTAL_MAX = 10;
 const DEFAULT_AUTO_ORDER_USD = 10;
 const DEFAULT_AUTO_LEVERAGE = 50;
+// Orphan sweep: максимум отмен «осиротевших» ордеров за один tick (rate-limit guard).
+const ORPHAN_SWEEP_MAX_CANCELS = 10;
+// Префикс clientOrderId лимитных ордеров сетки (см. createGridOrders).
+const GRID_ORDER_CLIENT_ID_PREFIX = "grid_";
+// Порог «зависшей» active-сетки (лог без действий), минуты.
+const DEFAULT_STALE_ACTIVE_MINUTES = 120;
 // Комиссии Binance USDⓈ-M (maker/taker), в долях от номинала: 0.02% / 0.05%.
 const MAKER_FEE_RATE = 0.0002;
 const TAKER_FEE_RATE = 0.0005;
@@ -459,6 +467,89 @@ async function updateGrid(uid: string, patch: GridPatch): Promise<void> {
     .where(eq(gridsTable.uid, uid));
 }
 
+interface RetainedOrders {
+  testnetOrderIds: number[];
+  stopOrderIds: number[];
+  tpOrderIds: { long?: number; short?: number };
+  tpOrderPrices: { long?: number; short?: number };
+}
+
+/**
+ * Best-effort отмена всех отслеживаемых ордеров строки. Возвращает только те id,
+ * которые снять не удалось (терять их нельзя — ордер осиротеет), и текст ошибки.
+ * Никогда не бросает: partial-ошибки по каждому id собирают сами хелперы.
+ */
+async function cancelTrackedOrders(
+  row: GridRow,
+  symbol: string,
+): Promise<{ retained: RetainedOrders; canceled: number; error: string | null }> {
+  const limitIds = parseIntArray(row.testnetOrderIds);
+  const stopIdsRaw = parseIntArray(row.stopOrderIds);
+  const tpIds = tpIdsOf(row.tpOrderIds);
+  const tpPrices = tpPricesOf(row.tpOrderPrices);
+
+  const algoIds: number[] = [...stopIdsRaw];
+  if (tpIds.long != null) algoIds.push(tpIds.long);
+  if (tpIds.short != null) algoIds.push(tpIds.short);
+
+  let error: string | null = null;
+
+  let retainedLimitIds = limitIds;
+  if (limitIds.length > 0) {
+    try {
+      const res = await cancelOrderIds(symbol, limitIds);
+      const ok = new Set(res.filter((r) => r.ok).map((r) => r.orderId));
+      retainedLimitIds = limitIds.filter((id) => !ok.has(id));
+      const errs = res
+        .filter((r) => !r.ok)
+        .map((r) => `${r.orderId}: ${r.error ?? "cancel failed"}`);
+      if (errs.length > 0) error = errs.join("; ");
+    } catch (e) {
+      retainedLimitIds = limitIds;
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  let retainedStopIds = stopIdsRaw;
+  let retainedTpIds: { long?: number; short?: number } = { ...tpIds };
+  if (algoIds.length > 0) {
+    try {
+      const res = await cancelAlgoOrderIds(symbol, algoIds);
+      const ok = new Set(res.canceled);
+      retainedStopIds = stopIdsRaw.filter((id) => !ok.has(id));
+      const nextTpIds: { long?: number; short?: number } = {};
+      if (tpIds.long != null && !ok.has(tpIds.long)) nextTpIds.long = tpIds.long;
+      if (tpIds.short != null && !ok.has(tpIds.short)) nextTpIds.short = tpIds.short;
+      retainedTpIds = nextTpIds;
+      if (res.errors.length > 0) {
+        error = res.errors.map((x) => `${x.orderId}: ${x.error}`).join("; ");
+      }
+    } catch (e) {
+      retainedStopIds = stopIdsRaw;
+      retainedTpIds = { ...tpIds };
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  const retainedTpPrices: { long?: number; short?: number } = {};
+  if (retainedTpIds.long != null && tpPrices.long != null) retainedTpPrices.long = tpPrices.long;
+  if (retainedTpIds.short != null && tpPrices.short != null) retainedTpPrices.short = tpPrices.short;
+
+  const retainedCount =
+    retainedLimitIds.length + retainedStopIds.length + Object.keys(retainedTpIds).length;
+
+  return {
+    retained: {
+      testnetOrderIds: retainedLimitIds,
+      stopOrderIds: retainedStopIds,
+      tpOrderIds: retainedTpIds,
+      tpOrderPrices: retainedTpPrices,
+    },
+    canceled: limitIds.length + algoIds.length - retainedCount,
+    error,
+  };
+}
+
 /** ADX >= gate: снимаем отслеживаемые ордера и помечаем сетку stopped. */
 async function annulGrid(
   row: GridRow,
@@ -467,38 +558,27 @@ async function annulGrid(
   adx: number,
   gate: number,
 ): Promise<void> {
-  const limitIds = parseIntArray(row.testnetOrderIds);
-  const protectiveIds = [
-    ...parseIntArray(row.stopOrderIds),
-    ...Object.values(tpIdsOf(row.tpOrderIds)),
-  ].filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);
-
-  let error: string | null = null;
-  if (limitIds.length > 0) {
-    try {
-      await cancelOrderIds(symbol, limitIds);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
-  }
-  if (protectiveIds.length > 0) {
-    try {
-      const res = await cancelAlgoOrderIds(symbol, protectiveIds);
-      if (res.errors.length > 0) error = res.errors.map((x) => x.error).join("; ");
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
-  }
+  const { retained, canceled, error } = await cancelTrackedOrders(row, symbol);
 
   clearSentTargets(row.uid);
   markMutation(row.uid);
+  const retainedCount =
+    retained.testnetOrderIds.length +
+    retained.stopOrderIds.length +
+    Object.keys(retained.tpOrderIds).length;
+  if (retainedCount > 0) {
+    logger.warn(
+      { uid: row.uid, symbol, retained },
+      "[grid-engine] annul: cancel failed, retaining ids for retry",
+    );
+  }
   await updateGrid(row.uid, {
     phase: "stopped",
     finished_at: new Date().toISOString(),
-    testnetOrderIds: JSON.stringify([]),
-    stopOrderIds: JSON.stringify([]),
-    tpOrderIds: JSON.stringify({}),
-    tpOrderPrices: JSON.stringify({}),
+    testnetOrderIds: JSON.stringify(retained.testnetOrderIds),
+    stopOrderIds: JSON.stringify(retained.stopOrderIds),
+    tpOrderIds: JSON.stringify(retained.tpOrderIds),
+    tpOrderPrices: JSON.stringify(retained.tpOrderPrices),
     lastPrice: price,
     lastPlacementError: error,
   });
@@ -508,7 +588,8 @@ async function annulGrid(
       symbol,
       adx,
       gate,
-      canceled: limitIds.length + protectiveIds.length,
+      canceled,
+      retained: retainedCount,
       error,
     },
     "[grid-engine] annul (gate)",
@@ -639,6 +720,7 @@ interface FinalizeCloseParams {
   exitQty: number;
   fundingUsd: number;
   price: number;
+  retained?: RetainedOrders;
 }
 
 /**
@@ -733,20 +815,36 @@ async function finalizeGrid(
   const finishedAt = new Date().toISOString();
   clearSentTargets(row.uid);
   markMutation(row.uid);
+  const retained = params.retained ?? {
+    testnetOrderIds: [],
+    stopOrderIds: [],
+    tpOrderIds: {},
+    tpOrderPrices: {},
+  };
+  const retainedCount =
+    retained.testnetOrderIds.length +
+    retained.stopOrderIds.length +
+    Object.keys(retained.tpOrderIds).length;
+  if (retainedCount > 0) {
+    logger.warn(
+      { uid: row.uid, symbol, retained },
+      "[grid-engine] finalize: cancel failed, retaining ids for retry",
+    );
+  }
   await updateGrid(row.uid, {
     phase,
     realizedPnl: totalPnl,
     realizedUsd: totalUsd,
     finished_at: finishedAt,
-    testnetOrderIds: JSON.stringify([]),
-    stopOrderIds: JSON.stringify([]),
-    tpOrderIds: JSON.stringify({}),
-    tpOrderPrices: JSON.stringify({}),
+    testnetOrderIds: JSON.stringify(retained.testnetOrderIds),
+    stopOrderIds: JSON.stringify(retained.stopOrderIds),
+    tpOrderIds: JSON.stringify(retained.tpOrderIds),
+    tpOrderPrices: JSON.stringify(retained.tpOrderPrices),
     fillEntries: JSON.stringify([]),
     openLots: JSON.stringify([]),
     positionAmt: 0,
     lastPrice: params.exitAvgPrice > 0 ? params.exitAvgPrice : params.price,
-    lastPlacementError: null,
+    lastPlacementError: retainedCount > 0 ? "cancel failed; ids retained" : null,
   });
 
   const entry = avgEntry(closedFills) || numOr0(row.lastPrice) || params.price;
@@ -833,30 +931,12 @@ async function triggerClose(
   if (exitInFlight.has(row.uid)) return false;
   exitInFlight.add(row.uid);
   try {
-    const orderIds = parseIntArray(row.testnetOrderIds);
-    const protectiveIds = [
-      ...parseIntArray(row.stopOrderIds),
-      ...Object.values(tpIdsOf(row.tpOrderIds)),
-    ].filter((n): n is number => Number.isFinite(n) && n > 0);
-    if (orderIds.length > 0) {
-      try {
-        await cancelOrderIds(symbol, orderIds);
-      } catch (e) {
-        logger.warn(
-          { uid: row.uid, symbol, err: (e as Error).message },
-          "[grid-engine] close: resting cancel failed",
-        );
-      }
-    }
-    if (protectiveIds.length > 0) {
-      try {
-        await cancelAlgoOrderIds(symbol, protectiveIds);
-      } catch (e) {
-        logger.warn(
-          { uid: row.uid, symbol, err: (e as Error).message },
-          "[grid-engine] close: protective cancel failed",
-        );
-      }
+    const { retained, canceled, error } = await cancelTrackedOrders(row, symbol);
+    if (error) {
+      logger.warn(
+        { uid: row.uid, symbol, canceled, err: error },
+        "[grid-engine] close: some cancels failed, ids retained",
+      );
     }
     clearSentTargets(row.uid);
 
@@ -924,6 +1004,7 @@ async function triggerClose(
       exitQty,
       fundingUsd: closeRes.fundingUsd,
       price,
+      retained,
     });
     return true;
   } finally {
@@ -1012,27 +1093,12 @@ async function reconcileFlatGrid(
   if (!(exitQty > 0)) exitQty = sumQty(fillEntries);
 
   // Снимаем остатки: resting-ордера и неисполненную защиту.
-  const orderIds = parseIntArray(row.testnetOrderIds);
-  const protectiveIds = [...stopIds, ...tpIds];
-  if (orderIds.length > 0) {
-    try {
-      await cancelOrderIds(symbol, orderIds);
-    } catch (e) {
-      logger.warn(
-        { uid: row.uid, symbol, err: (e as Error).message },
-        "[grid-engine] reconcile resting cancel failed",
-      );
-    }
-  }
-  if (protectiveIds.length > 0) {
-    try {
-      await cancelAlgoOrderIds(symbol, protectiveIds);
-    } catch (e) {
-      logger.warn(
-        { uid: row.uid, symbol, err: (e as Error).message },
-        "[grid-engine] reconcile protective cancel failed",
-      );
-    }
+  const { retained, canceled, error } = await cancelTrackedOrders(row, symbol);
+  if (error) {
+    logger.warn(
+      { uid: row.uid, symbol, canceled, err: error },
+      "[grid-engine] reconcile: some cancels failed, ids retained",
+    );
   }
   clearSentTargets(row.uid);
 
@@ -1045,6 +1111,7 @@ async function reconcileFlatGrid(
       exitQty,
       fundingUsd: 0,
       price,
+      retained,
     });
   } finally {
     exitInFlight.delete(row.uid);
@@ -1489,9 +1556,189 @@ async function runAutoMode(): Promise<void> {
   }
 }
 
+/**
+ * Повторная best-effort отмена ордеров, удержанных после завершения сетки
+ * (cancel не удался). Пока в строке остаются id — они считаются «зависшими» и
+ * снимаются позже; запись обновляется только при изменении.
+ */
+async function retryRetainedCancels(row: GridRow, symbol: string): Promise<void> {
+  const trackedCount =
+    parseIntArray(row.testnetOrderIds).length +
+    parseIntArray(row.stopOrderIds).length +
+    Object.keys(tpIdsOf(row.tpOrderIds)).length;
+  if (trackedCount === 0) return;
+  if (!canMutate(row.uid)) return;
+
+  const { retained, canceled, error } = await cancelTrackedOrders(row, symbol);
+  const retainedCount =
+    retained.testnetOrderIds.length +
+    retained.stopOrderIds.length +
+    Object.keys(retained.tpOrderIds).length;
+
+  const nextTestnet = JSON.stringify(retained.testnetOrderIds);
+  const nextStop = JSON.stringify(retained.stopOrderIds);
+  const nextTp = JSON.stringify(retained.tpOrderIds);
+  const nextTpPrices = JSON.stringify(retained.tpOrderPrices);
+  const nextError = retainedCount > 0 ? error : null;
+
+  const changed =
+    nextTestnet !== JSON.stringify(parseIntArray(row.testnetOrderIds)) ||
+    nextStop !== JSON.stringify(parseIntArray(row.stopOrderIds)) ||
+    nextTp !== JSON.stringify(tpIdsOf(row.tpOrderIds)) ||
+    nextTpPrices !== JSON.stringify(tpPricesOf(row.tpOrderPrices)) ||
+    (nextError ?? null) !== (row.lastPlacementError ?? null);
+  if (!changed) return;
+
+  markMutation(row.uid);
+  await updateGrid(row.uid, {
+    testnetOrderIds: nextTestnet,
+    stopOrderIds: nextStop,
+    tpOrderIds: nextTp,
+    tpOrderPrices: nextTpPrices,
+    lastPlacementError: nextError,
+  });
+  if (retainedCount > 0) {
+    logger.warn(
+      { uid: row.uid, symbol, retained, err: error },
+      "[grid-engine] retained cancels still failing; kept for retry",
+    );
+  } else {
+    logger.info(
+      { uid: row.uid, symbol, canceled },
+      "[grid-engine] retained cancels cleared",
+    );
+  }
+}
+
+/**
+ * Orphan sweep: для engine='server' сеток в waiting/active один раз на символ за
+ * tick читает open orders и снимает grid_-ордера, которых нет в testnetOrderIds
+ * (остатки прошлых циклов/удалений). Не более ORPHAN_SWEEP_MAX_CANCELS отмен за
+ * tick; ошибка отмены не прерывает tick.
+ */
+async function sweepOrphanOrders(): Promise<void> {
+  // Все строки (нужны и browser-сетки, чтобы не тронуть их ордера), но sweep
+  // выполняется только по engine='server' grid с phase waiting/active.
+  const rows = await db.select().from(gridsTable);
+  const activeRows = rows.filter((r) => {
+    if (String(r.engine ?? "") !== "server") return false;
+    const phase = String(r.phase ?? "");
+    return phase === "waiting" || phase === "active";
+  });
+  if (activeRows.length === 0) return;
+
+  const trackedBySymbol = new Map<string, Set<number>>();
+  for (const row of activeRows) {
+    const symbol = String(row.symbol ?? "").trim().toUpperCase();
+    if (!symbol) continue;
+    let tracked = trackedBySymbol.get(symbol);
+    if (!tracked) {
+      tracked = new Set<number>();
+      trackedBySymbol.set(symbol, tracked);
+    }
+    for (const id of parseIntArray(row.testnetOrderIds)) tracked.add(id);
+  }
+
+  // Безопасность: браузерные (engine!='server') waiting/active сетки хранят id в
+  // localStorage, поэтому их grid_-ордера могут выглядеть «неотслеживаемыми» —
+  // по таким символам sweep не выполняем, чтобы не снять чужие ордера.
+  const browserBusySymbols = new Set<string>();
+  for (const row of rows) {
+    if (String(row.engine ?? "") === "server") continue;
+    const phase = String(row.phase ?? "");
+    if (phase !== "waiting" && phase !== "active") continue;
+    const symbol = String(row.symbol ?? "").trim().toUpperCase();
+    if (symbol) browserBusySymbols.add(symbol);
+  }
+
+  const openCache = new Map<string, OpenOrder[]>();
+  let canceled = 0;
+  for (const [symbol, tracked] of trackedBySymbol) {
+    if (canceled >= ORPHAN_SWEEP_MAX_CANCELS) break;
+    if (browserBusySymbols.has(symbol)) continue;
+    let openOrders: OpenOrder[];
+    const cached = openCache.get(symbol);
+    if (cached) {
+      openOrders = cached;
+    } else {
+      try {
+        openOrders = await fetchOpenOrders(symbol);
+        openCache.set(symbol, openOrders);
+      } catch (e) {
+        logger.warn(
+          { symbol, err: (e as Error).message },
+          "[grid-engine] orphan sweep: open orders fetch failed",
+        );
+        continue;
+      }
+    }
+
+    for (const o of openOrders) {
+      if (canceled >= ORPHAN_SWEEP_MAX_CANCELS) break;
+      if (!o.clientOrderId.startsWith(GRID_ORDER_CLIENT_ID_PREFIX)) continue;
+      if (tracked.has(o.orderId)) continue;
+      try {
+        const res = await cancelOrderIds(symbol, [o.orderId]);
+        if (res.some((r) => r.ok)) {
+          canceled++;
+          logger.info(
+            { symbol, orderId: o.orderId, price: o.price },
+            `[grid-engine] orphan cancelled | symbol=${symbol} orderId=${o.orderId} price=${o.price}`,
+          );
+        } else {
+          logger.warn(
+            { symbol, orderId: o.orderId, errors: res.map((r) => r.error) },
+            "[grid-engine] orphan cancel failed",
+          );
+        }
+      } catch (e) {
+        logger.warn(
+          { symbol, orderId: o.orderId, err: (e as Error).message },
+          "[grid-engine] orphan cancel failed",
+        );
+      }
+    }
+  }
+}
+
+/** Лог (без действий) по active-сеткам без позиции/филлов, но с tracked entry-ордерами. */
+function logStaleActiveGrids(rows: GridRow[]): void {
+  const staleMinutes = envNumber("GRID_STALE_ACTIVE_MINUTES", DEFAULT_STALE_ACTIVE_MINUTES);
+  if (!(staleMinutes > 0)) return;
+  for (const row of rows) {
+    if (String(row.phase ?? "") !== "active") continue;
+    if (numOr0(row.positionAmt) !== 0) continue;
+    if (parseFills(row.fillEntries).length > 0) continue;
+    const tracked = parseIntArray(row.testnetOrderIds);
+    if (tracked.length === 0) continue;
+    const since = createdAtMs(row.activated_at) ?? createdAtMs(row.created_at);
+    if (since == null) continue;
+    const ageMinutes = (Date.now() - since) / 60_000;
+    if (ageMinutes <= staleMinutes) continue;
+    const symbol = String(row.symbol ?? "").trim().toUpperCase();
+    logger.warn(
+      {
+        uid: row.uid,
+        symbol,
+        ageMinutes: Math.round(ageMinutes),
+        trackedOrders: tracked.length,
+        staleMinutes,
+      },
+      "[grid-engine] stale active grid: entry orders tracked but position=0 and no fills (operator review)",
+    );
+  }
+}
+
 async function processGrid(row: GridRow): Promise<void> {
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return;
+
+  const phase = String(row.phase ?? "");
+  // Завершённые сетки: повторяем только снятие удержанных (не отменённых) ордеров.
+  if (phase === "done" || phase === "stopped") {
+    await retryRetainedCancels(row, symbol);
+    return;
+  }
 
   const price = getMarkPrice(symbol);
   if (price == null) {
@@ -1499,7 +1746,6 @@ async function processGrid(row: GridRow): Promise<void> {
     return;
   }
 
-  const phase = String(row.phase ?? "");
   if (phase === "waiting") {
     await handleWaiting(row, symbol, price);
   } else if (phase === "active") {
@@ -1556,6 +1802,21 @@ export function startGridEngine(): (() => void) | null {
             // игнорируем вторичную ошибку записи
           }
         }
+      }
+
+      // Orphan sweep: снимаем grid_-ордера, не отслеживаемые waiting/active
+      // сетками. Ошибка sweep не должна ронять tick.
+      try {
+        await sweepOrphanOrders();
+      } catch (e) {
+        logger.warn({ err: (e as Error).message }, "[grid-engine] orphan sweep failed");
+      }
+
+      // Пассивный лог по «зависшим» active-сеткам (без авто-аннулирования).
+      try {
+        logStaleActiveGrids(rows);
+      } catch (e) {
+        logger.warn({ err: (e as Error).message }, "[grid-engine] stale active check failed");
       }
 
       // Auto-mode: создание новых waiting-сеток. Ошибка не должна ронять tick.

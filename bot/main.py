@@ -32,6 +32,9 @@ if not _load:
 HEARTBEAT_CANDLES = 3
 LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
 
+# Порог "пыли" по объёму — совпадает с dust-логикой ниже (abs(qty) < 0.001).
+DUST_QTY = 0.001
+
 # Глобальные переменные для отслеживания recovery-состояния
 _recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recovery": bool}}
 
@@ -513,7 +516,7 @@ async def _sync_position_on_start(
                                 await recovery.release(chain_id=sync_pos.recovery_chain_id)
                                 log.info(f"[SYNC] Released locked recovery chain #{sync_pos.recovery_chain_id} for {cfg.symbol}")
                         if notifier and notifier.bot and sync_pos and ((sync_pos.mode if sync_pos else None) or cfg.mode) == "live":
-                            notifier.send_message(f"🔒 CLOSED (sync) {cfg.symbol} {sync_pos.direction} | Entry={sync_pos.entry_price} PnL={pnl_val:+.4f}")
+                            await notifier.send_message(f"🔒 CLOSED (sync) {cfg.symbol} {sync_pos.direction} | Entry={sync_pos.entry_price} PnL={pnl_val:+.4f}")
             except Exception as e:
                 log.debug(f"[SYNC] Cleanup error: {e}")
             tracker.position = None
@@ -1028,6 +1031,48 @@ async def _run_live_or_paper(
         pos_mode = (pos.mode if pos else None) or cfg.mode
         is_live_close = (pos_mode == "live")
         is_live = (pos_mode == "live")
+
+        async def _force_flat_after_reverse(direction: str) -> None:
+            """После закрытия reverse-ноги добиваем биржевой остаток выше пыли и
+            сбрасываем трекер в плоское состояние (total_qty/remaining_qty не
+            должны оставаться рассинхронизированными)."""
+            if not is_live_close:
+                return
+            try:
+                order_mgr._invalidate_position_cache()
+                real_qty = await order_mgr._get_real_position_qty(direction)
+            except Exception as e:
+                log.warning(f"[REVERSE] residual check failed: {e}")
+                return
+            if real_qty > 0:
+                if real_qty > DUST_QTY:
+                    log.warning(
+                        f"[REVERSE] residual detected | qty={real_qty:.6f} direction={direction}"
+                    )
+                    closed = False
+                    try:
+                        closed = await order_mgr.close_position_market(direction, mode=pos_mode)
+                        if not closed:
+                            closed = await order_mgr.close_dust(direction, mode=pos_mode)
+                    except Exception as e:
+                        log.error(f"[REVERSE] residual close failed | qty={real_qty:.6f}: {e}")
+                    if closed:
+                        log.info(f"[REVERSE] residual closed | qty={real_qty:.6f}")
+                else:
+                    await order_mgr.close_dust(direction, mode=pos_mode)
+            if tracker.position is not None:
+                if (tracker.position.remaining_qty > 0.0
+                        or tracker.position.total_qty > 0.0):
+                    log.warning(
+                        f"[REVERSE] tracker not flat after close | "
+                        f"total_qty={tracker.position.total_qty} "
+                        f"remaining_qty={tracker.position.remaining_qty} — clearing state"
+                    )
+                tracker.position.total_qty = 0.0
+                tracker.position.remaining_qty = 0.0
+                tracker.position = None
+                tracker._clear_state()
+
         # «Отклонённая» (rejected) сделка исключается из глобального счётчика серии
         # убытков и recovery — она не должна влиять на риск-контроль (как и на статистику).
         is_rejected = bool(getattr(pos, 'reject_reason', None))
@@ -1048,7 +1093,7 @@ async def _run_live_or_paper(
                     "pnl": pnl,
                     "qty": pos.total_qty,
                 })
-                notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                await notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
             if tracker.position is not None and tracker.position.remaining_qty > 0.000001:
                 await order_mgr.move_sl_to_breakeven(
                     pos.direction, pos.entry_price,
@@ -1063,6 +1108,8 @@ async def _run_live_or_paper(
                 # Позиция закрыта (TP1 limit исполнился) — снимаем биржевой backstop,
                 # иначе останется висячий closePosition-ордер.
                 await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+                if pos.is_reverse:
+                    await _force_flat_after_reverse(pos.direction)
                 await recovery.report_result(pnl, simulated=is_rejected)
         elif hit == "TP1" and pos.is_recovery:
             events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
@@ -1085,7 +1132,7 @@ async def _run_live_or_paper(
                     "pnl": pnl,
                     "qty": pos.total_qty,
                 })
-                notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                await notifier.send_message(f"🎯 TP1 [RECOVERY] {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
             await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
             await recovery.report_result(pnl)
         elif hit == "TP2":
@@ -1104,12 +1151,14 @@ async def _run_live_or_paper(
                     "pnl": pnl,
                     "qty": pos.total_qty,
                 })
-                notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                await notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
             await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
             if is_live_close:
                 real_qty = await order_mgr._get_real_position_qty(pos.direction)
                 if real_qty > 0 and real_qty < 0.001:
                     await order_mgr.close_dust(pos.direction, mode=pos_mode)
+            if pos.is_reverse:
+                await _force_flat_after_reverse(pos.direction)
             if pos.is_recovery:
                 await recovery.report(pnl=pnl, chain_id=pos.recovery_chain_id)
             elif pnl < 0 and not is_rejected:
@@ -1132,6 +1181,38 @@ async def _run_live_or_paper(
                     await order_mgr.cancel_all_tp_sl(orig_direction, mode=pos_mode)
                 except Exception as e:
                     log.debug(f"[REVERSE] cancel original TP failed: {e}")
+                # REVERSE sizing: сайзим от РЕАЛЬНОЙ позиции на бирже, а не от
+                # tracker.remaining_qty — иначе накопленный неттинг-остаток
+                # раздувает следующий reverse.
+                try:
+                    order_mgr._invalidate_position_cache()
+                    real_rev_qty = await order_mgr._get_real_position_qty(orig_direction)
+                    real_rev_entry = await order_mgr._get_real_position_entry(orig_direction)
+                except Exception as e:
+                    log.warning(f"[REVERSE] real position fetch failed: {e}")
+                    real_rev_qty, real_rev_entry = -1.0, None
+                if real_rev_qty > 0:
+                    if abs(real_rev_qty - orig_qty) > DUST_QTY:
+                        log.info(
+                            f"[REVERSE] source qty | tracker={orig_qty:.6f} exchange={real_rev_qty:.6f}"
+                        )
+                    orig_qty = real_rev_qty
+                else:
+                    log.info(
+                        f"[REVERSE] source qty | tracker={orig_qty:.6f} "
+                        f"exchange=unavailable — using tracker"
+                    )
+                if real_rev_entry and real_rev_entry > 0:
+                    log.info(
+                        f"[REVERSE] source entry | tracker={pos.entry_price:.6f} "
+                        f"exchange={real_rev_entry:.6f} — using exchange"
+                    )
+                    orig_entry = real_rev_entry
+                else:
+                    log.debug(
+                        f"[REVERSE] source entry | tracker={pos.entry_price:.6f} "
+                        f"exchange=unavailable — using tracker"
+                    )
                 reverse_result = await order_mgr.open_reverse_position(
                     original_direction=orig_direction,
                     original_entry=orig_entry,
@@ -1166,6 +1247,11 @@ async def _run_live_or_paper(
                 # Сохраняем trade_id исходной, чтобы при закрытии reverse та же
                 # запись в БД была обновлена как единый результат REVERSE.
                 tracker._trade_id = orig_trade_id
+                # Та же открытая строка trades теперь отражает живую (обратную)
+                # ногу: direction/entry_price/qty. id и is_open сохраняются —
+                # цикл закроется на этой же строке как единый REVERSE.
+                await tracker.update_open_trade(reverse_dir, rev_entry, rev_qty)
+                tracker._save_state()
                 # Биржевой safety-net для НОВОЙ (обратной) ноги. У реверса нет
                 # виртуального SL, поэтому опорный уровень — цена входа: backstop
                 # встанет на exchange_sl_backstop_pct% дальше от неё. Только для
@@ -1179,7 +1265,7 @@ async def _run_live_or_paper(
                         tracker._save_state()
                 events.info(f"REVERSE_OPEN | {reverse_dir} entry={rev_entry:.4f} qty={rev_qty:.6f} tp={rev_tp:.4f} orig={orig_direction} {orig_qty:.6f}@{orig_entry:.4f}")
                 if is_live:
-                    notifier.send_message(
+                    await notifier.send_message(
                         f"🔄 REVERSE {cfg.symbol} {reverse_dir} | Entry={rev_entry:.4f} Qty={rev_qty:.6f} TP={rev_tp:.4f} Orig={orig_direction} {orig_qty:.6f}@{orig_entry:.4f}"
                     )
             else:
@@ -1320,15 +1406,15 @@ async def _run_live_or_paper(
                                 if hit_type == "TP2":
                                     if (pos.mode if pos else None) == "live" or cfg.mode == "live":
                                         notifier.send_event("tp2_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                        notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                        await notifier.send_message(f"🎯 TP2 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "TP1":
                                     if (pos.mode if pos else None) == "live" or cfg.mode == "live":
                                         notifier.send_event("tp1_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                        notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                        await notifier.send_message(f"🎯 TP1 {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 elif hit_type == "SL":
                                     if (pos.mode if pos else None) == "live" or cfg.mode == "live":
                                         notifier.send_event("sl_hit", {"symbol": cfg.symbol, "direction": pos.direction, "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl, "qty": pos.total_qty})
-                                        notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
+                                        await notifier.send_message(f"❌ SL {cfg.symbol} {pos.direction} | Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}")
                                 # Отменяем оставшиеся ордера на бирже
                                 await order_mgr.cancel_all_tp_sl(pos.direction, mode=(pos.mode if pos else None) or cfg.mode)
                                 if pos.is_recovery:
@@ -1338,6 +1424,12 @@ async def _run_live_or_paper(
                                 elif pnl < 0:
                                         await recovery.report(pnl=pnl)
                                 await recovery.report_result(pnl)
+                                # Fallback: биржа флэт, но строка trades могла
+                                # остаться открытой (apply_hit_async не закрыл её).
+                                # Метод идемпотентен: уже закрытую строку не трогает.
+                                await tracker.close_open_trade_from_exchange(
+                                    exit_reason="exchange_closed"
+                                )
                             else:
                                 # Закрыта частично (между 0% и 50% от того, что бот
                                 # считал открытым) — скорректируем remaining_qty в
@@ -1604,6 +1696,53 @@ async def _run_live_or_paper(
                             return
                     except Exception as e:
                         log.warning(f"[RECOVERY] Position check failed ({e}) — proceeding cautiously")
+
+            # [GUARD] Pre-entry flat guard (только live): перед открытием новой
+            # signal-позиции убеждаемся, что на бирже нет "зависшего" остатка от
+            # предыдущего цикла. В one-way режиме остаток сложился бы с новым
+            # ордером, и следующий reverse сайзился бы от раздутого нетто.
+            entry_mode = signal.mode or cfg.mode
+            if entry_mode == "live" and order_mgr:
+                try:
+                    order_mgr._invalidate_position_cache()
+                    stale = await order_mgr.get_position_info()
+                except Exception as e:
+                    log.warning(f"[GUARD] stale position check failed: {e}")
+                    stale = None
+                if stale and abs(stale.get("qty", 0.0)) > DUST_QTY:
+                    stale_dir = stale.get("direction")
+                    stale_qty = abs(stale.get("qty", 0.0))
+                    flattened = False
+                    try:
+                        flattened = await order_mgr.close_position_market(stale_dir, mode=entry_mode)
+                        if not flattened:
+                            flattened = await order_mgr.close_dust(stale_dir, mode=entry_mode)
+                    except Exception as e:
+                        log.warning(f"[GUARD] stale flatten failed: {e}")
+                        flattened = False
+                    if not flattened:
+                        log.warning(
+                            f"[GUARD] entry skipped: could not flatten stale position | "
+                            f"qty={stale_qty:.6f} direction={stale_dir}"
+                        )
+                        return
+                    log.info(
+                        f"[GUARD] stale position flattened | qty={stale_qty:.6f} direction={stale_dir}"
+                    )
+                    # Биржа уже сфлэттенила остаток помимо логики бота. Если по
+                    # этому остатку осталась открытая строка trades (is_open=1) —
+                    # закрываем её по реальным филлам, иначе в дашборде будет
+                    # висеть пустая открытая запись. Если соответствующей строки
+                    # нет — метод ничего не пишет, логируем и продолжаем.
+                    if not await tracker.close_open_trade_from_exchange(
+                        exit_reason="stale_flatten",
+                        direction=stale_dir,
+                    ):
+                        log.info(
+                            f"[GUARD] stale position flattened but no matching open "
+                            f"trade row to close | direction={stale_dir} "
+                            f"qty={stale_qty:.6f}"
+                        )
 
             result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
             if result is not None:
@@ -1895,7 +2034,7 @@ async def _run_live_or_paper(
                         await recovery.report(pnl=pnl)
                     await recovery.report_result(pnl)
                 if pos_mode == "live":
-                    notifier.send_message(
+                    await notifier.send_message(
                         f"⏰ TIME_PROFIT {cfg.symbol} {pos.direction} | "
                         f"Entry={pos.entry_price} Exit={current_price} PnL={pnl:+.4f}"
                     )
