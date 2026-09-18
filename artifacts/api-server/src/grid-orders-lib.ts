@@ -53,6 +53,66 @@ function signedQuery(params: Record<string, string | number>, apiSecret: string)
   return qs.toString();
 }
 
+/** Коды сетевых ошибок из err.cause?.code (undici/node), считающиеся транзиентными. */
+const RETRYABLE_NETWORK_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+]);
+
+/** Подстроки сообщения, по которым распознаётся транзиентная сетевая ошибка. */
+const RETRYABLE_NETWORK_PATTERNS = [
+  "fetch failed",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "socket hang up",
+  "network",
+];
+
+/** Имена ошибок отмены fetch: AbortSignal.timeout() -> TimeoutError (AbortError в старых Node). */
+const RETRYABLE_ABORT_NAMES = new Set(["TimeoutError", "AbortError"]);
+
+/** Собирает message/cause.message/cause.code ошибки в одну строку для проверки паттернов. */
+function networkErrorText(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  const e = err as { message?: unknown; cause?: unknown };
+  const message = typeof e.message === "string" ? e.message : "";
+  const cause =
+    e.cause && typeof e.cause === "object"
+      ? (e.cause as { message?: unknown; code?: unknown })
+      : undefined;
+  const causeMessage = typeof cause?.message === "string" ? cause.message : "";
+  const causeCode = typeof cause?.code === "string" ? cause.code : "";
+  return `${message} ${causeMessage} ${causeCode}`;
+}
+
+/**
+ * Классифицирует отклонённый fetch как транзиентную сетевую ошибку.
+ * Retryable: TimeoutError/AbortError (в т.ч. AbortSignal.timeout), name === "TypeError"
+ * с сетевым паттерном в message/cause, либо err.cause?.code из RETRYABLE_NETWORK_CODES.
+ */
+function isRetryableNetworkError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: unknown; message?: unknown; cause?: unknown };
+  const name = typeof e.name === "string" ? e.name : "";
+
+  if (RETRYABLE_ABORT_NAMES.has(name)) return true;
+
+  const cause =
+    e.cause && typeof e.cause === "object" ? (e.cause as { code?: unknown }) : undefined;
+  const causeCode = typeof cause?.code === "string" ? cause.code : "";
+  if (RETRYABLE_NETWORK_CODES.has(causeCode)) return true;
+
+  if (name !== "TypeError") return false;
+  const haystack = networkErrorText(err).toLowerCase();
+  return RETRYABLE_NETWORK_PATTERNS.some((p) => haystack.includes(p.toLowerCase()));
+}
+
 export async function binanceRequest(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
@@ -64,20 +124,55 @@ export async function binanceRequest(
   const url = method === "POST" ? `${baseUrl}${path}` : `${baseUrl}${path}?${qs}`;
 
   const MAX_ATTEMPTS = 3;
+  const MAX_NETWORK_ATTEMPTS = 3;
+  const MAX_TOTAL_ATTEMPTS = MAX_ATTEMPTS + MAX_NETWORK_ATTEMPTS;
+  const NETWORK_BACKOFF_MS = [300, 900];
+  const NETWORK_JITTER_MS = 150;
+  const REQUEST_TIMEOUT_MS = 15000;
   const MAX_BAN_WAIT_MS = 3000;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const res = await fetch(url, {
-      method,
-      headers:
-        method === "POST"
-          ? {
-              "Content-Type": "application/x-www-form-urlencoded",
-              "X-MBX-APIKEY": apiKey,
-            }
-          : { "X-MBX-APIKEY": apiKey },
-      body: method === "POST" ? qs : undefined,
-    });
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Раздельные бюджеты: сетевые ретраи не расходуют лимит rate-limit и наоборот.
+  let rateLimitAttempts = 0;
+  let networkAttempts = 0;
+
+  for (let totalAttempt = 1; totalAttempt <= MAX_TOTAL_ATTEMPTS; totalAttempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers:
+          method === "POST"
+            ? {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-MBX-APIKEY": apiKey,
+              }
+            : { "X-MBX-APIKEY": apiKey },
+        body: method === "POST" ? qs : undefined,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      networkAttempts++;
+      const canRetry =
+        isRetryableNetworkError(err) &&
+        networkAttempts < MAX_NETWORK_ATTEMPTS &&
+        totalAttempt < MAX_TOTAL_ATTEMPTS;
+      if (!canRetry) {
+        throw err;
+      }
+      const base =
+        NETWORK_BACKOFF_MS[networkAttempts - 1] ??
+        NETWORK_BACKOFF_MS[NETWORK_BACKOFF_MS.length - 1];
+      const delay = base + Math.floor(Math.random() * (NETWORK_JITTER_MS + 1));
+      logger.warn(
+        { path, attempt: networkAttempts, err: (err as Error).message },
+        "[grid-lib] network error, retrying"
+      );
+      await sleep(delay);
+      continue;
+    }
+
     if (res.ok) {
       return res.json();
     }
@@ -92,7 +187,8 @@ export async function binanceRequest(
       text.includes("-1003") ||
       text.includes("-429");
 
-    if (!isRateLimit || attempt === MAX_ATTEMPTS) {
+    rateLimitAttempts++;
+    if (!isRateLimit || rateLimitAttempts >= MAX_ATTEMPTS || totalAttempt >= MAX_TOTAL_ATTEMPTS) {
       throw new Error(`Binance ${path} ${status}: ${text}`);
     }
 
@@ -110,14 +206,17 @@ export async function binanceRequest(
       }
     }
     if (delay === null) {
-      delay = attempt === 1 ? 400 : 1200;
+      delay = rateLimitAttempts === 1 ? 400 : 1200;
     }
 
-    logger.warn({ path, status, attempt }, "[grid-orders] Binance rate limit, retrying");
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    logger.warn(
+      { path, status, attempt: rateLimitAttempts },
+      "[grid-orders] Binance rate limit, retrying"
+    );
+    await sleep(delay);
   }
 
-  throw new Error(`Binance ${path} request failed after ${MAX_ATTEMPTS} attempts`);
+  throw new Error(`Binance ${path} request failed after ${MAX_TOTAL_ATTEMPTS} attempts`);
 }
 
 export const binanceGet = (path: string, params: Record<string, string | number> = {}) =>
