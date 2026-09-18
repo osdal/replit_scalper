@@ -59,6 +59,9 @@ class OrderManager:
         self._step_size: Optional[float] = None
         self._price_precision: Optional[int] = None
         self._tick_size: Optional[float] = None
+        # Биржевые лимиты объёма: LOT_SIZE.maxQty и MARKET_LOT_SIZE.maxQty.
+        self._max_qty: Optional[float] = None
+        self._market_max_qty: Optional[float] = None
         # AlgoId живого биржевого backstop-стопа (STOP_MARKET, closePosition=true).
         # None = защиты на бирже нет. Персистится через Position.backstop_algo_id.
         self.backstop_algo_id: Optional[int] = None
@@ -95,10 +98,18 @@ class OrderManager:
                 for f in s["filters"]:
                     if f["filterType"] == "LOT_SIZE":
                         self._step_size = float(f["stepSize"])
+                        self._max_qty = float(f["maxQty"])
+                    if f["filterType"] == "MARKET_LOT_SIZE":
+                        self._market_max_qty = float(f["maxQty"])
                     if f["filterType"] == "PRICE_FILTER":
                         self._tick_size = float(f["tickSize"])
                 return
         raise RuntimeError(f"Symbol {self.cfg.symbol} not found in futures_exchange_info")
+
+    def _order_max_qty(self) -> Optional[float]:
+        """Максимум qty на один ордер: MARKET_LOT_SIZE имеет приоритет над LOT_SIZE."""
+        caps = [q for q in (self._market_max_qty, self._max_qty) if q and q > 0]
+        return min(caps) if caps else None
 
     async def _adjust_qty(self, qty: float, mode: Optional[str] = None) -> float:
         if mode is None:
@@ -473,25 +484,35 @@ class OrderManager:
         Разворот при срабатывании SL.
 
         Исходная позиция НЕ закрывается отдельным ордером. В обратную сторону
-        отправляется рыночный ордер объёмом
+        отправляется рыночный ордер, оставляющий удерживаемый (хедж) объём
 
-            X = |E - S| * Qo / (0.005 * S) + Qo
+            Qh = Qo * |E - P3| / |S - P3|,   P3 = E_rev * (1 ∓ pct)
 
-        (для исходного LONG — SELL). После этого удерживаемый обратный объём
+        где E = original_entry, S = sl_price, Qo = original_qty,
+        pct = reverse_breakeven_pct / 100. P3 считается ТОЛЬКО после исполнения
+        обратного ордера, от его фактической средней цены E_rev (avgPrice/fills):
+        для обратного SHORT P3 = E_rev*(1-pct), для обратного LONG
+        P3 = E_rev*(1+pct). Объём отправки send = Qh + Qo, но не больше биржевого
+        maxQty (LOT_SIZE / MARKET_LOT_SIZE). TP обратной позиции ставится ровно
+        на P3, где суммарный PnL (убыток исходной + прибыль обратной) равен 0.
 
-            held = |E - S| * Qo / (0.005 * S)
-
-        и при движении цены ещё на 0.5% суммарный PnL (убыток исходной +
-        прибыль обратной) равен 0. TP обратной ставится ровно на этом уровне.
-
-        Возвращает (entry_price, held_qty, tp_price).
+        Возвращает (entry_price, held_qty, tp_price), где tp_price = P3.
         """
         if mode is None:
             mode = self.cfg.mode
         reverse_dir = "SHORT" if original_direction == "LONG" else "LONG"
 
+        pct = float(getattr(self.cfg, "reverse_breakeven_pct", 0.5) or 0.5) / 100
+
+        # Планировочный P3 от виртуального SL — нужен только для оценки объёма
+        # отправки. Реальный P3 пересчитывается ниже от фактической цены реверса.
+        if original_direction == "LONG":
+            p3_plan = sl_price * (1 - pct)
+        else:
+            p3_plan = sl_price * (1 + pct)
+
         held_qty = await self._adjust_qty(
-            abs(original_entry - sl_price) * original_qty / (0.005 * sl_price), mode=mode
+            abs(original_entry - p3_plan) / abs(sl_price - p3_plan) * original_qty, mode=mode
         )
         if held_qty <= 0:
             self.log.warning(f"[REVERSE] held qty={held_qty} <= 0, skipping reverse")
@@ -501,15 +522,53 @@ class OrderManager:
             self.log.warning(f"[REVERSE] send qty={send_qty} <= 0, skipping reverse")
             return None
 
+        # Биржевой cap по maxQty: send не может превышать максимум одного ордера.
+        # Если cap срезал объём — реальный хедж равен send - Qo, а не расчётному Qh.
+        cap_bound = False
         if mode == "live":
-            await self._set_leverage()
+            await self._get_symbol_filters()
+            max_qty = self._order_max_qty()
+            if max_qty is not None and send_qty > max_qty:
+                capped_send = await self._adjust_qty(max_qty, mode=mode)
+                self.log.warning(
+                    f"[REVERSE] send qty capped to exchange maxQty | "
+                    f"requested={send_qty} capped={capped_send} maxQty={max_qty} "
+                    f"planned_held={held_qty} orig_qty={original_qty}"
+                )
+                send_qty = capped_send
+                held_qty = await self._adjust_qty(send_qty - original_qty, mode=mode)
+                cap_bound = True
+                if send_qty <= 0 or held_qty <= 0:
+                    self.log.error(
+                        f"[REVERSE] maxQty cap leaves no hedge | send={send_qty} "
+                        f"held={held_qty} maxQty={max_qty} — skipping reverse"
+                    )
+                    return None
+
+        mult = (held_qty / original_qty) if original_qty else 0.0
+        self.log.info(
+            f"[REVERSE] sizing | dir={original_direction} E={original_entry} S={sl_price} "
+            f"P3_plan={p3_plan} pct={pct * 100}% qty={original_qty} held={held_qty} "
+            f"send={send_qty} mult={mult}"
+        )
+
+        if mode == "live":
             side = _direction_to_side(reverse_dir)
-            order = await self.client.futures_create_order(
-                symbol=self.cfg.symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=send_qty,
-            )
+            try:
+                await self._set_leverage()
+                order = await self.client.futures_create_order(
+                    symbol=self.cfg.symbol,
+                    side=side,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=send_qty,
+                )
+            except Exception as e:
+                self.log.error(
+                    f"[REVERSE] Failed to place reverse market order "
+                    f"(side={side} qty={send_qty}): {e}",
+                    exc_info=True,
+                )
+                return None
             # Разворот изменил позицию/баланс — кэши невалидны.
             self._invalidate_caches()
             entry_price = await self._get_fill_price(order, sl_price)
@@ -524,14 +583,75 @@ class OrderManager:
                 f"@ {entry_price} (original stays open)"
             )
 
-        # TP обратной позиции ровно на уровне, где суммарный PnL = 0 (0.5% от входа)
-        if reverse_dir == "LONG":
-            tp_price = entry_price * 1.005
-        else:
-            tp_price = entry_price * 0.995
-        tp_price = await self._adjust_price(tp_price, mode=mode)
+        if entry_price is None or entry_price <= 0:
+            self.log.error(
+                f"[REVERSE] invalid reverse fill price={entry_price} — aborting TP"
+            )
+            return None
 
-        if mode == "live" and held_qty > 0:
+        # P3 считается от ФАКТИЧЕСКОЙ средней цены входа реверса E_rev, а не от
+        # виртуального SL: иначе TP оказывается по неверную сторону реального
+        # филла и исполняется как маркет, ничего не откупая.
+        if reverse_dir == "SHORT":
+            p3 = entry_price * (1 - pct)
+        else:
+            p3 = entry_price * (1 + pct)
+        tp_price = await self._adjust_price(p3, mode=mode)
+
+        # Геометрия: для SHORT TP обязан быть ниже E_rev, для LONG — выше.
+        # Округление по tickSize может схлопнуть его на/за E_rev — тогда сдвигаем
+        # минимум на один тик в прибыльную сторону. Если и это невозможно, TP не
+        # отправляем (маркет-исполнение по неверной цене недопустимо).
+        def _correct_side(tp: float) -> bool:
+            return tp < entry_price if reverse_dir == "SHORT" else tp > entry_price
+
+        if not _correct_side(tp_price):
+            tick = self._tick_size if mode == "live" else None
+            if tick and tick > 0:
+                nudged = tp_price - tick if reverse_dir == "SHORT" else tp_price + tick
+                tp_price = await self._adjust_price(nudged, mode=mode)
+                self.log.warning(
+                    f"[REVERSE] P3 rounded to wrong side → nudged | dir={reverse_dir} "
+                    f"E_rev={entry_price} raw_p3={p3} nudged_p3={tp_price} tick={tick}"
+                )
+        tp_ok = _correct_side(tp_price)
+        if not tp_ok:
+            self.log.error(
+                f"[REVERSE] P3 on wrong side of actual fill — aborting TP | "
+                f"dir={reverse_dir} E_rev={entry_price} p3={p3} p3_adj={tp_price} "
+                f"pct={pct * 100}%"
+            )
+
+        # Пересчёт хедж-объёма по РЕАЛЬНОМУ P3: Qh = Qo*|E-P3|/|S-P3|. Отправка
+        # шла от планового P3; если реальные значения расходятся материально —
+        # логируем оба. Clamp по фактически оставшейся позиции, чтобы TP не
+        # пытался закрыть больше, чем есть на бирже.
+        actual_held = await self._adjust_qty(send_qty - original_qty, mode=mode)
+        if not cap_bound and abs(sl_price - tp_price) > 0:
+            held_real = await self._adjust_qty(
+                abs(original_entry - tp_price) / abs(sl_price - tp_price) * original_qty,
+                mode=mode,
+            )
+            tol = self._step_size if (mode == "live" and self._step_size) else 0.0
+            if held_real > 0:
+                if abs(held_real - held_qty) > tol:
+                    self.log.info(
+                        f"[REVERSE] held recomputed from realized fill | "
+                        f"planned={held_qty} realized={held_real} actual={actual_held} "
+                        f"E={original_entry} E_rev={entry_price} S={sl_price} P3={tp_price}"
+                    )
+                held_qty = min(held_real, actual_held) if actual_held > 0 else held_real
+            else:
+                self.log.warning(
+                    f"[REVERSE] realized held qty={held_real} <= 0 — keeping actual "
+                    f"held={actual_held} | E={original_entry} S={sl_price} P3={tp_price}"
+                )
+                held_qty = actual_held
+        else:
+            held_qty = actual_held
+
+        # TP обратной позиции ровно на P3 (или не ставим, если геометрия невозможна).
+        if mode == "live" and held_qty > 0 and tp_ok:
             try:
                 await self._place_tp_limit(reverse_dir, tp_price, held_qty)
                 self.log.info(f"[REVERSE] TP placed | {reverse_dir} tp={tp_price} qty={held_qty}")

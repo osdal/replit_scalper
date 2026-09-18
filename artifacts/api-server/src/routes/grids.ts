@@ -9,6 +9,7 @@ import {
 import { desc, eq, sql, type SQL } from "drizzle-orm";
 import { notifyTokenGuard } from "../middlewares/notifyAuth";
 import { logger } from "../lib/logger";
+import { cancelAlgoOrderIds, cancelOrderIds } from "../grid-orders-lib";
 
 const router = Router();
 
@@ -251,6 +252,69 @@ function rowToGrid(row: GridRow) {
   };
 }
 
+function intArray(raw: string | null): number[] {
+  return parseArray(raw)
+    .map((v) => Number(v))
+    .filter((n): n is number => Number.isInteger(n) && n > 0);
+}
+
+function tpAlgoIds(raw: string | null): number[] {
+  const obj = parseObject(raw);
+  if (!obj) return [];
+  return Object.values(obj)
+    .map((v) => Number(v))
+    .filter((n): n is number => Number.isInteger(n) && n > 0);
+}
+
+interface CancelOutcome {
+  canceledOrders: number;
+  cancelErrors: Array<{ uid: string; symbol: string; error: string }>;
+}
+
+/**
+ * Best-effort снятие биржевых ордеров удаляемых строк: entry-ордера через
+ * cancelOrderIds, защитные STOP/TP — через cancelAlgoOrderIds. Ошибка отмены
+ * никогда не блокирует удаление и собирается в cancelErrors.
+ */
+async function cancelRowsOrders(rows: GridRow[]): Promise<CancelOutcome> {
+  const cancelErrors: Array<{ uid: string; symbol: string; error: string }> = [];
+  let canceledOrders = 0;
+  for (const row of rows) {
+    const uid = String(row.uid ?? "").trim();
+    const symbol = String(row.symbol ?? "").trim().toUpperCase();
+    if (!symbol) continue;
+    try {
+      const entryIds = intArray(row.testnetOrderIds);
+      if (entryIds.length > 0) {
+        const res = await cancelOrderIds(symbol, entryIds);
+        for (const r of res) {
+          if (r.ok) canceledOrders++;
+          else {
+            cancelErrors.push({
+              uid,
+              symbol,
+              error: `order ${r.orderId}: ${r.error ?? "cancel failed"}`,
+            });
+          }
+        }
+      }
+      const algoIds = [...new Set([...intArray(row.stopOrderIds), ...tpAlgoIds(row.tpOrderIds)])];
+      if (algoIds.length > 0) {
+        const res = await cancelAlgoOrderIds(symbol, algoIds);
+        canceledOrders += res.canceled.length;
+        for (const e of res.errors) {
+          cancelErrors.push({ uid, symbol, error: `algo ${e.orderId}: ${e.error}` });
+        }
+      }
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      cancelErrors.push({ uid, symbol, error });
+      logger.warn({ uid, symbol, err: error }, "grid delete: cancel failed");
+    }
+  }
+  return { canceledOrders, cancelErrors };
+}
+
 router.get("/", async (_req, res) => {
   try {
     await ensureTable;
@@ -347,11 +411,16 @@ router.delete("/:uid", notifyTokenGuard, async (req, res) => {
     if (!uid) {
       return res.status(400).json({ ok: false, error: "uid required" });
     }
+    const rows = await db.select().from(gridsTable).where(eq(gridsTable.uid, uid));
+    if (rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "not found" });
+    }
+    const { canceledOrders, cancelErrors } = await cancelRowsOrders(rows);
     const result = await db.run(sql`DELETE FROM grids WHERE uid = ${uid}`);
     if ((result.rowsAffected ?? 0) === 0) {
       return res.status(404).json({ ok: false, error: "not found" });
     }
-    return res.json({ ok: true, deleted: result.rowsAffected });
+    return res.json({ ok: true, deleted: result.rowsAffected, canceledOrders, cancelErrors });
   } catch (e: any) {
     return res.status(500).json({ ok: false, error: e?.message || "failed" });
   }
@@ -365,11 +434,15 @@ router.delete("/", notifyTokenGuard, async (req, res) => {
       if (!PHASES.includes(phaseRaw)) {
         return res.status(400).json({ ok: false, error: "unknown phase" });
       }
+      const rows = await db.select().from(gridsTable).where(eq(gridsTable.phase, phaseRaw));
+      const { canceledOrders, cancelErrors } = await cancelRowsOrders(rows);
       const result = await db.run(sql`DELETE FROM grids WHERE phase = ${phaseRaw}`);
-      return res.json({ deleted: result.rowsAffected });
+      return res.json({ deleted: result.rowsAffected, canceledOrders, cancelErrors });
     }
+    const rows = await db.select().from(gridsTable);
+    const { canceledOrders, cancelErrors } = await cancelRowsOrders(rows);
     const result = await db.run(sql`DELETE FROM grids`);
-    return res.json({ deleted: result.rowsAffected });
+    return res.json({ deleted: result.rowsAffected, canceledOrders, cancelErrors });
   } catch (e: any) {
     return res.status(500).json({ ok: false, error: e?.message || "failed" });
   }

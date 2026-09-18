@@ -688,9 +688,13 @@ export async function patchGrid(
   }
 }
 
-export async function deleteAllGrids(): Promise<{ ok: boolean; deleted?: number; error?: string }> {
+export async function deleteAllGrids(
+  phase?: "waiting" | "active" | "done" | "stopped",
+): Promise<{ ok: boolean; deleted?: number; error?: string }> {
   try {
-    const r = await fetch(`${API}/grids`, {
+    const url = new URL(`${API}/grids`);
+    if (phase) url.searchParams.set("phase", phase);
+    const r = await fetch(url.toString(), {
       method: "DELETE",
       headers: authHeaders(),
     });

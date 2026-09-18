@@ -10,25 +10,23 @@ Write-Host "  Starting Trading Bot Environment"
 Write-Host "============================================"
 Write-Host ""
 
-# 0. Stop existing processes before starting new ones
+# 0. Stop only this script's own dashboard (never the grid UI on 5175, never python)
+function Kill-ProcessOnPort($port) {
+    $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Listen' }
+    foreach ($conn in $connections) {
+        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+        if ($proc) { Write-Host "Stopping $($proc.ProcessName) PID $($proc.Id) on port $port"; Stop-Process -Id $proc.Id -Force }
+    }
+}
+
 Write-Host "[0/6] Stopping existing processes..."
-Stop-Process -Name node -ErrorAction SilentlyContinue -Force
-Stop-Process -Name python -ErrorAction SilentlyContinue -Force
-$portPid = (Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue).OwningProcess
-if ($portPid) {
-    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+Kill-ProcessOnPort 5173
+$apiAlreadyRunning = [bool](Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue)
+if ($apiAlreadyRunning) {
+    Write-Host "      API server already running on 5000 - reusing it (grid engine stays up)"
+} else {
+    Write-Host "      API server not listening on 5000 - will start it"
 }
-$waited = 0
-while ((Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue) -and $waited -lt 10) {
-    Start-Sleep -Seconds 1
-    $waited++
-}
-# Clean up stale bot lock files left behind by forcibly stopped bot processes
-$locks = Get-ChildItem -Path "$scriptDir\bot" -Filter "bot.lock.*" -ErrorAction SilentlyContinue
-foreach ($lock in $locks) {
-    try { Remove-Item -LiteralPath $lock.FullName -Force -ErrorAction SilentlyContinue } catch { }
-}
-if ($locks) { Write-Host "      Removed $($locks.Count) stale bot lock file(s)" }
 Write-Host "      OK"
 Write-Host ""
 
@@ -57,14 +55,19 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "      OK"
 Write-Host ""
 
-# 2. Start API server in background
+# 2. Start API server in background (reuse if already listening on 5000)
 Write-Host "[2/6] Starting API server..."
 Set-Location -LiteralPath $scriptDir
-$env:PNPM_FILTER = "@workspace/api-server"
-$env:BOT_DIR = "bot"
-$env:DATABASE_PATH = ".\data\bot.db"
-$env:PORT = "5000"
-Start-Process powershell -ArgumentList "-NoProfile -Command `$env:BOT_DIR='bot'; `$env:DATABASE_PATH='.\data\bot.db'; `$env:PORT='5000'; Set-Location '$scriptDir'; pnpm --filter @workspace/api-server run dev" -WindowStyle Minimized -WorkingDirectory $scriptDir
+if ($apiAlreadyRunning) {
+    Write-Host "      Reusing existing API server on 5000"
+} else {
+    New-Item -ItemType Directory -Force -Path "$scriptDir\logs" | Out-Null
+    $logStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $apiLog = "logs\api-server_$logStamp.log"
+    $env:BOT_DIR = "bot"; $env:DATABASE_PATH = ".\data\bot.db"; $env:PORT = "5000"
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c pnpm --filter @workspace/api-server run dev > $apiLog 2>&1" -WindowStyle Minimized -WorkingDirectory $scriptDir
+    Write-Host "      API log: $apiLog"
+}
 Start-Sleep -Seconds 3
 
 # Smoke check API (up to 30 seconds)
@@ -119,6 +122,7 @@ Write-Host "============================================"
 Write-Host "  All services started!"
 Write-Host "  API:       http://localhost:5000"
 Write-Host "  Dashboard: http://localhost:5173"
+Write-Host "  Grid UI:   http://localhost:5175 (runs separately via start_grid.ps1)"
 Write-Host "  Bots:      start manually via dashboard ($($botConfigs.Count) configs)"
 Write-Host "============================================"
 Write-Host ""
@@ -128,4 +132,4 @@ if (-not $NoBrowser) {
     Start-Process "http://localhost:5173"
 }
 
-Write-Host "To stop all: Stop-Process -Name node,python -Force"
+Write-Host "To stop: stop the bot(s) via the dashboard, then close the API/dashboard windows (or Kill-ProcessOnPort 5000/5173)."
