@@ -622,33 +622,39 @@ class OrderManager:
                 f"pct={pct * 100}%"
             )
 
-        # Пересчёт хедж-объёма по РЕАЛЬНОМУ P3: Qh = Qo*|E-P3|/|S-P3|. Отправка
-        # шла от планового P3; если реальные значения расходятся материально —
-        # логируем оба. Clamp по фактически оставшейся позиции, чтобы TP не
-        # пытался закрыть больше, чем есть на бирже.
-        actual_held = await self._adjust_qty(send_qty - original_qty, mode=mode)
-        if not cap_bound and abs(sl_price - tp_price) > 0:
-            held_real = await self._adjust_qty(
-                abs(original_entry - tp_price) / abs(sl_price - tp_price) * original_qty,
+        # Точный безубыточный хедж по ФАКТИЧЕСКОМУ филлу реверса:
+        #   Qh_exact = Qo * |E - E_rev| / |E_rev - P3|,
+        # где числитель — реально зафиксированный на развороте убыток (до E_rev),
+        # а не |E - P3| (старый баг: смешивал realized E_rev с виртуальным S).
+        fallback_held = send_qty - original_qty
+        actual_held = await self._adjust_qty(fallback_held, mode=mode)
+        qh_exact = 0.0
+        if abs(entry_price - tp_price) > 0:
+            qh_exact = await self._adjust_qty(
+                abs(original_entry - entry_price) / abs(entry_price - tp_price) * original_qty,
                 mode=mode,
             )
-            tol = self._step_size if (mode == "live" and self._step_size) else 0.0
-            if held_real > 0:
-                if abs(held_real - held_qty) > tol:
-                    self.log.info(
-                        f"[REVERSE] held recomputed from realized fill | "
-                        f"planned={held_qty} realized={held_real} actual={actual_held} "
-                        f"E={original_entry} E_rev={entry_price} S={sl_price} P3={tp_price}"
-                    )
-                held_qty = min(held_real, actual_held) if actual_held > 0 else held_real
-            else:
-                self.log.warning(
-                    f"[REVERSE] realized held qty={held_real} <= 0 — keeping actual "
-                    f"held={actual_held} | E={original_entry} S={sl_price} P3={tp_price}"
-                )
-                held_qty = actual_held
+        self.log.info(
+            f"[REVERSE] hedge | planned={held_qty} exact={qh_exact} actual={actual_held} "
+            f"E={original_entry} E_rev={entry_price} S={sl_price} P3={tp_price}"
+        )
+
+        # TP закрывает ВСЮ оставшуюся позицию, чтобы не осталось небезубыточного
+        # остатка для дампа по рынку. Берём фактический нетто-объём после
+        # разворота; если он недоступен (<=0), падаем на расчётный send - Qo.
+        real_qty = await self._get_real_position_qty(reverse_dir)
+        step = self._step_size if (mode == "live" and self._step_size) else 0.0
+        if real_qty > 0:
+            adjusted_real = await self._adjust_qty(real_qty, mode=mode)
+            tp_qty = min(adjusted_real, real_qty)
         else:
-            held_qty = actual_held
+            tp_qty = actual_held
+        if step > 0 and abs(tp_qty - fallback_held) > step:
+            self.log.warning(
+                f"[REVERSE] TP qty != send-Qo | tp_qty={tp_qty} "
+                f"hedge_actual={actual_held} send_minus_orig={fallback_held} real_qty={real_qty}"
+            )
+        held_qty = tp_qty
 
         # TP обратной позиции ровно на P3 (или не ставим, если геометрия невозможна).
         if mode == "live" and held_qty > 0 and tp_ok:

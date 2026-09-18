@@ -559,6 +559,38 @@ function gridToServerImport(g: GridInstance): Record<string, unknown> {
   };
 }
 
+// Человекочитаемые метки/цвета причин выхода. Возвращает null для причин,
+// которые отображаются как есть (TP1/TP2/SL и прочие строки бота).
+// REVERSE_TP/REVERSE_SL — прежние имена, в БД переименованы в
+// REVERSE_BE/REVERSE_BACKSTOP; legacy REVERSE остаётся нейтральным.
+export function exitReasonMeta(raw: unknown): { label: string; className: string; title: string } | null {
+  const reason = String(raw ?? "").trim().toUpperCase();
+  switch (reason) {
+    case "REVERSE_BE":
+    case "REVERSE_TP":
+      return {
+        label: "Reverse BE",
+        className: "bg-blue-100 text-blue-700",
+        title: "Reverse cycle closed at the break-even target (≈ fees only).",
+      };
+    case "REVERSE_BACKSTOP":
+    case "REVERSE_SL":
+      return {
+        label: "Reverse backstop",
+        className: "bg-red-100 text-red-700",
+        title: "Reverse leg was closed by the exchange backstop — a real loss.",
+      };
+    case "REVERSE":
+      return {
+        label: "Reverse",
+        className: "bg-amber-100 text-amber-700",
+        title: "Legacy reverse cycle (not classified as break-even or backstop).",
+      };
+    default:
+      return null;
+  }
+}
+
 export default function Dashboard() {
   const [pairs, setPairs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3906,7 +3938,20 @@ export default function Dashboard() {
                                 : "—"}
                             </td>
                             <td className="pr-3">{h.phase}</td>
-                            <td className="pr-3">{h.exit_reason}</td>
+                            <td className="pr-3">
+                              {(() => {
+                                const meta = exitReasonMeta(h.exit_reason);
+                                if (!meta) return h.exit_reason;
+                                return (
+                                  <span
+                                    className={`inline-flex items-center px-2 py-0.5 rounded text-xs cursor-help ${meta.className}`}
+                                    title={meta.title}
+                                  >
+                                    {meta.label}
+                                  </span>
+                                );
+                              })()}
+                            </td>
                             <td className="pr-3">{h.finished_at ? new Date(h.finished_at).toLocaleString() : "—"}</td>
                           </tr>
                         ))}
