@@ -446,6 +446,164 @@ def _release_lock(symbol: str) -> None:
         pass
 
 
+def _price_tol(order_mgr, reference: float) -> float:
+    """Ценовой допуск: один тик символа либо 0.01% относительной погрешности."""
+    tick = getattr(order_mgr, "_tick_size", None) if order_mgr else None
+    return max(float(tick) if tick else 0.0, abs(reference) * 1e-4, 1e-9)
+
+
+def _qty_tol(order_mgr, reference: float) -> float:
+    """Объёмный допуск: один шаг лота символа либо 0.01% относительной."""
+    step = getattr(order_mgr, "_step_size", None) if order_mgr else None
+    return max(float(step) if step else 0.0, abs(reference) * 1e-4, 1e-9)
+
+
+def _state_matches_exchange(order_mgr, pos, direction, entry_price, exchange_qty):
+    """Проверяет, соответствует ли сохранённая позиция биржевой.
+
+    Совпадение: направление, цена входа и размер (remaining_qty) в пределах
+    тика/шага. При tp1_hit=True remaining_qty — это живой объём, а total_qty —
+    исходный (уже частично закрыт), поэтому total_qty сверяется с биржей только
+    когда TP1 ещё не срабатывал. Возвращает (matched, reason).
+    """
+    if pos is None:
+        return False, "empty state"
+    if pos.direction != direction:
+        return False, f"direction state={pos.direction} exchange={direction}"
+    price_tol = _price_tol(order_mgr, entry_price)
+    if entry_price > 0 and abs(pos.entry_price - entry_price) > price_tol:
+        return False, f"entry state={pos.entry_price} exchange={entry_price} (tol={price_tol})"
+    qty_tol = _qty_tol(order_mgr, exchange_qty)
+    if abs(pos.remaining_qty - exchange_qty) > qty_tol:
+        return False, (
+            f"remaining_qty state={pos.remaining_qty} exchange={exchange_qty} "
+            f"(tol={qty_tol})"
+        )
+    if not pos.tp1_hit and abs(pos.total_qty - exchange_qty) > qty_tol:
+        return False, (
+            f"total_qty state={pos.total_qty} exchange={exchange_qty} (tol={qty_tol})"
+        )
+    if pos.total_qty + qty_tol < pos.remaining_qty:
+        return False, (
+            f"inconsistent state total_qty={pos.total_qty} < "
+            f"remaining_qty={pos.remaining_qty}"
+        )
+    return True, ""
+
+
+async def _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=None) -> None:
+    """Досоздаёт недостающую биржевую защиту восстановленной из state позиции.
+
+    Не отменяет существующие ордера: читает открытые limit/algo-ордера и
+    выставляет только отсутствующий TP-limit и `botsl_` backstop. Использует
+    сохранённые уровни (tp1/tp2 и sl_price). Ничего не делает для пустой позиции.
+    """
+    if pos is None or pos.remaining_qty < 0.000001:
+        return
+    symbol = cfg.symbol
+    try:
+        await order_mgr._get_symbol_filters()
+    except Exception as e:
+        log.warning(f"[SYNC] Could not load symbol filters for protection check: {e}")
+
+    # --- TP limit, соответствующий текущей стадии позиции ---
+    expected_side = "SELL" if pos.direction == "LONG" else "BUY"
+    target_tp = pos.tp2_price if pos.tp1_hit else pos.tp1_price
+    if not target_tp or target_tp <= 0:
+        target_tp = pos.tp1_price
+    tp_present = False
+    try:
+        open_orders = await order_mgr.client.futures_get_open_orders(symbol=symbol)
+    except Exception as e:
+        log.warning(f"[SYNC] Could not read open orders: {e}")
+        open_orders = []
+    price_tol = _price_tol(order_mgr, target_tp)
+    qty_tol = _qty_tol(order_mgr, pos.remaining_qty)
+    for o in open_orders or []:
+        try:
+            if (o.get("type") or "").upper() != "LIMIT":
+                continue
+            if (o.get("side") or "").upper() != expected_side:
+                continue
+            o_price = float(o.get("price", 0) or 0)
+            o_qty = float(o.get("origQty", o.get("quantity", 0)) or 0)
+        except (TypeError, ValueError):
+            continue
+        if (o_price > 0 and target_tp > 0 and abs(o_price - target_tp) <= price_tol
+                and abs(o_qty - pos.remaining_qty) <= qty_tol):
+            tp_present = True
+            break
+    if tp_present:
+        log.info(
+            f"[SYNC] TP limit already present | side={expected_side} "
+            f"price={target_tp} qty={pos.remaining_qty}"
+        )
+    elif target_tp and target_tp > 0:
+        try:
+            await order_mgr._place_tp_limit(pos.direction, target_tp, pos.remaining_qty)
+            log.info(
+                f"[SYNC] Re-placed TP limit | side={expected_side} "
+                f"price={target_tp} qty={pos.remaining_qty} (was missing)"
+            )
+        except Exception as e:
+            log.error(f"[SYNC] Failed to re-place TP limit: {e}", exc_info=True)
+
+    # --- Биржевой backstop ---
+    key = "long" if pos.direction == "LONG" else "short"
+    expected_client_algo_id = f"botsl_{symbol[:10]}_{key}"
+    live_algo_id = None
+    try:
+        algo_orders = await order_mgr.client.futures_get_open_algo_orders(symbol=symbol)
+    except Exception as e:
+        log.warning(f"[SYNC] Could not read open algo orders: {e}")
+        algo_orders = []
+    for o in algo_orders or []:
+        cid = o.get("clientAlgoId") or ""
+        raw_id = o.get("algoId") or o.get("orderId")
+        saved_matches = (
+            pos.backstop_algo_id and raw_id is not None
+            and str(raw_id) == str(pos.backstop_algo_id)
+        )
+        if cid == expected_client_algo_id or saved_matches:
+            try:
+                live_algo_id = int(raw_id)
+            except (TypeError, ValueError):
+                live_algo_id = None
+            break
+    if live_algo_id is not None:
+        order_mgr.backstop_algo_id = live_algo_id
+        pos.backstop_algo_id = live_algo_id
+        log.info(
+            f"[SYNC] Backstop algo already live | algoId={live_algo_id} "
+            f"clientAlgoId={expected_client_algo_id}"
+        )
+    else:
+        if pos.backstop_algo_id:
+            log.warning(
+                f"[SYNC] Saved backstop algoId={pos.backstop_algo_id} is not live — "
+                f"re-placing backstop"
+            )
+        else:
+            log.warning(
+                f"[SYNC] No live backstop for restored position — placing backstop"
+            )
+        # Не даём _place_exchange_backstop отменять чужой/устаревший algoId.
+        order_mgr.backstop_algo_id = None
+        new_algo_id = await order_mgr._place_exchange_backstop(
+            pos.direction, pos.sl_price, qty=pos.remaining_qty
+        )
+        pos.backstop_algo_id = new_algo_id
+        if new_algo_id:
+            log.info(
+                f"[SYNC] Re-placed backstop algo | algoId={new_algo_id} "
+                f"sl={pos.sl_price} clientAlgoId={expected_client_algo_id}"
+            )
+        else:
+            log.warning(f"[SYNC] Backstop algo could not be placed | sl={pos.sl_price}")
+    if tracker is not None:
+        tracker._save_state()
+
+
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
     order_mgr: OrderManager, log, recovery=None, notifier=None,
@@ -567,85 +725,10 @@ async def _sync_position_on_start(
         log.info(f"[SYNC] No open position found for {cfg.symbol}")
         return
 
-    if tracker.load_state():
-        pos = tracker.position
-        if pos:
-            # Восстанавливаем известный algoId backstop, чтобы _replace_tp_sl
-            # снял старый и выставил новый, а не оставил orphan/дубль.
-            order_mgr.backstop_algo_id = getattr(pos, "backstop_algo_id", None)
-            try:
-                real_qty = await order_mgr._get_real_position_qty(pos.direction)
-                if real_qty < 0.000001:
-                    log.warning(f"[SYNC] Exchange shows no position but state has open position — position closed externally (TP/SL), clearing state")
-                    # Fetch real PnL and close DB trade
-                    try:
-                        import requests as s2
-                        import datetime
-                        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
-                        trades_resp = s2.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
-                        for trade in (trades_resp.get("trades") or []):
-                            if trade.get("is_open") and pos.entry_timestamp:
-                                entry_ms = 0
-                                try:
-                                    if isinstance(pos.entry_timestamp, str):
-                                        entry_ms = int(datetime.datetime.fromisoformat(pos.entry_timestamp).timestamp() * 1000)
-                                    else:
-                                        entry_ms = int(pos.entry_timestamp.timestamp() * 1000)
-                                except Exception:
-                                    pass
-                                exit_ms = int(__import__("time").time() * 1000)
-                                real_pnl = None
-                                if entry_ms > 0:
-                                    real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
-                                pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
-                                s2.patch(f"{api_url}/trades/{trade['id']}", json={
-                                    "is_open": False, "exit_reason": "SL",
-                                    "pnl": round(pnl_val, 4),
-                                    "exit_time": datetime.datetime.utcnow().isoformat(),
-                                    "status": "closed",
-                                }, timeout=5)
-                                log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
-                                if pnl_val < 0 and recovery:
-                                    await recovery.report(pnl=pnl_val)
-                                    # Освобождаем захваченную recovery-цепочку, если эта позиция её держала.
-                                    if pos and getattr(pos, "recovery_chain_id", None):
-                                        await recovery.release(chain_id=pos.recovery_chain_id)
-                                        log.info(f"[SYNC] Released locked recovery chain #{pos.recovery_chain_id} after external close for {cfg.symbol}")
-                    except Exception:
-                        pass
-                    # Позиции на бирже нет — снимаем осиротевший backstop.
-                    if getattr(pos, "backstop_algo_id", None):
-                        await order_mgr._cancel_exchange_backstop(pos.backstop_algo_id)
-                    tracker.position = None
-                    tracker._clear_state()
-                    return
-                if real_qty < pos.remaining_qty * 0.5:
-                    log.warning(
-                        f"[SYNC] Partial external close detected. "
-                        f"Tracker qty={pos.remaining_qty:.6f} vs Exchange qty={real_qty:.6f}. "
-                        f"Adjusting state and setting tp1_hit=True."
-                    )
-                    pos.remaining_qty = real_qty
-                    pos.tp1_hit = True
-                    pos.sl_price = pos.entry_price
-                    tracker._save_state()
-                    await _replace_tp_sl(order_mgr, pos, log, tracker=tracker)
-                    return
-                notional = real_qty * pos.entry_price
-                if notional < 1.0:
-                    log.warning(f"[SYNC] Dust position detected (qty={real_qty}, notional=${notional:.4f}), closing")
-                    await order_mgr._cancel_exchange_backstop(getattr(pos, "backstop_algo_id", None))
-                    await order_mgr.close_dust(pos.direction)
-                    tracker.position = None
-                    tracker._clear_state()
-                    return
-            except Exception as e:
-                log.warning(f"[SYNC] Could not verify position on exchange: {e}")
-        await _replace_tp_sl(order_mgr, pos, log, tracker=tracker)
-        return
-
-    entry_price = 0.0
+    # Определяем параметры биржевой позиции один раз — нужны и для сверки со
+    # сохранённым состоянием, и для fallback-пересчёта уровней из конфига.
     direction = "LONG"
+    entry_price = 0.0
     entry_timestamp_ms = None
     for p in positions:
         amt = float(p.get("positionAmt", 0))
@@ -658,6 +741,109 @@ async def _sync_position_on_start(
     if entry_price == 0:
         log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
         return
+
+    try:
+        await order_mgr._get_symbol_filters()
+    except Exception as e:
+        log.warning(f"[SYNC] Could not load symbol filters for state match: {e}")
+
+    # 1) Предпочитаем СОХРАНЁННОЕ состояние, если оно соответствует биржевой
+    # позиции (direction + entry_price + размер в пределах тика/шага). Тогда
+    # уровни НЕ пересчитываются из конфига — берутся сохранённые load_state().
+    pos = None
+    if tracker.load_state():
+        pos = tracker.position
+        matched, mismatch_reason = _state_matches_exchange(
+            order_mgr, pos, direction, entry_price, exchange_qty
+        )
+        if not matched:
+            log.warning(
+                f"[SYNC] Saved state does not match exchange position "
+                f"({mismatch_reason}) — recalculating levels from config"
+            )
+            tracker.position = None
+            tracker._trade_id = None
+            tracker._entry_fill_ms = None
+            pos = None
+    else:
+        log.info(f"[SYNC] No saved state for {cfg.symbol} — recalculating levels from config")
+
+    if pos is not None:
+        # State соответствует бирже: сохранённые уровни уже в pos
+        # (sl_price/tp1_price/tp2_price/tp1_hit/remaining_qty/total_qty/
+        # realized_pnl/entry_timestamp/entry_fill_ms/preset/trade_id/
+        # backstop_algo_id). Восстанавливаем известный algoId backstop, чтобы
+        # последующие операции не оставили orphan/дубль.
+        order_mgr.backstop_algo_id = getattr(pos, "backstop_algo_id", None)
+        try:
+            real_qty = await order_mgr._get_real_position_qty(pos.direction)
+            if real_qty < 0.000001:
+                log.warning(f"[SYNC] Exchange shows no position but state has open position — position closed externally (TP/SL), clearing state")
+                # Fetch real PnL and close DB trade
+                try:
+                    import requests as s2
+                    import datetime
+                    api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                    trades_resp = s2.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                    for trade in (trades_resp.get("trades") or []):
+                        if trade.get("is_open") and pos.entry_timestamp:
+                            entry_ms = 0
+                            try:
+                                if isinstance(pos.entry_timestamp, str):
+                                    entry_ms = int(datetime.datetime.fromisoformat(pos.entry_timestamp).timestamp() * 1000)
+                                else:
+                                    entry_ms = int(pos.entry_timestamp.timestamp() * 1000)
+                            except Exception:
+                                pass
+                            exit_ms = int(__import__("time").time() * 1000)
+                            real_pnl = None
+                            if entry_ms > 0:
+                                real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
+                            pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
+                            s2.patch(f"{api_url}/trades/{trade['id']}", json={
+                                "is_open": False, "exit_reason": "SL",
+                                "pnl": round(pnl_val, 4),
+                                "exit_time": datetime.datetime.utcnow().isoformat(),
+                                "status": "closed",
+                            }, timeout=5)
+                            log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
+                            if pnl_val < 0 and recovery:
+                                await recovery.report(pnl=pnl_val)
+                                # Освобождаем захваченную recovery-цепочку, если эта позиция её держала.
+                                if pos and getattr(pos, "recovery_chain_id", None):
+                                    await recovery.release(chain_id=pos.recovery_chain_id)
+                                    log.info(f"[SYNC] Released locked recovery chain #{pos.recovery_chain_id} after external close for {cfg.symbol}")
+                except Exception:
+                    pass
+                # Позиции на бирже нет — снимаем осиротевший backstop.
+                if getattr(pos, "backstop_algo_id", None):
+                    await order_mgr._cancel_exchange_backstop(pos.backstop_algo_id)
+                tracker.position = None
+                tracker._clear_state()
+                return
+            notional = real_qty * pos.entry_price
+            if notional < 1.0:
+                log.warning(f"[SYNC] Dust position detected (qty={real_qty}, notional=${notional:.4f}), closing")
+                await order_mgr._cancel_exchange_backstop(getattr(pos, "backstop_algo_id", None))
+                await order_mgr.close_dust(pos.direction)
+                tracker.position = None
+                tracker._clear_state()
+                return
+        except Exception as e:
+            log.warning(f"[SYNC] Could not verify position on exchange: {e}")
+
+        log.info(
+            f"[SYNC] Restored saved levels from state | "
+            f"sl={pos.sl_price} tp1={pos.tp1_price} tp2={pos.tp2_price} "
+            f"qty={pos.remaining_qty} tp1_hit={pos.tp1_hit}"
+        )
+        # НЕ закрываем позицию рынком при уже пробитом SL: оставляем её свечному
+        # циклу (его SL-путь запускает reverse). Досоздаём недостающую биржевую
+        # защиту, чтобы позиция не осталась голой до следующей свечи.
+        await _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=tracker)
+        return
+
+    # 2) Fallback: state отсутствует/не совпал — пересчитываем уровни из конфига.
 
     sl_dist  = entry_price * cfg.sl_pct  / 100
     tp1_dist = entry_price * cfg.tp1_pct / 100
@@ -753,17 +939,12 @@ async def _sync_position_on_start(
         f"(levels recalculated from config)"
     )
 
-    closed_immediately = await _replace_tp_sl(order_mgr, tracker.position, log, tracker=tracker)
-    if closed_immediately:
-        # SL was already breached — position closed with market order.
-        # Clear tracker state so no phantom position is monitored.
-        tracker.position = None
-        tracker._clear_state()
+    await _replace_tp_sl(order_mgr, tracker.position, log, tracker=tracker)
 
 
 async def _replace_tp_sl(order_mgr: OrderManager, pos, log, tracker=None) -> bool:
-    """Replace TP/SL orders on exchange. Returns True if position was
-    closed immediately due to SL being breached at restore time.
+    """Replace TP/SL orders on exchange. Always returns False (kept for the
+    existing call site): a breached SL no longer forces a market close.
 
     Также снимает старый и ставит новый биржевой backstop; при передаче tracker
     персистит его algoId в состояние позиции, чтобы рестарт не оставил дубль."""
@@ -771,10 +952,10 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log, tracker=None) -> boo
         log.warning(f"[SYNC] No position to replace TP/SL (remaining_qty={pos.remaining_qty if pos else 0})")
         return False
     try:
-        # Check if market has already breached the SL level.
-        # If so, the STOP_MARKET won't trigger until price returns yet the
-        # tracker would consider it hit — leaving an orphan on the exchange.
-        # Close the position immediately with a real market order instead.
+        # Проверяем, не пробит ли уже уровень SL. Если пробит — НЕ закрываем
+        # позицию рынком (раньше это убивало позицию на рестарте): оставляем её
+        # свечному циклу, который на SL-пути откроет reverse. Ордера и backstop
+        # всё равно переставляются ниже, чтобы позиция не осталась голой.
         import asyncio as _asyncio
         try:
             ticker = await order_mgr.client.futures_symbol_ticker(symbol=order_mgr.cfg.symbol)
@@ -785,28 +966,15 @@ async def _replace_tp_sl(order_mgr: OrderManager, pos, log, tracker=None) -> boo
             breached = (pos.direction == "LONG" and current_price <= pos.sl_price) or \
                        (pos.direction == "SHORT" and current_price >= pos.sl_price)
             if breached:
+                # НЕ закрываем позицию рынком: виртуальный SL обрабатывает
+                # свечной цикл (SL-путь запускает reverse). Просто предупреждаем
+                # и продолжаем — ордера/backstop будут выставлены ниже, чтобы
+                # позиция не осталась голой до следующей свечи.
                 log.warning(
                     f"[SYNC] SL already breached on restore | {pos.direction} "
                     f"current={current_price:.4f} sl={pos.sl_price:.4f} — "
-                    f"closing position with market order"
+                    f"leaving the position for the normal SL/reverse flow"
                 )
-                side = "SELL" if pos.direction == "LONG" else "BUY"
-                # Сначала снимаем backstop, иначе closePosition-ордер может
-                # сработать уже после ручного закрытия позиции.
-                await order_mgr._cancel_exchange_backstop(
-                    getattr(pos, "backstop_algo_id", None) or order_mgr.backstop_algo_id
-                )
-                await order_mgr.client.futures_create_order(
-                    symbol=order_mgr.cfg.symbol,
-                    side=side,
-                    type="MARKET",
-                    quantity=pos.remaining_qty,
-                    reduceOnly=True,
-                )
-                if tracker is not None and tracker.position is not None:
-                    tracker.position.backstop_algo_id = None
-                    tracker._save_state()
-                return True
         await order_mgr.cancel_all_tp_sl(pos.direction)
         await _asyncio.sleep(1.5)
         log.info(f"[SYNC] Placing orders | sl_price={pos.sl_price} tp1_price={pos.tp1_price} tp2_price={pos.tp2_price} remaining_qty={pos.remaining_qty}")
