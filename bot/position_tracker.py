@@ -123,6 +123,9 @@ class PositionTracker:
         # Фактическое время входа (мс, UTC) текущего цикла. Переживает очистку
         # self.position, чтобы close-репортинг использовал его как начало окна.
         self._entry_fill_ms: Optional[int] = None
+        # Метка последнего reverse-выхода (REVERSE_BE / REVERSE_BACKSTOP).
+        # Нужна re-finalize после добивания остатка, чтобы сохранить причину.
+        self._last_reverse_reason: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     #  Persistence                                                         #
@@ -567,23 +570,23 @@ class PositionTracker:
             )
 
     def _classify_reverse_exit(self, p_before: Optional[Position], exit_price: Optional[float], hit: str) -> str:
-        """REVERSE_TP, если обратная нога вышла на плановом TP (P3), иначе
-        REVERSE_SL (биржевой backstop или любой другой рыночный выход).
+        """REVERSE_BE, если обратная нога вышла на плановом TP (P3), иначе
+        REVERSE_BACKSTOP (биржевой backstop или любой другой рыночный выход).
 
         Сравниваем фактическую цену выхода с запланированными tp1/tp2 обратной
         позиции с допуском в один тик / небольшую относительную погрешность.
         """
         if exit_price is None or exit_price <= 0:
-            # Цена выхода недоступна: planned-TP хит обратной ноги трактуем как TP.
-            return "REVERSE_TP" if hit == "TP1" else "REVERSE_SL"
+            # Цена выхода недоступна: planned-TP хит обратной ноги трактуем как BE.
+            return "REVERSE_BE" if hit == "TP1" else "REVERSE_BACKSTOP"
         targets = [
             getattr(p_before, "tp1_price", 0.0) if p_before else 0.0,
             getattr(p_before, "tp2_price", 0.0) if p_before else 0.0,
         ]
         for target in targets:
             if target and target > 0 and self._price_close(exit_price, target):
-                return "REVERSE_TP"
-        return "REVERSE_SL"
+                return "REVERSE_BE"
+        return "REVERSE_BACKSTOP"
 
     # ------------------------------------------------------------------ #
     #  Trading logic                                                       #
@@ -844,12 +847,14 @@ class PositionTracker:
         p_before = p
         is_reverse = is_reverse_before
         # Итог reverse пишется отдельным блоком ниже; метка уточняется по
-        # фактической цене выхода (REVERSE_TP / REVERSE_SL). Для остальных —
+        # фактической цене выхода (REVERSE_BE / REVERSE_BACKSTOP). Для остальных —
         # прежняя семантика (SL/TP1/TP2 из apply_hit либо сам hit).
         exit_reason = (
             self._classify_reverse_exit(p_before, close_price, hit)
             if is_reverse else (exit_reason_override or hit)
         )
+        if is_reverse:
+            self._last_reverse_reason = exit_reason
         orig_dir = getattr(p_before, "reversed_from_direction", "") if p_before else ""
         orig_entry = getattr(p_before, "reversed_from_entry", 0.0) if p_before else 0.0
         orig_qty = getattr(p_before, "reversed_from_qty", 0.0) if p_before else 0.0
@@ -981,8 +986,9 @@ class PositionTracker:
             else:
                 ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, total_pnl, report_qty)
                 # Метка по фактической цене выхода обратной ноги: выход на
-                # плановом P3 (tp1/tp2) → REVERSE_TP, иначе REVERSE_SL.
+                # плановом P3 (tp1/tp2) → REVERSE_BE, иначе REVERSE_BACKSTOP.
                 reverse_reason = self._classify_reverse_exit(p_before, ex_exit, hit)
+                self._last_reverse_reason = reverse_reason
                 await self._report_close_with_id(trade_id_before, ex_exit, report_qty, ex_pnl, reverse_reason, entry_price_before, reject_reason=reject_before, commission=ex_comm)
                 if exchange is None:
                     await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
@@ -1187,6 +1193,129 @@ class PositionTracker:
             "fills_count": len(parsed),
             "last_fill_time": flat_ms,
         }
+
+    async def refinalize_cycle_after_flat(self, exit_reason: Optional[str] = None) -> bool:
+        """Пере-финализирует строку trades по ПОЛНОМУ окну [вход цикла, флэт].
+
+        Первичный _exchange_cycle_summary снимался в момент детекта reverse-TP и
+        мог не включать добивающие остаток филлы (наблюдалось 3 из 5). Здесь
+        окно заканчивается фактическим флэтом, поэтому реальные exit_price
+        (VWAP закрывающих филлов), qty, commission, pnl (Σ realizedPnl − Σ
+        commission) и exit_time (последний закрывающий филл) пересчитываются
+        заново. Идемпотентно: работает и для открытой, и для уже закрытой строки,
+        финальные значения перезаписывают прежние. exit_reason меняется только
+        если передан явно. Никогда не бросает исключение.
+        """
+        try:
+            if not self.reporter:
+                return False
+            trade_id = self._trade_id
+            if not trade_id:
+                self.log.debug("[REVERSE] refinalize skipped: no trade_id")
+                return False
+
+            row = None
+            try:
+                row = await self.reporter.get_trade(trade_id)
+            except Exception:
+                row = None
+            if row is None:
+                self.log.warning(
+                    f"[REVERSE] refinalize trade #{trade_id}: row not found"
+                )
+                return False
+
+            direction = (row or {}).get("direction") or (
+                self.position.direction if self.position is not None else None
+            ) or "LONG"
+
+            # Начало окна: entry_fill_ms (кэш переживает очистку позиции) либо
+            # entry_time исходной ноги из строки (для reverse он не перезаписан).
+            entry_ms = await self._entry_time_ms(trade_id)
+            entry_fill_ms = self._entry_fill_ms
+            if not entry_fill_ms and self.position is not None:
+                entry_fill_ms = getattr(self.position, "entry_fill_ms", None)
+            if not entry_fill_ms and row is not None:
+                entry_fill_ms = row.get("entry_fill_ms")
+
+            # Fallback-поиск входа, когда entry_fill_ms не зафиксирован: вход
+            # цикла — противоположная (исходная) нога. Цену/объём не фильтруем,
+            # т.к. строка хранит уже перезаписанный вход обратной ноги.
+            orig_dir = "SHORT" if direction == "LONG" else "LONG"
+            entry_ref_side = "BUY" if orig_dir == "LONG" else "SELL"
+
+            exchange = await self._exchange_cycle_summary(
+                entry_ms, direction,
+                entry_fill_ms=entry_fill_ms,
+                entry_ref_side=entry_ref_side,
+                entry_ref_price=0.0,
+                entry_ref_qty=0.0,
+            )
+            if exchange is None or not exchange.get("exit_price"):
+                self.log.warning(
+                    f"[REVERSE] refinalize trade #{trade_id}: exchange fills "
+                    f"unavailable — keeping existing row"
+                )
+                return False
+
+            exit_price = float(exchange["exit_price"])
+            commission = float(exchange.get("commission", 0.0) or 0.0)
+            pnl = float(exchange.get("pnl", 0.0) or 0.0)
+            # qty — реальный объём закрывающих филлов; если их нет, не затираем
+            # прежний qty нулём.
+            try:
+                qty = float(exchange.get("close_qty") or 0.0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty <= 0:
+                try:
+                    qty = float((row or {}).get("qty") or 0.0)
+                except (TypeError, ValueError):
+                    qty = 0.0
+            if qty <= 0:
+                self.log.warning(
+                    f"[REVERSE] refinalize trade #{trade_id}: qty unavailable — skip"
+                )
+                return False
+
+            exit_time = datetime.datetime.utcnow().isoformat()
+            last_fill_ms = exchange.get("last_fill_time")
+            if last_fill_ms:
+                try:
+                    exit_time = datetime.datetime.utcfromtimestamp(
+                        int(last_fill_ms) / 1000.0
+                    ).isoformat()
+                except (TypeError, ValueError, OverflowError, OSError):
+                    exit_time = datetime.datetime.utcnow().isoformat()
+
+            data = {
+                "exit_price":  exit_price,
+                "qty":         qty,
+                "pnl":         pnl,
+                "commission":  commission,
+                "exit_time":   exit_time,
+                "is_open":     False,
+                "status":      (row or {}).get("status") if (row or {}).get("status") == "rejected" else "closed",
+            }
+            # exit_reason не трогаем, если явно не передан (сохраняем REVERSE_BE/BACKSTOP).
+            if exit_reason:
+                data["exit_reason"] = exit_reason
+
+            success = await self.reporter.patch_trade(trade_id, data)
+            if not success:
+                self.log.warning(
+                    f"[REVERSE] refinalize trade #{trade_id}: patch failed"
+                )
+                return False
+
+            self.log.info(
+                f"[REVERSE] re-finalized trade #{trade_id} | exit={exit_price} "
+                f"pnl={pnl:.4f} commission={commission:.6f} (after residual flat)"
+            )
+            return True
+        except Exception as e:
+            self.log.warning(f"[REVERSE] refinalize_cycle_after_flat error: {e}")
+            return False
 
     async def close_open_trade_from_exchange(
         self,

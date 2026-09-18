@@ -1226,6 +1226,12 @@ async def _run_live_or_paper(
                         log.error(f"[REVERSE] residual close failed | qty={real_qty:.6f}: {e}")
                     if closed:
                         log.info(f"[REVERSE] residual closed | qty={real_qty:.6f}")
+                        # Дождаться фактического флэта, чтобы добивающий филл уже
+                        # был виден в userTrades до повторной финализации строки.
+                        try:
+                            await tracker._verify_position_closed(direction, 5)
+                        except Exception as e:
+                            log.debug(f"[REVERSE] post-close verify failed: {e}")
                 else:
                     await order_mgr.close_dust(direction, mode=pos_mode)
             if tracker.position is not None:
@@ -1240,6 +1246,12 @@ async def _run_live_or_paper(
                 tracker.position.remaining_qty = 0.0
                 tracker.position = None
                 tracker._clear_state()
+            # Остаток reverse-ноги мог добраться рынком уже ПОСЛЕ снимка
+            # _exchange_cycle_summary в момент детекта TP — пересчитываем строку
+            # по полному окну [вход, флэт], сохраняя текущую reverse-метку.
+            await tracker.refinalize_cycle_after_flat(
+                getattr(tracker, "_last_reverse_reason", None)
+            )
 
         # «Отклонённая» (rejected) сделка исключается из глобального счётчика серии
         # убытков и recovery — она не должна влиять на риск-контроль (как и на статистику).
@@ -1592,6 +1604,13 @@ async def _run_live_or_paper(
                                 elif pnl < 0:
                                         await recovery.report(pnl=pnl)
                                 await recovery.report_result(pnl)
+                                # Reverse-цикл, закрытый на бирже: строка trades
+                                # могла быть зафинализирована частично. Пересчёт
+                                # по полному окну [вход, флэт] до fallback-закрытия.
+                                if pos.is_reverse:
+                                    await tracker.refinalize_cycle_after_flat(
+                                        getattr(tracker, "_last_reverse_reason", None)
+                                    )
                                 # Fallback: биржа флэт, но строка trades могла
                                 # остаться открытой (apply_hit_async не закрыл её).
                                 # Метод идемпотентен: уже закрытую строку не трогает.
