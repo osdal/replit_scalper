@@ -709,6 +709,75 @@ export async function deleteAllGrids(
   }
 }
 
+// --- Phase 3: конфигурация серверного grid-движка (/api/grid-engine/config) --
+// GET открыт; POST защищён notifyTokenGuard. Управляет авто-созданием сеток
+// серверным движком (аналог browser-режима auto).
+
+export interface GridEngineConfig {
+  engineEnabled?: boolean;
+  autoEnabled?: boolean;
+  autoMax?: number;
+  autoTotalMax?: number;
+  autoOrderUsd?: number;
+  autoLeverage?: number;
+  intervalMs?: number;
+  staleActiveMinutes?: number;
+  restartRequired?: string | boolean | null;
+  [key: string]: unknown;
+}
+
+export async function fetchGridEngineConfig(): Promise<{
+  ok: boolean;
+  error?: string;
+  config?: GridEngineConfig;
+  [key: string]: any;
+}> {
+  try {
+    const url = new URL(`${API}/grid-engine/config`);
+    url.searchParams.set("_ts", String(Date.now()));
+    const r = await fetch(url.toString(), { headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ...data,
+      ok: r.ok && !data.error,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
+export async function updateGridEngineConfig(patch: {
+  autoEnabled?: boolean;
+  autoMax?: number;
+  autoTotalMax?: number;
+  autoOrderUsd?: number;
+  autoLeverage?: number;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  config?: GridEngineConfig;
+  applied?: Record<string, unknown>;
+  restartRequired?: string | boolean | null;
+  [key: string]: any;
+}> {
+  try {
+    const r = await fetch(`${API}/grid-engine/config`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(patch),
+    });
+    const data = await r.json().catch(() => ({}));
+    return {
+      ...data,
+      ok: r.ok && !data.error,
+      error: data.error ?? (r.ok ? undefined : `API ${r.status}`),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "failed" };
+  }
+}
+
 export async function stopAllBotsAndReset(): Promise<{ ok: boolean; error?: string; [key: string]: any }> {
   try {
     const r = await fetch(`${API}/trading/close-and-reset`, {

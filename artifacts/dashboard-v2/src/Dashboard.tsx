@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids } from "./hooks/useApi";
+import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids, fetchGridEngineConfig, updateGridEngineConfig } from "./hooks/useApi";
+import type { GridEngineConfig } from "./hooks/useApi";
 import { timeframePassesGridGate, getTimeframeAdx } from "./lib/gridGate";
 import { Button } from "./components/ui/button";
 import * as lightweightCharts from "lightweight-charts";
@@ -631,6 +632,9 @@ export default function Dashboard() {
   const protectiveSyncAtRef = useRef<Record<string, number>>({});
   const [activeTab, setActiveTab] = useState<"stats" | "history">(() => readPersisted().activeTab ?? "stats");
   const [tradeMode, setTradeMode] = useState<"manual" | "auto">(() => readPersisted().tradeMode ?? "manual");
+  // Phase 3: конфиг серверного grid-движка (только server-режим). Источник истины
+  // для Manual/Auto в server-режиме; в browser-режиме не используется.
+  const [serverEngineConfig, setServerEngineConfig] = useState<GridEngineConfig | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
@@ -724,6 +728,54 @@ export default function Dashboard() {
       clearInterval(id);
     };
   }, []);
+
+  // Phase 3: конфиг серверного grid-движка — источник истины для Manual/Auto.
+  // В browser-режиме ничего не запрашиваем: поведение остаётся прежним.
+  useEffect(() => {
+    if (!SERVER_ENGINE) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchGridEngineConfig();
+        if (cancelled || !res.ok) return;
+        const cfg = res.config ?? null;
+        setServerEngineConfig(cfg);
+        if (typeof cfg?.autoEnabled === "boolean") {
+          setTradeMode(cfg.autoEnabled ? "auto" : "manual");
+        }
+      } catch (e) {
+        console.error("[GRID] grid-engine config fetch failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Manual/Auto: в server-режиме переключаем авто-создание серверного движка
+  // (optimistic + revert при ошибке), в browser-режиме — как раньше, локальный state.
+  const selectTradeMode = useCallback(
+    async (mode: "manual" | "auto") => {
+      if (!SERVER_ENGINE) {
+        setTradeMode(mode);
+        return;
+      }
+      const prev = serverEngineConfig;
+      const autoEnabled = mode === "auto";
+      setTradeMode(mode);
+      setServerEngineConfig((c) => ({ ...(c ?? {}), autoEnabled }));
+      try {
+        const res = await updateGridEngineConfig({ autoEnabled });
+        if (!res.ok) throw new Error(res.error || "grid-engine config update failed");
+        if (res.config) setServerEngineConfig(res.config);
+      } catch (e) {
+        setTradeMode(prev?.autoEnabled ? "auto" : "manual");
+        setServerEngineConfig(prev ?? null);
+        console.error("[GRID] grid-engine config update failed", e);
+      }
+    },
+    [serverEngineConfig],
+  );
 
   // Авто-очистка сеток после серверного сброса: если resetAt новее уже
   // обработанного маркера, стираем сохранённые сетки в этом браузере.
@@ -3142,6 +3194,13 @@ export default function Dashboard() {
   const fmtUsd = (pnlPct: number, size: number = orderSizeUsd) =>
     `${pnlPct >= 0 ? "+" : "-"}$${Math.abs((size * pnlPct) / 100).toFixed(2)}`;
 
+  // В server-режиме активный режим берём из конфига движка, а не из локального state.
+  const effectiveTradeMode: "manual" | "auto" = SERVER_ENGINE
+    ? serverEngineConfig?.autoEnabled
+      ? "auto"
+      : "manual"
+    : tradeMode;
+
   if (loading) {
     return <div className="p-6">Loading pairs...</div>;
   }
@@ -3154,10 +3213,10 @@ export default function Dashboard() {
           <span className="font-semibold text-black">Mode:</span>
           <Button
             size="sm"
-            variant={tradeMode === "manual" ? "default" : "outline"}
-            onClick={() => setTradeMode("manual")}
+            variant={effectiveTradeMode === "manual" ? "default" : "outline"}
+            onClick={() => void selectTradeMode("manual")}
             className={
-              tradeMode === "manual"
+              effectiveTradeMode === "manual"
                 ? "bg-black text-white hover:bg-black/90"
                 : "bg-white text-black border-gray-300 hover:bg-gray-100"
             }
@@ -3166,16 +3225,40 @@ export default function Dashboard() {
           </Button>
           <Button
             size="sm"
-            variant={tradeMode === "auto" ? "default" : "outline"}
-            onClick={() => setTradeMode("auto")}
+            variant={effectiveTradeMode === "auto" ? "default" : "outline"}
+            onClick={() => void selectTradeMode("auto")}
             className={
-              tradeMode === "auto"
+              effectiveTradeMode === "auto"
                 ? "bg-black text-white hover:bg-black/90"
                 : "bg-white text-black border-gray-300 hover:bg-gray-100"
             }
           >
             auto
           </Button>
+          {SERVER_ENGINE && (
+            <span
+              className="ml-2 text-[10px] text-zinc-500"
+              title={
+                serverEngineConfig?.restartRequired
+                  ? "Engine enable/interval changes need a restart"
+                  : undefined
+              }
+            >
+              auto applies on the next engine tick (~10s)
+              {serverEngineConfig ? (
+                <>
+                  {" "}
+                  · interval{" "}
+                  {typeof serverEngineConfig.intervalMs === "number"
+                    ? `${Math.round(serverEngineConfig.intervalMs / 1000)}s`
+                    : "—"}{" "}
+                  · autoMax {serverEngineConfig.autoMax ?? "—"} · order $
+                  {serverEngineConfig.autoOrderUsd ?? "—"}
+                </>
+              ) : null}
+              {serverEngineConfig?.restartRequired ? " · restartRequired" : ""}
+            </span>
+          )}
         </div>
       </div>
       {serverMigrationError && (

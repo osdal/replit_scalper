@@ -484,19 +484,33 @@ class OrderManager:
         Разворот при срабатывании SL.
 
         Исходная позиция НЕ закрывается отдельным ордером. В обратную сторону
-        отправляется рыночный ордер, оставляющий удерживаемый (хедж) объём
+        отправляется рыночный ордер, оставляющий удерживаемый (хедж) объём.
+        Объём хеджа, при котором обе ноги выходят в ноль на плановой цене
+        P3_plan, считается от ожидаемого филла S по формуле
 
-            Qh = Qo * |E - P3| / |S - P3|,   P3 = E_rev * (1 ∓ pct)
+            held_plan = Qo * |E - S| / |S - P3_plan|,   P3_plan = S * (1 ∓ pct)
 
         где E = original_entry, S = sl_price, Qo = original_qty,
-        pct = reverse_breakeven_pct / 100. P3 считается ТОЛЬКО после исполнения
-        обратного ордера, от его фактической средней цены E_rev (avgPrice/fills):
-        для обратного SHORT P3 = E_rev*(1-pct), для обратного LONG
-        P3 = E_rev*(1+pct). Объём отправки send = Qh + Qo, но не больше биржевого
-        maxQty (LOT_SIZE / MARKET_LOT_SIZE). TP обратной позиции ставится ровно
-        на P3, где суммарный PnL (убыток исходной + прибыль обратной) равен 0.
+        pct = reverse_breakeven_pct / 100. Числитель — реализованный на
+        развороте убыток исходной ноги, поэтому формула даёт истинный
+        безубыток (старая Qo*|E-P3_plan|/|S-P3_plan| была больше ровно на Qo).
+        Объём отправки send = held_plan + Qo (закрывает Qo и открывает
+        held_plan нетто), но не больше биржевого maxQty (LOT_SIZE /
+        MARKET_LOT_SIZE).
 
-        Возвращает (entry_price, held_qty, tp_price), где tp_price = P3.
+        После исполнения обратного ордера фактическая цена E_rev
+        (avgPrice/fills) и фактический хедж Qh (реальный нетто-объём обратной
+        позиции, fallback send - Qo) дают точную безубыточную цену
+
+            reverse SHORT: P* = E_rev - Qo * |E - E_rev| / Qh
+            reverse LONG : P* = E_rev + Qo * |E - E_rev| / Qh
+
+        P* округляется по tickSize и проверяется по геометрии (SHORT: P* <
+        E_rev, LONG: P* > E_rev); при нарушении — сдвиг на тик в прибыльную
+        сторону, иначе биржевой TP не выставляется. TP обратной позиции
+        ставится ровно на P* на весь оставшийся нетто-объём.
+
+        Возвращает (entry_price, held_qty, tp_price), где tp_price = P*.
         """
         if mode is None:
             mode = self.cfg.mode
@@ -505,14 +519,19 @@ class OrderManager:
         pct = float(getattr(self.cfg, "reverse_breakeven_pct", 0.5) or 0.5) / 100
 
         # Планировочный P3 от виртуального SL — нужен только для оценки объёма
-        # отправки. Реальный P3 пересчитывается ниже от фактической цены реверса.
+        # отправки. Это ИСТИННЫЙ безубыток для ожидаемого филла на S: исходная
+        # нога закрывается неттингом по S (реализованный убыток Qo*|E-S|), а
+        # хедж должен вернуть его к P3_plan, поэтому
+        #   held_plan = Qo * |E - S| / |S - P3_plan|.
+        # Старая формула Qo*|E-P3_plan|/|S-P3_plan| давала ровно held_plan + Qo
+        # и пересайзила отправку ровно на Qo.
         if original_direction == "LONG":
             p3_plan = sl_price * (1 - pct)
         else:
             p3_plan = sl_price * (1 + pct)
 
         held_qty = await self._adjust_qty(
-            abs(original_entry - p3_plan) / abs(sl_price - p3_plan) * original_qty, mode=mode
+            abs(original_entry - sl_price) / abs(sl_price - p3_plan) * original_qty, mode=mode
         )
         if held_qty <= 0:
             self.log.warning(f"[REVERSE] held qty={held_qty} <= 0, skipping reverse")
@@ -589,75 +608,99 @@ class OrderManager:
             )
             return None
 
-        # P3 считается от ФАКТИЧЕСКОЙ средней цены входа реверса E_rev, а не от
-        # виртуального SL: иначе TP оказывается по неверную сторону реального
-        # филла и исполняется как маркет, ничего не откупая.
-        if reverse_dir == "SHORT":
-            p3 = entry_price * (1 - pct)
-        else:
-            p3 = entry_price * (1 + pct)
-        tp_price = await self._adjust_price(p3, mode=mode)
-
-        # Геометрия: для SHORT TP обязан быть ниже E_rev, для LONG — выше.
-        # Округление по tickSize может схлопнуть его на/за E_rev — тогда сдвигаем
-        # минимум на один тик в прибыльную сторону. Если и это невозможно, TP не
-        # отправляем (маркет-исполнение по неверной цене недопустимо).
-        def _correct_side(tp: float) -> bool:
-            return tp < entry_price if reverse_dir == "SHORT" else tp > entry_price
-
-        if not _correct_side(tp_price):
-            tick = self._tick_size if mode == "live" else None
-            if tick and tick > 0:
-                nudged = tp_price - tick if reverse_dir == "SHORT" else tp_price + tick
-                tp_price = await self._adjust_price(nudged, mode=mode)
-                self.log.warning(
-                    f"[REVERSE] P3 rounded to wrong side → nudged | dir={reverse_dir} "
-                    f"E_rev={entry_price} raw_p3={p3} nudged_p3={tp_price} tick={tick}"
-                )
-        tp_ok = _correct_side(tp_price)
-        if not tp_ok:
-            self.log.error(
-                f"[REVERSE] P3 on wrong side of actual fill — aborting TP | "
-                f"dir={reverse_dir} E_rev={entry_price} p3={p3} p3_adj={tp_price} "
-                f"pct={pct * 100}%"
-            )
-
-        # Точный безубыточный хедж по ФАКТИЧЕСКОМУ филлу реверса:
-        #   Qh_exact = Qo * |E - E_rev| / |E_rev - P3|,
-        # где числитель — реально зафиксированный на развороте убыток (до E_rev),
-        # а не |E - P3| (старый баг: смешивал realized E_rev с виртуальным S).
+        # Фактический хедж после разворота: реальный нетто-объём обратной
+        # позиции; если биржа недоступна (<=0) — расчётный send - Qo.
         fallback_held = send_qty - original_qty
-        actual_held = await self._adjust_qty(fallback_held, mode=mode)
-        qh_exact = 0.0
-        if abs(entry_price - tp_price) > 0:
-            qh_exact = await self._adjust_qty(
-                abs(original_entry - entry_price) / abs(entry_price - tp_price) * original_qty,
-                mode=mode,
+        real_qty = await self._get_real_position_qty(reverse_dir)
+        if real_qty > 0:
+            qh = await self._adjust_qty(real_qty, mode=mode)
+        else:
+            qh = await self._adjust_qty(fallback_held, mode=mode)
+
+        # Точка безубыточности объединённого PnL обеих ног по ФАКТИЧЕСКИМ
+        # E_rev и Qh. Исходная нога сведена неттингом по E_rev (реализованный
+        # убыток Qo*|E - E_rev|), поэтому:
+        #   reverse SHORT: P* = E_rev - Qo*|E - E_rev| / Qh
+        #   reverse LONG : P* = E_rev + Qo*|E - E_rev| / Qh
+        # Это заменяет старый pct-ориентир P3 = E_rev*(1 ∓ pct) как TP.
+        if reverse_dir == "SHORT":
+            p3_ref = entry_price * (1 - pct)
+        else:
+            p3_ref = entry_price * (1 + pct)
+
+        p_star = None
+        tp_price = None
+        tp_ok = False
+        if qh <= 0:
+            self.log.warning(
+                f"[REVERSE] nothing to hedge (Qh={qh}) — skipping TP | "
+                f"dir={reverse_dir} E_rev={entry_price} E={original_entry} Qo={original_qty}"
             )
-        self.log.info(
-            f"[REVERSE] hedge | planned={held_qty} exact={qh_exact} actual={actual_held} "
-            f"E={original_entry} E_rev={entry_price} S={sl_price} P3={tp_price}"
-        )
+            tp_price = await self._adjust_price(p3_ref, mode=mode)
+        elif abs(original_entry - entry_price) <= 0:
+            self.log.warning(
+                f"[REVERSE] |E - E_rev| <= 0 — nothing to hedge, skipping TP | "
+                f"dir={reverse_dir} E={original_entry} E_rev={entry_price}"
+            )
+            tp_price = await self._adjust_price(p3_ref, mode=mode)
+        else:
+            move = original_qty * abs(original_entry - entry_price) / qh
+            p_star = entry_price - move if reverse_dir == "SHORT" else entry_price + move
+            tp_price = await self._adjust_price(p_star, mode=mode)
+
+            # Геометрия: для SHORT TP обязан быть ниже E_rev, для LONG — выше.
+            # Округление по tickSize может схлопнуть его на/за E_rev — тогда
+            # сдвигаем минимум на один тик в прибыльную сторону. Если и это
+            # невозможно, TP не отправляем (маркет-исполнение недопустимо).
+            def _correct_side(tp: float) -> bool:
+                return tp < entry_price if reverse_dir == "SHORT" else tp > entry_price
+
+            if not _correct_side(tp_price):
+                tick = self._tick_size if mode == "live" else None
+                if tick and tick > 0:
+                    nudged = tp_price - tick if reverse_dir == "SHORT" else tp_price + tick
+                    tp_price = await self._adjust_price(nudged, mode=mode)
+                    self.log.warning(
+                        f"[REVERSE] P* rounded to wrong side → nudged | dir={reverse_dir} "
+                        f"E_rev={entry_price} raw_p_star={p_star} nudged_p_star={tp_price} tick={tick}"
+                    )
+            tp_ok = _correct_side(tp_price)
+            if not tp_ok:
+                self.log.error(
+                    f"[REVERSE] P* on wrong side of actual fill — aborting TP | "
+                    f"dir={reverse_dir} E_rev={entry_price} p_star={p_star} "
+                    f"p_star_adj={tp_price} Qo={original_qty} Qh={qh}"
+                )
+
+            dist_pct = abs(entry_price - tp_price) / entry_price * 100 if entry_price else 0.0
+            self.log.info(
+                f"[REVERSE] be | E={original_entry} E_rev={entry_price} Qo={original_qty} "
+                f"Qh={qh} P3={p3_ref} P*={tp_price} pct={pct * 100}% dist_pct={dist_pct}"
+            )
+            self.log.info(
+                f"[REVERSE] hedge | planned={held_qty} actual={qh} "
+                f"E={original_entry} E_rev={entry_price} S={sl_price} P*={tp_price}"
+            )
 
         # TP закрывает ВСЮ оставшуюся позицию, чтобы не осталось небезубыточного
         # остатка для дампа по рынку. Берём фактический нетто-объём после
         # разворота; если он недоступен (<=0), падаем на расчётный send - Qo.
-        real_qty = await self._get_real_position_qty(reverse_dir)
         step = self._step_size if (mode == "live" and self._step_size) else 0.0
         if real_qty > 0:
             adjusted_real = await self._adjust_qty(real_qty, mode=mode)
             tp_qty = min(adjusted_real, real_qty)
         else:
-            tp_qty = actual_held
+            tp_qty = qh
         if step > 0 and abs(tp_qty - fallback_held) > step:
             self.log.warning(
                 f"[REVERSE] TP qty != send-Qo | tp_qty={tp_qty} "
-                f"hedge_actual={actual_held} send_minus_orig={fallback_held} real_qty={real_qty}"
+                f"hedge_actual={qh} send_minus_orig={fallback_held} real_qty={real_qty}"
             )
         held_qty = tp_qty
 
-        # TP обратной позиции ровно на P3 (или не ставим, если геометрия невозможна).
-        if mode == "live" and held_qty > 0 and tp_ok:
+        # TP обратной позиции ровно на P* (или не ставим, если геометрия
+        # невозможна/хеджировать нечего).
+        if mode == "live" and held_qty > 0 and tp_ok and tp_price is not None:
             try:
                 await self._place_tp_limit(reverse_dir, tp_price, held_qty)
                 self.log.info(f"[REVERSE] TP placed | {reverse_dir} tp={tp_price} qty={held_qty}")
