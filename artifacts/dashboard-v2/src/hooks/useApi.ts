@@ -20,7 +20,23 @@ export async function fetchBots() {
   return apiFetch(`${API}/bots`);
 }
 
-export async function fetchTrades(symbol?: string, limit = 50) {
+export interface Trade {
+  id?: number;
+  symbol?: string;
+  direction?: string | null;
+  entry_price?: number | string | null;
+  exit_price?: number | string | null;
+  qty?: number | string | null;
+  pnl?: number | string | null;
+  commission?: number | string | null;
+  exit_reason?: string | null;
+  entry_time?: string | null;
+  exit_time?: string | null;
+  is_open?: number | boolean | null;
+  status?: string | null;
+}
+
+export async function fetchTrades(symbol?: string, limit = 50): Promise<{ trades: Trade[]; total?: number }> {
   const url = new URL(`${API}/trades`);
   if (symbol) url.searchParams.set("symbol", symbol);
   url.searchParams.set("limit", String(limit));
@@ -716,6 +732,10 @@ export async function deleteAllGrids(
 export interface GridEngineConfig {
   engineEnabled?: boolean;
   autoEnabled?: boolean;
+  autoTpPct?: number;
+  autoSlPct?: number;
+  autoEdgePct?: number;
+  autoGate?: number;
   autoMax?: number;
   autoTotalMax?: number;
   autoOrderUsd?: number;
@@ -749,6 +769,10 @@ export async function fetchGridEngineConfig(): Promise<{
 
 export async function updateGridEngineConfig(patch: {
   autoEnabled?: boolean;
+  autoTpPct?: number;
+  autoSlPct?: number;
+  autoEdgePct?: number;
+  autoGate?: number;
   autoMax?: number;
   autoTotalMax?: number;
   autoOrderUsd?: number;

@@ -244,10 +244,68 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 3. Если стейт есть, а биржи нет — считает позицию закрытой внешне, чистит состояние.
 4. Частичное закрытие / пылевая позиция — авто-детект.
 
+### 3.4a Восстановление из state-файла (stop / restart)
+
+Остановка бота (Stop в дашборде) **не удаляет** state-файл — состояние сохраняется. При старте бот
+**предпочитает сохранённый стейт**, если он совпадает с позицией на бирже (направление / entry / qty
+в пределах tick/step), и восстанавливает `sl_price`, `tp1_price`, `tp2_price`, `tp1_hit`,
+`remaining_qty`, `realized_pnl`, `entry_fill_ms`, `backstop_algo_id`.
+
+- Пересчёт уровней из конфига — **только при расхождении** стейта и позиции.
+- Если восстановленный SL уже пробит, бот **не закрывает позицию по рынку принудительно** —
+  срабатывает обычный SL / reverse-поток.
+- Отсутствующая биржевая защита досоздаётся: TP-limit + `botsl_*` backstop.
+
 ### 3.5 Защита от дублирования
 
 - Lock-файл `bot.lock.<symbol>` предотвращает запуск двух инстансов одного символа.
 - Если при сигнале позиция уже открыта — новый сигнал пропускается.
+
+### 3.6 Reverse-цикл (break-even hedge)
+
+Reverse-цикл — это **безубыточный хедж**: вход по индикаторам, на бирже стоит только TP
+(виртуальный SL). При достижении виртуального SL выставляется **обратная рыночная нога** такого
+размера, чтобы суммарный PnL на break-even цене был ровно ноль.
+
+**Плановый размер обратной ноги** (E — entry, S — виртуальный SL, Qo — исходный qty, pct — SL в долях):
+
+```
+P3_plan   = S * (1 ∓ pct)
+held_plan = Qo * |E - S| / |S - P3_plan|
+send_qty  = held_plan + Qo
+```
+
+(`∓`: `-` для LONG, `+` для SHORT.)
+
+**Точная цель выхода** от фактического reverse-филла `E_rev` (`Qh` — фактический net reverse qty):
+
+```
+P* = E_rev ∓ Qo * |E - E_rev| / Qh
+```
+
+Так цикл `REVERSE_BE` закрывается в ≈0 минус комиссии.
+
+### 3.6a Метки выхода (`trades.exit_reason`)
+
+- `TP1` / `TP2` — тейк-профиты.
+- `SL` — стоп-лосс.
+- `REVERSE_BE` — reverse-цикл закрыт по break-even цели (≈0 минус комиссии).
+- `REVERSE_BACKSTOP` — reverse-нога закрыта биржевым backstop-ордером (реальный убыток).
+- `REVERSE` — legacy-метка старых reverse-сделок.
+
+### 3.6b Комиссии reverse-цикла (важно)
+
+- Reverse-цикл платит **три ноги**: исходный вход + обратная рыночная нога + закрывающий TP.
+  Обратная нога кратна базовому размеру, поэтому оборот ≈ **2.5–3.5×** позиции.
+- На Binance USDⓈ-M (taker 0.05% / maker 0.02%) «безубыточный» цикл всё равно стоит
+  ≈ **0.04–0.1% от оборота**.
+
+| Нога | Qty | Цена | Тип | Комиссия |
+|------|-----|------|-----|----------|
+| Вход | 79 | 0.44 | taker | 0.0174 |
+| Reverse | 307 | 0.4333 | taker | 0.0665 |
+| TP | 228 | 0.4310 | maker | 0.0197 |
+| **Итого** | | | | **0.1036** на ~$266 оборота |
 
 ---
 
@@ -325,6 +383,11 @@ BOT_PYTHON=
 # GRID_STALE_ACTIVE_MINUTES=120
 # Auto-mode (создание waiting-сеток из символов ботов): по умолчанию выключен.
 # GRID_AUTO_ENABLED=false
+# Дефолты, применяемые к НОВЫМ сеткам auto-mode (существующие сетки сохраняют свои значения):
+# GRID_AUTO_TP_PCT=10
+# GRID_AUTO_SL_PCT=2
+# GRID_AUTO_EDGE_PCT=2
+# GRID_AUTO_GATE=15
 # GRID_AUTO_MAX=3
 # GRID_AUTO_TOTAL_MAX=10
 # GRID_AUTO_ORDER_USD=10
@@ -376,17 +439,25 @@ SUPPORT_BOT_DB=./support-bot/data/support_bot.db
 `GRID_STALE_ACTIVE_MINUTES` (120 — порог лога о «зависшей» active-сетке; движок только
 логирует и не аннулирует её автоматически).
 
+Дефолты, применяемые к **новым** сеткам, создаваемым auto-mode: `GRID_AUTO_TP_PCT` (10,
+диапазон 0.1..50), `GRID_AUTO_SL_PCT` (2, 0.1..50), `GRID_AUTO_EDGE_PCT` (2, 0.1..50),
+`GRID_AUTO_GATE` (15, 1..100). Движок читает их на каждом tick через `envNumber()`/`envInt()`,
+поэтому значения можно менять без рестарта; существующие сетки сохраняют собственные
+`tpPct`/`slPct`/`edgePct`/`gate`.
+
 Runtime-конфиг auto-mode (без рестарта api-server):
 
 - `GET /api/grid-engine/config` — эффективный конфиг:
-  `{ engineEnabled, autoEnabled, autoMax, autoTotalMax, autoOrderUsd, autoLeverage, intervalMs, staleActiveMinutes, restartRequired }`.
-- `POST /api/grid-engine/config` — partial body `{ autoEnabled?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`
-  (`autoEnabled` — boolean; `autoMax` 0..20, `autoTotalMax` 0..100, `autoOrderUsd` (0..10000],
+  `{ engineEnabled, autoEnabled, autoTpPct, autoSlPct, autoEdgePct, autoGate, autoOrderUsd, autoLeverage, autoMax, autoTotalMax, intervalMs, staleActiveMinutes, restartRequired }`.
+- `POST /api/grid-engine/config` — partial body `{ autoEnabled?, autoTpPct?, autoSlPct?, autoEdgePct?, autoGate?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`
+  (`autoEnabled` — boolean; `autoTpPct`/`autoSlPct`/`autoEdgePct` 0.1..50, `autoGate` 1..100,
+  `autoMax` 0..20, `autoTotalMax` 0..100, `autoOrderUsd` (0..10000],
   `autoLeverage` 1..125; неизвестные поля → 400). Ответ: `{ ok: true, config, applied, restartRequired }`.
 - Оба роута защищены `notifyTokenGuard` (заголовок `x-notify-token`, как у `/api/grids`).
-- Принятые значения сразу зеркалятся в `process.env` (`GRID_AUTO_ENABLED`, `GRID_AUTO_MAX`,
+- Принятые значения сразу зеркалятся в `process.env` (`GRID_AUTO_ENABLED`, `GRID_AUTO_TP_PCT`,
+  `GRID_AUTO_SL_PCT`, `GRID_AUTO_EDGE_PCT`, `GRID_AUTO_GATE`, `GRID_AUTO_MAX`,
   `GRID_AUTO_TOTAL_MAX`, `GRID_AUTO_ORDER_USD`, `GRID_AUTO_LEVERAGE`) — движок читает их через
-  `envFlag()`/`envInt()` на каждом tick, поэтому изменение действует со следующего tick — и
+  `envFlag()`/`envNumber()`/`envInt()` на каждом tick, поэтому изменение действует со следующего tick — и
   персистятся в `data/grid-engine.json` (env-ключи). При старте движка файл подмешивается в
   `process.env` до чтения флагов, поэтому конфиг переживает рестарт; битый/отсутствующий файл
   не роняет старт (только warn).
@@ -746,6 +817,18 @@ where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`)
 
 Остальные служебные сообщения (старт, конфиг, warming up) записываются только в консоль. Для диагностики можно временно отключить фильтр.
 
+### 13.4 Trades-таблицы в дашбордах (Gross / Fees / Net)
+
+Оба дашборда (`artifacts/dashboard` и `artifacts/dashboard-v2`) в таблице сделок показывают
+разложение PnL:
+
+- **Gross** — PnL только по цене: `gross = net + fees`; при `|gross| ≤ 0.005` — muted-пометка `≈0`.
+- **Fees** — комиссия сделки.
+- **Net** — `net = gross − fees`; при `|net| ≤ fees + 0.005` — пометка `≈0` (нетто в пределах комиссий).
+- Строка-сводка: `Σ gross · Σ fees · Σ net · breakdown` (BE / backstop / TP / SL).
+
+В grid-UI (`dashboard-v2`) сделки вынесены в отдельную вкладку **Trades**.
+
 ---
 
 ## 14. Вспомогательные скрипты
@@ -841,6 +924,14 @@ Daily-скрипт регистрируется в планировщике за
 ---
 
 ## 16. Changelog
+
+### 2026-09-19
+- **Strict break-even reverse sizing**: `send_qty = held_plan + Qo`, где `held_plan = Qo*|E-S|/|S-P3_plan|`; точная цель выхода от фактического reverse-филла `P* = E_rev ∓ Qo*|E-E_rev|/Qh` (Qh — фактический net reverse qty) — цикл `REVERSE_BE` закрывается в ≈0 минус комиссии (см. 3.6).
+- **Метки выходов**: `REVERSE_BE` (break-even цель), `REVERSE_BACKSTOP` (биржевой backstop — реальный убыток), legacy `REVERSE`, плюс `TP1`/`TP2`/`SL` в `trades.exit_reason`; `refinalize_cycle_after_flat` перезаписывает строку trades по фактическому флэту (см. 3.6a).
+- **Комиссии reverse-цикла**: три ноги и оборот ≈2.5–3.5× позиции — «безубыточный» цикл стоит ≈0.04–0.1% оборота (см. 3.6b).
+- **Восстановление бота из state**: stop сохраняет state-файл; старт предпочитает сохранённые уровни при совпадении с биржевой позицией, пересчитывает только при расхождении, не делает принудительный market-close при пробитом SL и досоздаёт биржевую защиту (TP limit + `botsl_*` backstop) — см. 3.4a.
+- **Runtime-конфиг grid-движка**: `GET|POST /api/grid-engine/config`, персистентность в `data/grid-engine.json`, auto-дефолты `autoTpPct`/`autoSlPct`/`autoEdgePct`/`autoGate`/`autoOrderUsd`/`autoLeverage`/`autoMax`/`autoTotalMax` (см. 5.1, 17.10a); блок `Auto defaults` и переключатель Manual/Auto, пишущий `autoEnabled` в серверный конфиг (см. 17.10b).
+- **Trades-таблицы**: в обоих дашбордах колонки `Gross` / `Fees` / `Net` с пометками `≈0`, строка `Σ gross · Σ fees · Σ net · breakdown`; в grid-UI — отдельная вкладка `Trades` (см. 13.4).
 
 ### 2026-08-23
 - **Rate-limit защита Binance**: добавлен `bot/rate_limit.py` с `with_retry()` для обработки `-1003` (бан IP), `-429` и таймаутов. Все запросы klines в `bot/market_data.py` и прогрев в `bot/main.py` теперь обёрнуты в retry — бот не падает при бане, а ждёт и повторяет.
@@ -1028,14 +1119,26 @@ cd C:\DATA\bots\replit_scalper
 
 | Метод | Роут | Назначение |
 |-------|------|-----------|
-| GET | `/api/grid-engine/config` | Текущий эффективный конфиг auto-mode (`engineEnabled`, `autoEnabled`, `autoMax`, `autoTotalMax`, `autoOrderUsd`, `autoLeverage`, `intervalMs`, `staleActiveMinutes`, `restartRequired`) |
-| POST | `/api/grid-engine/config` | Partial-обновление `{ autoEnabled?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`; применяется на следующем tick, пишется в `data/grid-engine.json` |
+| GET | `/api/grid-engine/config` | Текущий эффективный конфиг auto-mode (`engineEnabled`, `autoEnabled`, `autoTpPct`, `autoSlPct`, `autoEdgePct`, `autoGate`, `autoOrderUsd`, `autoLeverage`, `autoMax`, `autoTotalMax`, `intervalMs`, `staleActiveMinutes`, `restartRequired`) |
+| POST | `/api/grid-engine/config` | Partial-обновление `{ autoEnabled?, autoTpPct?, autoSlPct?, autoEdgePct?, autoGate?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`; применяется на следующем tick, пишется в `data/grid-engine.json` |
 
 Оба роута требуют `x-notify-token` (`notifyTokenGuard`). Персистентный файл
 `data/grid-engine.json` хранит env-ключи (`GRID_AUTO_*`) и подмешивается в `process.env`
 при старте движка, поэтому переключатель auto-mode с дашборда переживает рестарт
 api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` меняются только
 через `.env` + рестарт и всегда возвращаются в `restartRequired`.
+
+### 17.10b Auto defaults и переключатель Manual/Auto
+
+- В server-режиме дашборд показывает блок **Auto defaults** — дефолты для **новых** авто-сеток:
+  `autoTpPct` (10), `autoSlPct` (2), `autoEdgePct` (2), `autoGate` (15), `autoOrderUsd` (10),
+  `autoLeverage` (50), `autoMax` (3), `autoTotalMax` (10). Шесть редактируемых полей правятся
+  локально и отправляются **одним Apply** (`POST /api/grid-engine/config`); `autoMax`/`autoTotalMax`
+  показываются в строке статуса. Существующие сетки сохраняют собственные значения.
+  `engineEnabled` / `intervalMs` / `staleActiveMinutes` — только на старте (`restartRequired`).
+- Переключатель **Manual / Auto** в server-режиме пишет `autoEnabled` в конфиг движка
+  (применяется на следующем tick, optimistic + откат при ошибке). Раньше он влиял только на
+  браузерный движок.
 
 ### 17.11 Известные ограничения
 

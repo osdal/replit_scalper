@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids, fetchGridEngineConfig, updateGridEngineConfig } from "./hooks/useApi";
-import type { GridEngineConfig } from "./hooks/useApi";
+import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids, fetchGridEngineConfig, updateGridEngineConfig, fetchTrades } from "./hooks/useApi";
+import type { GridEngineConfig, Trade } from "./hooks/useApi";
 import { timeframePassesGridGate, getTimeframeAdx } from "./lib/gridGate";
 import { Button } from "./components/ui/button";
 import * as lightweightCharts from "lightweight-charts";
@@ -302,7 +302,7 @@ interface PersistedState {
   gridNLevels?: number;
   tpPct?: number | null;
   selectedPair?: string | null;
-  activeTab?: "stats" | "history";
+  activeTab?: "stats" | "history" | "trades";
   tradeMode?: "manual" | "auto";
   orderSizeUsd?: number;
 }
@@ -592,6 +592,72 @@ export function exitReasonMeta(raw: unknown): { label: string; className: string
   }
 }
 
+export function formatPrice(p: number): string {
+  return p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(4) : p.toFixed(6);
+}
+
+// Server-режим: "Auto defaults" — шесть значений по умолчанию для новых
+// авто-сеток. Правятся локально и отправляются одним Apply.
+type AutoDefaultKey =
+  | "autoTpPct"
+  | "autoSlPct"
+  | "autoEdgePct"
+  | "autoOrderUsd"
+  | "autoGate"
+  | "autoLeverage";
+
+interface AutoDefaultField {
+  key: AutoDefaultKey;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  // Order $: нижняя граница строгая (>0), у остальных включительная.
+  minExclusive?: boolean;
+}
+
+const AUTO_DEFAULT_FIELDS: AutoDefaultField[] = [
+  { key: "autoTpPct", label: "TP %", min: 0.1, max: 50, step: 0.1 },
+  { key: "autoSlPct", label: "SL %", min: 0.1, max: 50, step: 0.1 },
+  { key: "autoEdgePct", label: "Edge %", min: 0.1, max: 50, step: 0.1 },
+  { key: "autoOrderUsd", label: "Order $", min: 0, max: 10000, step: 1, minExclusive: true },
+  { key: "autoGate", label: "Gate", min: 1, max: 100, step: 1 },
+  { key: "autoLeverage", label: "Leverage", min: 1, max: 125, step: 1 },
+];
+
+function autoDraftFromConfig(cfg: GridEngineConfig | null): Record<AutoDefaultKey, string> {
+  const out = {} as Record<AutoDefaultKey, string>;
+  for (const f of AUTO_DEFAULT_FIELDS) {
+    const v = cfg?.[f.key];
+    out[f.key] = typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+  }
+  return out;
+}
+
+function autoSavedValue(cfg: GridEngineConfig | null, key: AutoDefaultKey): number | null {
+  const v = cfg?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// Клиентская валидация зеркалит серверные диапазоны.
+function autoDraftError(f: AutoDefaultField, raw: string): string | null {
+  if (raw.trim() === "") return "required";
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return "invalid number";
+  if (f.minExclusive ? n <= f.min : n < f.min) {
+    return f.minExclusive ? `must be > ${f.min}` : `min ${f.min}`;
+  }
+  if (n > f.max) return `max ${f.max}`;
+  return null;
+}
+
+function autoFieldChanged(f: AutoDefaultField, raw: string, cfg: GridEngineConfig | null): boolean {
+  if (autoDraftError(f, raw) != null) return false;
+  const saved = autoSavedValue(cfg, f.key);
+  if (saved == null) return true;
+  return Number(raw) !== saved;
+}
+
 export default function Dashboard() {
   const [pairs, setPairs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -630,14 +696,26 @@ export default function Dashboard() {
   const protectiveInFlightRef = useRef<Set<string>>(new Set());
   // Метка последней защитной синхронизации по паре: не чаще раза в ~30 с.
   const protectiveSyncAtRef = useRef<Record<string, number>>({});
-  const [activeTab, setActiveTab] = useState<"stats" | "history">(() => readPersisted().activeTab ?? "stats");
+  const [activeTab, setActiveTab] = useState<"stats" | "history" | "trades">(() => readPersisted().activeTab ?? "stats");
   const [tradeMode, setTradeMode] = useState<"manual" | "auto">(() => readPersisted().tradeMode ?? "manual");
   // Phase 3: конфиг серверного grid-движка (только server-режим). Источник истины
   // для Manual/Auto в server-режиме; в browser-режиме не используется.
   const [serverEngineConfig, setServerEngineConfig] = useState<GridEngineConfig | null>(null);
+  // Auto defaults (server-режим): локальные черновики шести значений. В сервер
+  // ничего не пишем до нажатия Apply; сидятся из конфига при загрузке и после Apply.
+  const [autoDraft, setAutoDraft] = useState<Record<AutoDefaultKey, string>>(() =>
+    autoDraftFromConfig(null),
+  );
+  const [autoApplyBusy, setAutoApplyBusy] = useState(false);
+  const [autoSavedFlash, setAutoSavedFlash] = useState(false);
+  const [autoApplyError, setAutoApplyError] = useState<string | null>(null);
+  const autoDraftsSeededRef = useRef(false);
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(false);
+  const [tradesError, setTradesError] = useState<string | null>(null);
   const chartInstanceRef = useRef<any>(null);
   const chartSeriesRef = useRef<any>(null);
   const chartMarkersSeriesRef = useRef<any>(null);
@@ -752,6 +830,21 @@ export default function Dashboard() {
     };
   }, []);
 
+  // Auto defaults: черновики сеются из загруженного конфига один раз; дальше
+  // resync происходит только после успешного Apply (см. applyAutoDefaults).
+  useEffect(() => {
+    if (!SERVER_ENGINE || !serverEngineConfig || autoDraftsSeededRef.current) return;
+    autoDraftsSeededRef.current = true;
+    setAutoDraft(autoDraftFromConfig(serverEngineConfig));
+  }, [serverEngineConfig]);
+
+  // Auto defaults: подтверждение Saved гаснет через несколько секунд.
+  useEffect(() => {
+    if (!autoSavedFlash) return;
+    const id = setTimeout(() => setAutoSavedFlash(false), 3000);
+    return () => clearTimeout(id);
+  }, [autoSavedFlash]);
+
   // Manual/Auto: в server-режиме переключаем авто-создание серверного движка
   // (optimistic + revert при ошибке), в browser-режиме — как раньше, локальный state.
   const selectTradeMode = useCallback(
@@ -776,6 +869,39 @@ export default function Dashboard() {
     },
     [serverEngineConfig],
   );
+
+  // Auto defaults: один POST со всеми шестью значениями. На успехе принимаем
+  // res.config (черновики ресинхронизируются) и показываем Saved; на ошибке
+  // ничего не откатываем, только логируем и показываем muted-строку.
+  const applyAutoDefaults = useCallback(async () => {
+    if (autoApplyBusy) return;
+    const invalid = AUTO_DEFAULT_FIELDS.some(
+      (f) => autoDraftError(f, autoDraft[f.key]) != null,
+    );
+    const changed = AUTO_DEFAULT_FIELDS.some((f) =>
+      autoFieldChanged(f, autoDraft[f.key], serverEngineConfig),
+    );
+    if (invalid || !changed) return;
+    const patch: Partial<Record<AutoDefaultKey, number>> = {};
+    for (const f of AUTO_DEFAULT_FIELDS) patch[f.key] = Number(autoDraft[f.key]);
+    setAutoApplyBusy(true);
+    setAutoApplyError(null);
+    setAutoSavedFlash(false);
+    try {
+      const res = await updateGridEngineConfig(patch);
+      if (!res.ok) throw new Error(res.error || "grid-engine config update failed");
+      if (res.config) {
+        setServerEngineConfig(res.config);
+        setAutoDraft(autoDraftFromConfig(res.config));
+      }
+      setAutoSavedFlash(true);
+    } catch (e: any) {
+      console.error("[GRID] auto defaults update failed", e);
+      setAutoApplyError(e?.message || "update failed");
+    } finally {
+      setAutoApplyBusy(false);
+    }
+  }, [autoDraft, autoApplyBusy, serverEngineConfig]);
 
   // Авто-очистка сеток после серверного сброса: если resetAt новее уже
   // обработанного маркера, стираем сохранённые сетки в этом браузере.
@@ -2275,6 +2401,30 @@ export default function Dashboard() {
     };
   }, [activeTab, historyTick]);
 
+  useEffect(() => {
+    if (activeTab !== "trades") return;
+    let cancelled = false;
+    const load = async (initial: boolean) => {
+      if (initial) setTradesLoading(true);
+      try {
+        const res = await fetchTrades(selectedPair ?? undefined, 20);
+        if (cancelled) return;
+        setTrades(Array.isArray(res?.trades) ? res.trades : []);
+        setTradesError(null);
+      } catch (e: any) {
+        if (!cancelled) setTradesError(e?.message || "failed to load trades");
+      } finally {
+        if (initial && !cancelled) setTradesLoading(false);
+      }
+    };
+    void load(true);
+    const id = setInterval(() => void load(false), 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [activeTab, selectedPair]);
+
   const loadPairs = useCallback(async () => {
     try {
       const data = await fetchPairs();
@@ -3201,6 +3351,16 @@ export default function Dashboard() {
       : "manual"
     : tradeMode;
 
+  // Auto defaults: состояние полей для рендера — ошибка и отличие от сохранённого.
+  const autoFieldStates = AUTO_DEFAULT_FIELDS.map((field) => ({
+    field,
+    error: autoDraftError(field, autoDraft[field.key]),
+    changed: autoFieldChanged(field, autoDraft[field.key], serverEngineConfig),
+  }));
+  const autoInvalid = autoFieldStates.some((s) => s.error != null);
+  const autoChanged = autoFieldStates.some((s) => s.changed);
+  const autoErrors = autoFieldStates.filter((s) => s.error != null);
+
   if (loading) {
     return <div className="p-6">Loading pairs...</div>;
   }
@@ -3258,6 +3418,68 @@ export default function Dashboard() {
               ) : null}
               {serverEngineConfig?.restartRequired ? " · restartRequired" : ""}
             </span>
+          )}
+          {SERVER_ENGINE && (
+            <div className="ml-4 rounded border border-gray-300 bg-white px-3 py-2 text-xs">
+              <div className="mb-1 flex items-center gap-2">
+                <span className="font-semibold text-black">Auto defaults</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={autoApplyBusy || autoInvalid || !autoChanged}
+                  onClick={() => void applyAutoDefaults()}
+                  className="h-6 bg-white text-black border-gray-300 hover:bg-gray-100"
+                >
+                  {autoApplyBusy ? "Applying…" : "Apply"}
+                </Button>
+                {autoSavedFlash && <span className="text-zinc-500">Saved</span>}
+                {autoApplyError && <span className="text-zinc-500">{autoApplyError}</span>}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {autoFieldStates.map(({ field, error, changed }) => (
+                  <label
+                    key={field.key}
+                    className="flex items-center gap-1 text-black"
+                    title={error ?? (changed ? "differs from saved config" : undefined)}
+                  >
+                    <span>{field.label}</span>
+                    <input
+                      type="number"
+                      min={field.min}
+                      max={field.max}
+                      step={field.step}
+                      value={autoDraft[field.key]}
+                      onChange={(e) =>
+                        setAutoDraft((prev) => ({ ...prev, [field.key]: e.target.value }))
+                      }
+                      aria-invalid={error ? true : undefined}
+                      className={
+                        "w-16 rounded border px-1 py-0.5 text-black " +
+                        (error
+                          ? "border-red-400"
+                          : changed
+                            ? "border-gray-300 ring-1 ring-amber-400"
+                            : "border-gray-300")
+                      }
+                    />
+                    {changed && (
+                      <span className="text-amber-600" title="differs from saved config">
+                        *
+                      </span>
+                    )}
+                  </label>
+                ))}
+              </div>
+              {autoErrors.length > 0 && (
+                <div className="mt-1 text-zinc-500">
+                  {autoErrors.map((s) => `${s.field.label}: ${s.error}`).join(" · ")}
+                </div>
+              )}
+              <div className="mt-1 text-zinc-500">
+                applies to new grids created by auto mode; existing grids keep their own TP % /
+                Order $.
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -3504,6 +3726,13 @@ export default function Dashboard() {
                 >
                   History
                 </button>
+                <button
+                  type="button"
+                  className={activeTab === "trades" ? "font-semibold underline" : "text-zinc-500 hover:text-black"}
+                  onClick={() => setActiveTab("trades")}
+                >
+                  Trades
+                </button>
                 <div className="ml-auto flex items-center gap-2">
                   {activeTab === "stats" && (
                     <>
@@ -3742,8 +3971,7 @@ export default function Dashboard() {
                                 avgLong > 0 ? Math.min(avgLong * (1 + g.tpPct / 100), g.midPrice) : null;
                               const shortTp =
                                 avgShort > 0 ? Math.max(avgShort * (1 - g.tpPct / 100), g.midPrice) : null;
-                              const fmtPrice = (p: number) =>
-                                p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(4) : p.toFixed(6);
+                              const fmtPrice = formatPrice;
                               const onExchange = (v?: number) =>
                                 typeof v === "number" && Number.isFinite(v) ? fmtPrice(v) : "—";
                               const title = `Expected: long ${
@@ -4042,6 +4270,159 @@ export default function Dashboard() {
                     </table>
                   </div>
                 )
+              )}
+              {activeTab === "trades" && (
+                <>
+                  {tradesError && <div className="mb-1 text-zinc-500">trades error: {tradesError}</div>}
+                  {tradesLoading && trades.length === 0 ? (
+                    <div className="text-zinc-500">loading…</div>
+                  ) : trades.length === 0 ? (
+                    <div className="text-zinc-500">no trades</div>
+                  ) : (
+                    <>
+                      {(() => {
+                        let sumPnl = 0;
+                        let sumComm = 0;
+                        const counts = new Map<string, number>();
+                        for (const t of trades) {
+                          const open = Number(t.is_open ?? 0) === 1;
+                          const p = Number(t.pnl);
+                          if (Number.isFinite(p)) sumPnl += p;
+                          const c = Number(t.commission);
+                          if (Number.isFinite(c)) sumComm += c;
+                          const key = open
+                            ? "open"
+                            : (() => {
+                                const meta = exitReasonMeta(t.exit_reason);
+                                if (meta?.label === "Reverse BE") return "BE";
+                                if (meta?.label === "Reverse backstop") return "backstop";
+                                if (meta?.label === "Reverse") return "REVERSE";
+                                return String(t.exit_reason ?? "—");
+                              })();
+                          counts.set(key, (counts.get(key) ?? 0) + 1);
+                        }
+                        const breakdown = [...counts.entries()]
+                          .sort((a, b) => (a[0] === "open" ? 1 : 0) - (b[0] === "open" ? 1 : 0))
+                          .map(([k, n]) => `${k} ${n}`)
+                          .join(" · ");
+                        const sumGross = sumPnl + sumComm;
+                        return (
+                          <div className="mb-1 text-zinc-500">
+                            <span className="font-mono">{trades.length}</span> trades · Σ gross{" "}
+                            <span className={`font-mono ${sumGross >= 0 ? "text-green-600" : "text-red-600"}`}>
+                              {sumGross >= 0 ? "+" : "-"}${Math.abs(sumGross).toFixed(2)}
+                            </span>{" "}
+                            · Σ fees <span className="font-mono">${sumComm.toFixed(2)}</span> · Σ net{" "}
+                            <span className={`font-mono ${sumPnl >= 0 ? "text-green-600" : "text-red-600"}`}>
+                              {sumPnl >= 0 ? "+" : "-"}${Math.abs(sumPnl).toFixed(2)}
+                            </span>{" "}
+                            · {breakdown}
+                          </div>
+                        );
+                      })()}
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs">
+                          <thead>
+                            <tr className="text-left text-zinc-500">
+                              <th className="pr-3">time</th>
+                              <th className="pr-3">dir</th>
+                              <th className="pr-3">entry</th>
+                              <th className="pr-3">exit</th>
+                              <th className="pr-3">qty</th>
+                              <th className="pr-3">gross</th>
+                              <th className="pr-3">fees</th>
+                              <th className="pr-3">net</th>
+                              <th className="pr-3">reason</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {trades.map((t, i) => {
+                              const open = Number(t.is_open ?? 0) === 1;
+                              const pnl = t.pnl == null || t.pnl === "" ? null : Number(t.pnl);
+                              const comm = t.commission == null || t.commission === "" ? null : Number(t.commission);
+                              const hasPnl = pnl != null && Number.isFinite(pnl);
+                              const hasComm = comm != null && Number.isFinite(comm);
+                              const gross = pnl != null && Number.isFinite(pnl) ? pnl + (comm != null && Number.isFinite(comm) ? comm : 0) : null;
+                              const grossBe = gross != null && Math.abs(gross) <= 0.005;
+                              const be = pnl != null && Number.isFinite(pnl) && Math.abs(pnl) <= (comm != null && Number.isFinite(comm) ? comm : 0) + 0.005;
+                              const dir = String(t.direction ?? "").toUpperCase();
+                              const entry = Number(t.entry_price);
+                              const exit = Number(t.exit_price);
+                              const qty = Number(t.qty);
+                              const meta = exitReasonMeta(t.exit_reason);
+                              return (
+                                <tr key={t.id ?? i} className="border-t">
+                                  <td className="pr-3 whitespace-nowrap">
+                                    <div>{t.entry_time ? new Date(t.entry_time).toLocaleString() : "—"}</div>
+                                    {!open && t.exit_time && (
+                                      <div className="text-zinc-400">{new Date(t.exit_time).toLocaleString()}</div>
+                                    )}
+                                  </td>
+                                  <td className={`pr-3 font-mono ${dir === "LONG" ? "text-green-600" : "text-red-600"}`}>
+                                    {dir || "—"}
+                                  </td>
+                                  <td className="pr-3 font-mono">{Number.isFinite(entry) ? formatPrice(entry) : "—"}</td>
+                                  <td className="pr-3 font-mono">
+                                    {open ? <span className="text-zinc-500">—</span> : Number.isFinite(exit) ? formatPrice(exit) : "—"}
+                                  </td>
+                                  <td className="pr-3 font-mono">{Number.isFinite(qty) ? qty : "—"}</td>
+                                  <td
+                                    className={`pr-3 font-mono ${
+                                      open || gross == null || grossBe ? "text-zinc-500" : gross >= 0 ? "text-green-600" : "text-red-600"
+                                    }`}
+                                  >
+                                    {open || gross == null ? (
+                                      "—"
+                                    ) : (
+                                      <>
+                                        {gross >= 0 ? "+" : "-"}${Math.abs(gross).toFixed(2)}
+                                        {grossBe && <span className="ml-1 text-zinc-400" title="price PnL ≈ 0 (break-even)">≈0</span>}
+                                      </>
+                                    )}
+                                  </td>
+                                  <td className="pr-3 font-mono text-zinc-500">
+                                    {comm == null || !Number.isFinite(comm) ? "—" : `$${Math.abs(comm).toFixed(4)}`}
+                                  </td>
+                                  <td
+                                    className={`pr-3 font-mono ${
+                                      open || !hasPnl || be ? "text-zinc-500" : pnl != null && pnl >= 0 ? "text-green-600" : "text-red-600"
+                                    }`}
+                                    title="net = gross − fees"
+                                  >
+                                    {open || pnl == null || !Number.isFinite(pnl) ? (
+                                      "—"
+                                    ) : (
+                                      <>
+                                        {pnl >= 0 ? "+" : "-"}${Math.abs(pnl).toFixed(2)}
+                                        {be && <span className="ml-1 text-zinc-400" title="net PnL within commissions (break-even)">≈0</span>}
+                                      </>
+                                    )}
+                                  </td>
+                                  <td className="pr-3">
+                                    {open ? (
+                                      <span className="inline-flex items-center rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-700">
+                                        open
+                                      </span>
+                                    ) : meta ? (
+                                      <span
+                                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs cursor-help ${meta.className}`}
+                                        title={meta.title}
+                                      >
+                                        {meta.label}
+                                      </span>
+                                    ) : (
+                                      t.exit_reason ?? "—"
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </>
               )}
             </div>
           )}

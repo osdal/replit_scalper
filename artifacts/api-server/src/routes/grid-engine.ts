@@ -18,6 +18,10 @@ const NUMERIC_BOUNDS: Record<
   Exclude<GridEngineAutoConfigKey, "autoEnabled">,
   { min: number; max: number; minExclusive: boolean }
 > = {
+  autoTpPct:      { min: 0.1, max: 50,    minExclusive: false },
+  autoSlPct:      { min: 0.1, max: 50,    minExclusive: false },
+  autoEdgePct:    { min: 0.1, max: 50,    minExclusive: false },
+  autoGate:       { min: 1,   max: 100,   minExclusive: false },
   autoMax:        { min: 0, max: 20,    minExclusive: false },
   autoTotalMax:   { min: 0, max: 100,   minExclusive: false },
   autoOrderUsd:   { min: 0, max: 10000, minExclusive: true },
@@ -41,7 +45,8 @@ router.get("/config", notifyTokenGuard, (_req, res) => {
 
 /**
  * POST /api/grid-engine/config
- * body (partial): { autoEnabled?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }
+ * body (partial): { autoEnabled?, autoTpPct?, autoSlPct?, autoEdgePct?, autoGate?,
+ * autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }
  * Валидирует поля, зеркалит их в process.env (движок применит на следующем tick)
  * и персистит в data/grid-engine.json. Изменения engineEnabled/intervalMs/
  * staleActiveMinutes не принимаются — они всегда перечислены в restartRequired.

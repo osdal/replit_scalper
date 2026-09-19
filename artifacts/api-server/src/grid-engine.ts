@@ -87,10 +87,14 @@ export const GRID_ENGINE_RESTART_REQUIRED = [
 // Принятые POST-ом поля -> env-ключи, которые движок читает на каждом tick.
 export const GRID_ENGINE_AUTO_ENV_KEYS = {
   autoEnabled: "GRID_AUTO_ENABLED",
-  autoMax: "GRID_AUTO_MAX",
-  autoTotalMax: "GRID_AUTO_TOTAL_MAX",
+  autoTpPct: "GRID_AUTO_TP_PCT",
+  autoSlPct: "GRID_AUTO_SL_PCT",
+  autoEdgePct: "GRID_AUTO_EDGE_PCT",
+  autoGate: "GRID_AUTO_GATE",
   autoOrderUsd: "GRID_AUTO_ORDER_USD",
   autoLeverage: "GRID_AUTO_LEVERAGE",
+  autoMax: "GRID_AUTO_MAX",
+  autoTotalMax: "GRID_AUTO_TOTAL_MAX",
 } as const;
 
 export type GridEngineAutoConfigKey = keyof typeof GRID_ENGINE_AUTO_ENV_KEYS;
@@ -98,10 +102,14 @@ export type GridEngineAutoConfigKey = keyof typeof GRID_ENGINE_AUTO_ENV_KEYS;
 export interface GridEngineConfig {
   engineEnabled: boolean;
   autoEnabled: boolean;
-  autoMax: number;
-  autoTotalMax: number;
+  autoTpPct: number;
+  autoSlPct: number;
+  autoEdgePct: number;
+  autoGate: number;
   autoOrderUsd: number;
   autoLeverage: number;
+  autoMax: number;
+  autoTotalMax: number;
   intervalMs: number;
   staleActiveMinutes: number;
   restartRequired: string[];
@@ -170,13 +178,17 @@ export function getGridEngineConfig(): GridEngineConfig {
   return {
     engineEnabled: envFlag("GRID_ENGINE_ENABLED", false),
     autoEnabled: envFlag("GRID_AUTO_ENABLED", false),
-    autoMax: Math.max(0, envInt("GRID_AUTO_MAX", DEFAULT_AUTO_MAX)),
-    autoTotalMax: Math.max(0, envInt("GRID_AUTO_TOTAL_MAX", DEFAULT_AUTO_TOTAL_MAX)),
+    autoTpPct: envNumber("GRID_AUTO_TP_PCT", AUTO_TP_PCT),
+    autoSlPct: envNumber("GRID_AUTO_SL_PCT", AUTO_SL_PCT),
+    autoEdgePct: envNumber("GRID_AUTO_EDGE_PCT", AUTO_EDGE_PCT),
+    autoGate: envInt("GRID_AUTO_GATE", DEFAULT_GATE),
     autoOrderUsd: envNumber("GRID_AUTO_ORDER_USD", DEFAULT_AUTO_ORDER_USD),
     autoLeverage: Math.min(
       Math.max(envInt("GRID_AUTO_LEVERAGE", DEFAULT_AUTO_LEVERAGE), 1),
       MAX_LEVERAGE,
     ),
+    autoMax: Math.max(0, envInt("GRID_AUTO_MAX", DEFAULT_AUTO_MAX)),
+    autoTotalMax: Math.max(0, envInt("GRID_AUTO_TOTAL_MAX", DEFAULT_AUTO_TOTAL_MAX)),
     intervalMs: envIntervalMs("GRID_ENGINE_INTERVAL_MS", DEFAULT_INTERVAL_MS),
     staleActiveMinutes: envNumber("GRID_STALE_ACTIVE_MINUTES", DEFAULT_STALE_ACTIVE_MINUTES),
     restartRequired: [...GRID_ENGINE_RESTART_REQUIRED],
@@ -1613,6 +1625,10 @@ async function runAutoMode(): Promise<void> {
 
   const maxNewPerTick = Math.max(0, envInt("GRID_AUTO_MAX", DEFAULT_AUTO_MAX));
   const totalCap = Math.max(0, envInt("GRID_AUTO_TOTAL_MAX", DEFAULT_AUTO_TOTAL_MAX));
+  const tpPct = envNumber("GRID_AUTO_TP_PCT", AUTO_TP_PCT);
+  const slPct = envNumber("GRID_AUTO_SL_PCT", AUTO_SL_PCT);
+  const edgePct = envNumber("GRID_AUTO_EDGE_PCT", AUTO_EDGE_PCT);
+  const gate = envInt("GRID_AUTO_GATE", DEFAULT_GATE);
   const orderSizeUsd = envNumber("GRID_AUTO_ORDER_USD", DEFAULT_AUTO_ORDER_USD);
   const leverageRaw = envInt("GRID_AUTO_LEVERAGE", DEFAULT_AUTO_LEVERAGE);
   const leverage = Math.min(Math.max(leverageRaw, 1), MAX_LEVERAGE);
@@ -1639,7 +1655,7 @@ async function runAutoMode(): Promise<void> {
       let timeframe: string | null = null;
       for (const tf of AUTO_TIMEFRAMES) {
         const adx = await computeAdxFor(symbol, tf);
-        if (adx != null && adx < DEFAULT_GATE) {
+        if (adx != null && adx < gate) {
           timeframe = tf;
           break;
         }
@@ -1664,12 +1680,12 @@ async function runAutoMode(): Promise<void> {
         lo: bounds.lo,
         hi: bounds.hi,
         midPrice: bounds.mid,
-        gate: DEFAULT_GATE,
+        gate,
         levels: levelPrices.length + 1,
         levelPrices: JSON.stringify(levelPrices),
-        tpPct: AUTO_TP_PCT,
-        slPct: AUTO_SL_PCT,
-        edgePct: AUTO_EDGE_PCT,
+        tpPct,
+        slPct,
+        edgePct,
         orderSizeUsd,
         leverage,
         testnetOrderIds: JSON.stringify([]),
