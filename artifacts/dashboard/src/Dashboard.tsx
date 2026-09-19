@@ -74,6 +74,7 @@ interface Trade {
   exit_time: string | null;
   is_open: boolean;
   mode: string;
+  commission?: number | null;
   status?: string;
   reject_reason?: string | null;
 }
@@ -392,66 +393,180 @@ function PnlChart({ trades }: { trades: Trade[] }) {
 
 // ── Trades Table ─────────────────────────────────────────────────────────────
 
+type ReasonBadge = {
+  variant: "default" | "secondary" | "destructive" | "outline";
+  label: string;
+  title?: string;
+  className?: string;
+};
+
+function reasonBadge(reason: string): ReasonBadge {
+  switch (reason) {
+    case "TP1":
+    case "TP2":
+      return { variant: "default", label: reason };
+    case "SL":
+      return { variant: "destructive", label: reason };
+    case "REVERSE_BE":
+      return {
+        variant: "secondary",
+        label: "Reverse BE",
+        title: "reverse cycle closed at the break-even target (≈ fees only)",
+        className: "bg-blue-600/20 text-blue-300 border-blue-500/40",
+      };
+    case "REVERSE_BACKSTOP":
+      return {
+        variant: "destructive",
+        label: "Reverse backstop",
+        title: "reverse leg was closed by the exchange backstop — a real loss",
+        className: "bg-orange-600/20 text-orange-300 border-orange-500/40",
+      };
+    case "REVERSE":
+      return {
+        variant: "secondary",
+        label: "Reverse",
+        className: "bg-amber-600/20 text-amber-300 border-amber-500/40",
+      };
+    default:
+      return { variant: reason.startsWith("TP") ? "default" : "destructive", label: reason };
+  }
+}
+
+function isBreakEven(t: Trade): boolean {
+  return t.pnl != null && Math.abs(t.pnl) <= (t.commission ?? 0) + 0.005;
+}
+
+function grossPnl(t: Trade): number | null {
+  return t.pnl == null ? null : t.pnl + (t.commission ?? 0);
+}
+
 function TradesTable({ trades }: { trades: Trade[] }) {
+  const sumPnl = trades.reduce((acc, t) => acc + (t.pnl ?? 0), 0);
+  const sumCommission = trades.reduce((acc, t) => acc + (t.commission ?? 0), 0);
+  const sumGross = sumPnl + sumCommission;
+  const beCount = trades.filter((t) => t.exit_reason === "REVERSE_BE").length;
+  const backstopCount = trades.filter((t) => t.exit_reason === "REVERSE_BACKSTOP").length;
+  const tpCount = trades.filter((t) => t.exit_reason?.startsWith("TP")).length;
+  const slCount = trades.filter((t) => t.exit_reason === "SL").length;
+
   return (
-    <div className="overflow-auto rounded-lg border border-zinc-800">
-      <Table>
-        <TableHeader>
-          <TableRow className="border-zinc-800 hover:bg-transparent">
-            {["Symbol", "Dir", "Entry", "Exit", "Qty", "PnL", "Reason", "Mode", "Open", "Close"].map((h) => (
-              <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {trades.length === 0 && (
-            <TableRow><TableCell colSpan={10} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
-          )}
-          {trades.map((t) => (
-            <TableRow key={t.id} className="border-zinc-800 hover:bg-zinc-800/50">
-              <TableCell className="font-semibold text-sm">{t.symbol}</TableCell>
-              <TableCell>
-                <Badge variant={t.direction === "LONG" ? "default" : "destructive"} className="text-xs">
-                  {t.direction}
-                </Badge>
-              </TableCell>
-              <TableCell className="font-mono text-sm">${fmt(t.entry_price, 4)}</TableCell>
-              <TableCell className="font-mono text-sm">{t.exit_price ? `$${fmt(t.exit_price, 4)}` : "—"}</TableCell>
-              <TableCell className="font-mono text-sm">{t.qty}</TableCell>
-              <TableCell className={`font-mono text-sm font-semibold ${t.pnl == null ? "" : t.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                {t.pnl == null ? "—" : `${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl, 4)}`}
-              </TableCell>
-              <TableCell>
-                {t.status === "rejected" ? (
-                  <div className="flex flex-col gap-1">
-                    <Badge variant="default" className="text-xs bg-blue-600/20 text-blue-300 border-blue-500/40">
-                      ⛔ REJECTED{t.reject_reason ? ` (${t.reject_reason.split(":").pop()})` : ""}
-                    </Badge>
-                    {t.exit_reason && (
-                      <Badge variant={t.exit_reason.startsWith("TP") ? "default" : "destructive"} className="text-xs">
-                        sim: {t.exit_reason}
-                      </Badge>
-                    )}
-                  </div>
-                ) : (
-                  t.exit_reason && (
-                    <Badge variant={t.exit_reason.startsWith("TP") ? "default" : "destructive"} className="text-xs">
-                      {t.exit_reason}
-                    </Badge>
-                  )
-                )}
-              </TableCell>
-              <TableCell>
-                <Badge variant={t.mode === "live" ? "default" : "secondary"} className="text-xs">
-                  {t.mode?.toUpperCase() || "—"}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-zinc-400 text-xs">{fmtTime(t.entry_time)}</TableCell>
-              <TableCell className="text-zinc-400 text-xs">{fmtTime(t.exit_time)}</TableCell>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-2 px-1 text-[11px] text-zinc-500">
+        <span>{trades.length} trades</span>
+        <span>·</span>
+        <span>
+          Σ gross{" "}
+          <span className={`font-mono font-semibold ${sumGross >= 0 ? "text-green-400" : "text-red-400"}`}>
+            {sumGross >= 0 ? "+" : ""}{fmt(sumGross, 4)}
+          </span>
+        </span>
+        <span>·</span>
+        <span>Σ fees <span className="font-mono">{fmt(sumCommission, 4)}</span></span>
+        <span>·</span>
+        <span>
+          Σ net{" "}
+          <span className={`font-mono font-semibold ${sumPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+            {sumPnl >= 0 ? "+" : ""}{fmt(sumPnl, 4)}
+          </span>
+        </span>
+        <span>·</span>
+        <span>BE {beCount}</span>
+        <span>·</span>
+        <span>backstop {backstopCount}</span>
+        <span>·</span>
+        <span>TP {tpCount}</span>
+        <span>·</span>
+        <span>SL {slCount}</span>
+      </div>
+      <div className="overflow-auto rounded-lg border border-zinc-800">
+        <Table>
+          <TableHeader>
+            <TableRow className="border-zinc-800 hover:bg-transparent">
+              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Reason", "Mode", "Open", "Close"].map((h) => (
+                <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
+              ))}
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {trades.length === 0 && (
+              <TableRow><TableCell colSpan={12} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
+            )}
+            {trades.map((t) => {
+              const gross = grossPnl(t);
+              const grossBe = gross != null && Math.abs(gross) <= 0.005;
+              return (
+              <TableRow key={t.id} className="border-zinc-800 hover:bg-zinc-800/50">
+                <TableCell className="font-semibold text-sm">{t.symbol}</TableCell>
+                <TableCell>
+                  <Badge variant={t.direction === "LONG" ? "default" : "destructive"} className="text-xs">
+                    {t.direction}
+                  </Badge>
+                </TableCell>
+                <TableCell className="font-mono text-sm">${fmt(t.entry_price, 4)}</TableCell>
+                <TableCell className="font-mono text-sm">{t.exit_price ? `$${fmt(t.exit_price, 4)}` : "—"}</TableCell>
+                <TableCell className="font-mono text-sm">{t.qty}</TableCell>
+                <TableCell className={`font-mono text-sm font-semibold ${gross == null ? "" : grossBe ? "text-zinc-400" : gross >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  {gross == null ? "—" : (
+                    <>
+                      {gross >= 0 ? "+" : ""}{fmt(gross, 4)}
+                      {grossBe && (
+                        <span className="ml-1 text-[10px] font-normal text-zinc-500" title="price PnL ≈ 0 (break-even)">≈0</span>
+                      )}
+                    </>
+                  )}
+                </TableCell>
+                <TableCell className="font-mono text-sm text-zinc-400">
+                  {t.commission == null ? "—" : fmt(t.commission, 6)}
+                </TableCell>
+                <TableCell className={`font-mono text-sm font-semibold ${t.pnl == null ? "" : isBreakEven(t) ? "text-zinc-400" : t.pnl >= 0 ? "text-green-400" : "text-red-400"}`} title="net = gross − fees">
+                  {t.pnl == null ? "—" : (
+                    <>
+                      {t.pnl >= 0 ? "+" : ""}{fmt(t.pnl, 4)}
+                      {isBreakEven(t) && (
+                        <span className="ml-1 text-[10px] font-normal text-zinc-500" title="net PnL within commissions (break-even)">≈0</span>
+                      )}
+                    </>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {t.status === "rejected" ? (
+                    <div className="flex flex-col gap-1">
+                      <Badge variant="default" className="text-xs bg-blue-600/20 text-blue-300 border-blue-500/40">
+                        ⛔ REJECTED{t.reject_reason ? ` (${t.reject_reason.split(":").pop()})` : ""}
+                      </Badge>
+                      {t.exit_reason && (() => {
+                        const b = reasonBadge(t.exit_reason);
+                        return (
+                          <Badge variant={b.variant} title={b.title} className={`text-xs ${b.className ?? ""}`}>
+                            sim: {b.label}
+                          </Badge>
+                        );
+                      })()}
+                    </div>
+                  ) : (
+                    t.exit_reason && (() => {
+                      const b = reasonBadge(t.exit_reason);
+                      return (
+                        <Badge variant={b.variant} title={b.title} className={`text-xs ${b.className ?? ""}`}>
+                          {b.label}
+                        </Badge>
+                      );
+                    })()
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Badge variant={t.mode === "live" ? "default" : "secondary"} className="text-xs">
+                    {t.mode?.toUpperCase() || "—"}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-zinc-400 text-xs">{fmtTime(t.entry_time)}</TableCell>
+                <TableCell className="text-zinc-400 text-xs">{fmtTime(t.exit_time)}</TableCell>
+              </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   );
 }
