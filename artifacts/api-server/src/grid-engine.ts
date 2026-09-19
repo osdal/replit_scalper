@@ -70,6 +70,43 @@ const ORPHAN_SWEEP_MAX_CANCELS = 10;
 const GRID_ORDER_CLIENT_ID_PREFIX = "grid_";
 // Порог «зависшей» active-сетки (лог без действий), минуты.
 const DEFAULT_STALE_ACTIVE_MINUTES = 120;
+
+// Runtime-конфиг auto-mode: переопределения из дашборда лежат в
+// data/grid-engine.json (env-ключи) и подмешиваются в process.env при старте
+// движка ДО чтения GRID_ENGINE_ENABLED/GRID_AUTO_ENABLED.
+const GRID_ENGINE_CONFIG_PATH = path.resolve(__dirname, "../../../data/grid-engine.json");
+
+// Поля, читаемые только при старте движка: POST /config их не принимает, но они
+// всегда возвращаются в restartRequired для прозрачности.
+export const GRID_ENGINE_RESTART_REQUIRED = [
+  "engineEnabled",
+  "intervalMs",
+  "staleActiveMinutes",
+] as const;
+
+// Принятые POST-ом поля -> env-ключи, которые движок читает на каждом tick.
+export const GRID_ENGINE_AUTO_ENV_KEYS = {
+  autoEnabled: "GRID_AUTO_ENABLED",
+  autoMax: "GRID_AUTO_MAX",
+  autoTotalMax: "GRID_AUTO_TOTAL_MAX",
+  autoOrderUsd: "GRID_AUTO_ORDER_USD",
+  autoLeverage: "GRID_AUTO_LEVERAGE",
+} as const;
+
+export type GridEngineAutoConfigKey = keyof typeof GRID_ENGINE_AUTO_ENV_KEYS;
+
+export interface GridEngineConfig {
+  engineEnabled: boolean;
+  autoEnabled: boolean;
+  autoMax: number;
+  autoTotalMax: number;
+  autoOrderUsd: number;
+  autoLeverage: number;
+  intervalMs: number;
+  staleActiveMinutes: number;
+  restartRequired: string[];
+}
+
 // Комиссии Binance USDⓈ-M (maker/taker), в долях от номинала: 0.02% / 0.05%.
 const MAKER_FEE_RATE = 0.0002;
 const TAKER_FEE_RATE = 0.0005;
@@ -121,6 +158,123 @@ function envNumber(name: string, fallback: number): number {
 function envInt(name: string, fallback: number): number {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) ? Math.trunc(raw) : fallback;
+}
+
+/**
+ * Эффективный runtime-конфиг движка: значения из process.env (куда POST /config
+ * зеркалит изменения) с фолбэком на те же дефолты, что и сам движок. Значения
+ * autoMax/autoTotalMax/autoLeverage приводятся к тому виду, в котором их
+ * использует движок (см. runAutoMode).
+ */
+export function getGridEngineConfig(): GridEngineConfig {
+  return {
+    engineEnabled: envFlag("GRID_ENGINE_ENABLED", false),
+    autoEnabled: envFlag("GRID_AUTO_ENABLED", false),
+    autoMax: Math.max(0, envInt("GRID_AUTO_MAX", DEFAULT_AUTO_MAX)),
+    autoTotalMax: Math.max(0, envInt("GRID_AUTO_TOTAL_MAX", DEFAULT_AUTO_TOTAL_MAX)),
+    autoOrderUsd: envNumber("GRID_AUTO_ORDER_USD", DEFAULT_AUTO_ORDER_USD),
+    autoLeverage: Math.min(
+      Math.max(envInt("GRID_AUTO_LEVERAGE", DEFAULT_AUTO_LEVERAGE), 1),
+      MAX_LEVERAGE,
+    ),
+    intervalMs: envIntervalMs("GRID_ENGINE_INTERVAL_MS", DEFAULT_INTERVAL_MS),
+    staleActiveMinutes: envNumber("GRID_STALE_ACTIVE_MINUTES", DEFAULT_STALE_ACTIVE_MINUTES),
+    restartRequired: [...GRID_ENGINE_RESTART_REQUIRED],
+  };
+}
+
+/**
+ * Читает override-файл (env-ключи). Никогда не бросает: отсутствие, нечитаемость
+ * или невалидный JSON логируются как warn и дают null.
+ */
+export function readGridEngineConfigFile(): Record<string, unknown> | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(GRID_ENGINE_CONFIG_PATH, "utf8");
+  } catch (e) {
+    logger.warn(
+      { path: GRID_ENGINE_CONFIG_PATH, err: (e as Error).message },
+      "[grid-engine] config override not loaded (missing/unreadable)",
+    );
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      logger.warn(
+        { path: GRID_ENGINE_CONFIG_PATH },
+        "[grid-engine] config override is not an object, ignoring",
+      );
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch (e) {
+    logger.warn(
+      { path: GRID_ENGINE_CONFIG_PATH, err: (e as Error).message },
+      "[grid-engine] config override malformed, ignoring",
+    );
+    return null;
+  }
+}
+
+/** Пишет override-файл; ошибки fs логируются и не бросаются. */
+export function writeGridEngineConfigFile(values: Record<string, unknown>): boolean {
+  try {
+    fs.mkdirSync(path.dirname(GRID_ENGINE_CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(GRID_ENGINE_CONFIG_PATH, `${JSON.stringify(values, null, 2)}\n`);
+    return true;
+  } catch (e) {
+    logger.warn(
+      { path: GRID_ENGINE_CONFIG_PATH, err: (e as Error).message },
+      "[grid-engine] config override write failed",
+    );
+    return false;
+  }
+}
+
+/**
+ * Переносит известные env-ключи override-объекта в process.env (только
+ * присутствующие). Возвращает имена применённых config-полей; значения, не
+ * прошедшие проверку типа, пропускаются с warn.
+ */
+export function applyGridEngineConfigToEnv(
+  config: Record<string, unknown>,
+): GridEngineAutoConfigKey[] {
+  const applied: GridEngineAutoConfigKey[] = [];
+  for (const [field, envKey] of Object.entries(GRID_ENGINE_AUTO_ENV_KEYS) as Array<
+    [GridEngineAutoConfigKey, string]
+  >) {
+    if (!Object.prototype.hasOwnProperty.call(config, envKey)) continue;
+    const value = config[envKey];
+    if (field === "autoEnabled") {
+      if (typeof value !== "boolean") {
+        logger.warn({ envKey, value }, "[grid-engine] override ignored: expected boolean");
+        continue;
+      }
+      process.env[envKey] = value ? "true" : "false";
+    } else {
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        logger.warn({ envKey, value }, "[grid-engine] override ignored: expected finite number");
+        continue;
+      }
+      process.env[envKey] = String(value);
+    }
+    applied.push(field);
+  }
+  return applied;
+}
+
+/** Подмешивает сохранённые override-значения в process.env до чтения флагов. */
+function loadGridEngineConfigOverrides(): void {
+  const config = readGridEngineConfigFile();
+  if (!config) return;
+  const applied = applyGridEngineConfigToEnv(config);
+  if (applied.length > 0) {
+    logger.info(
+      { applied, path: GRID_ENGINE_CONFIG_PATH },
+      "[grid-engine] persisted config overrides applied",
+    );
+  }
 }
 
 function parseArray(raw: string | null | undefined): unknown[] {
@@ -1761,6 +1915,9 @@ async function processGrid(row: GridRow): Promise<void> {
  * @returns stop-функцию (если таймер запущен) либо null (если движок выключен).
  */
 export function startGridEngine(): (() => void) | null {
+  // Persisted runtime-конфиг применяется ДО чтения GRID_ENGINE_ENABLED /
+  // GRID_AUTO_ENABLED, чтобы пережить рестарт api-server.
+  loadGridEngineConfigOverrides();
   const enabled = envFlag("GRID_ENGINE_ENABLED", false);
   if (!enabled) {
     logger.info(

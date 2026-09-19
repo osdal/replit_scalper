@@ -376,6 +376,23 @@ SUPPORT_BOT_DB=./support-bot/data/support_bot.db
 `GRID_STALE_ACTIVE_MINUTES` (120 — порог лога о «зависшей» active-сетке; движок только
 логирует и не аннулирует её автоматически).
 
+Runtime-конфиг auto-mode (без рестарта api-server):
+
+- `GET /api/grid-engine/config` — эффективный конфиг:
+  `{ engineEnabled, autoEnabled, autoMax, autoTotalMax, autoOrderUsd, autoLeverage, intervalMs, staleActiveMinutes, restartRequired }`.
+- `POST /api/grid-engine/config` — partial body `{ autoEnabled?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`
+  (`autoEnabled` — boolean; `autoMax` 0..20, `autoTotalMax` 0..100, `autoOrderUsd` (0..10000],
+  `autoLeverage` 1..125; неизвестные поля → 400). Ответ: `{ ok: true, config, applied, restartRequired }`.
+- Оба роута защищены `notifyTokenGuard` (заголовок `x-notify-token`, как у `/api/grids`).
+- Принятые значения сразу зеркалятся в `process.env` (`GRID_AUTO_ENABLED`, `GRID_AUTO_MAX`,
+  `GRID_AUTO_TOTAL_MAX`, `GRID_AUTO_ORDER_USD`, `GRID_AUTO_LEVERAGE`) — движок читает их через
+  `envFlag()`/`envInt()` на каждом tick, поэтому изменение действует со следующего tick — и
+  персистятся в `data/grid-engine.json` (env-ключи). При старте движка файл подмешивается в
+  `process.env` до чтения флагов, поэтому конфиг переживает рестарт; битый/отсутствующий файл
+  не роняет старт (только warn).
+- `engineEnabled`, `intervalMs`, `staleActiveMinutes` читаются только при старте движка: они не
+  принимаются POST-ом и всегда перечислены в `restartRequired`.
+
 Также движок каждый tick делает **orphan sweep**: для `engine='server'` сеток в
 `waiting`/`active` читает открытые ордера символа и снимает лимитные ордера с
 `clientOrderId`, начинающимся на `grid_`, которых нет в `testnetOrderIds` (остатки
@@ -1006,6 +1023,19 @@ cd C:\DATA\bots\replit_scalper
 | GET | `/reset-status` | Метка последнего сброса |
 
 Плюс `GET|POST|DELETE /api/grid-history` — история сеток (таблица создаётся лениво).
+
+### 17.10a Runtime-конфиг grid-движка (`/api/grid-engine`)
+
+| Метод | Роут | Назначение |
+|-------|------|-----------|
+| GET | `/api/grid-engine/config` | Текущий эффективный конфиг auto-mode (`engineEnabled`, `autoEnabled`, `autoMax`, `autoTotalMax`, `autoOrderUsd`, `autoLeverage`, `intervalMs`, `staleActiveMinutes`, `restartRequired`) |
+| POST | `/api/grid-engine/config` | Partial-обновление `{ autoEnabled?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`; применяется на следующем tick, пишется в `data/grid-engine.json` |
+
+Оба роута требуют `x-notify-token` (`notifyTokenGuard`). Персистентный файл
+`data/grid-engine.json` хранит env-ключи (`GRID_AUTO_*`) и подмешивается в `process.env`
+при старте движка, поэтому переключатель auto-mode с дашборда переживает рестарт
+api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` меняются только
+через `.env` + рестарт и всегда возвращаются в `restartRequired`.
 
 ### 17.11 Известные ограничения
 
