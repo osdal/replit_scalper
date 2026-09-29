@@ -177,14 +177,13 @@ router.post("/close-all", async (_req, res) => {
   res.json({ success: summary.ok, output: summary.output });
 });
 
-// ── Лимит просадки: закрытие самой убыточной позиции ─────────────────────────
-// Референс — ТЕКУЩИЙ депозит = wallet balance (меняется вместе с балансом после
-// сделок). Просадка = открытый (нереализованный) убыток от текущего депозита:
-//   dd% = (-totalUnrealizedProfit / totalWalletBalance) * 100
-// Если dd% >= LIVE_MAX_DRAWDOWN_PCT — закрываем одну самую убыточную позицию.
-// Никакого «пика»/первоначального депозита: база всегда текущий баланс, поэтому
-// после закрытия сделки база сама обновляется на новый баланс.
-let lastWorstCloseMs = 0;
+// ── Лимит просадки по КАЖДОЙ позиции отдельно ────────────────────────────────
+// Референс — ТЕКУЩИЙ депозит = wallet balance (меняется вместе с балансом).
+// Для каждой открытой позиции просадка = её открытый убыток от текущего депозита:
+//   loss% = (-unrealized_position / wallet) * 100
+// Если у КОНКРЕТНОЙ позиции loss% >= LIVE_MAX_DRAWDOWN_PCT — закрываем ИМЕННО её.
+// Ничего не суммируется между позициями; база — всегда текущий баланс.
+const lastCloseBySymbol = new Map<string, number>();
 
 type LiveAccount = { wallet: number; upnl: number; equity: number };
 async function liveAccount(): Promise<LiveAccount> {
@@ -204,14 +203,32 @@ async function liveAccount(): Promise<LiveAccount> {
   throw lastErr ?? new Error("account fetch failed");
 }
 
-async function closeWorstPosition(): Promise<{ ok: boolean; output: string }> {
+type LivePosition = { symbol: string; amt: number; upnl: number; lossPct: number };
+
+// Список открытых позиций с per-position просадкой (lossPct = -upnl/wallet*100).
+async function livePositions(wallet: number): Promise<LivePosition[]> {
+  const raw = await binanceRequest("GET", "/fapi/v2/positionRisk", {});
+  const list = Array.isArray(raw) ? raw : [];
+  const out: LivePosition[] = [];
+  for (const p of list as Array<Record<string, unknown>>) {
+    const amt = Number(p?.positionAmt ?? 0) || 0;
+    if (Math.abs(amt) < 1e-12) continue;
+    const upnl = Number(p?.unRealizedProfit ?? 0) || 0;
+    const lossPct = wallet > 0 ? (-upnl / wallet) * 100 : 0;
+    out.push({ symbol: String(p?.symbol || ""), amt, upnl, lossPct });
+  }
+  return out;
+}
+
+// Закрывает конкретный символ (close_worst.py <SYMBOL>): cancel orders + market reduceOnly.
+async function closePositionSymbol(symbol: string): Promise<{ ok: boolean; output: string }> {
   return await new Promise<{ ok: boolean; output: string }>((resolve) => {
     let out = "";
     let settled = false;
     const done = (ok: boolean) => {
       if (!settled) { settled = true; resolve({ ok, output: out }); }
     };
-    const proc = spawn("python", ["close_worst.py"], {
+    const proc = spawn("python", ["close_worst.py", symbol], {
       cwd: BOT_DIR,
       env: process.env,
       windowsHide: true,
@@ -231,19 +248,22 @@ export async function checkMaxDrawdown(): Promise<void> {
     await syncBinanceTime();
     const acct = await liveAccount();
     if (!(acct.wallet > 0)) return;
-    // Просадка = открытый убыток от ТЕКУЩЕГО депозита (wallet). База обновляется
-    // автоматически вместе с балансом после закрытия сделок.
-    const ddPct = (-acct.upnl / acct.wallet) * 100;
-    if (ddPct < threshold) return;
+    const positions = await livePositions(acct.wallet);
+    if (positions.length === 0) return;
     const now = Date.now();
-    if (now - lastWorstCloseMs < 60_000) return; // не чаще раза в минуту
-    lastWorstCloseMs = now;
-    console.error(
-      `[live] MAX DRAWDOWN ${ddPct.toFixed(2)}% >= ${threshold}% ` +
-      `(wallet=${acct.wallet.toFixed(2)} upnl=${acct.upnl.toFixed(2)}) — closing worst position`,
-    );
-    const res = await closeWorstPosition();
-    console.error(`[live] drawdown close-worst ${res.ok ? "OK" : "FAILED"}: ${res.output.slice(0, 400)}`);
+    for (const p of positions) {
+      if (p.upnl >= 0) continue;                 // только убыточные
+      if (p.lossPct < threshold) continue;       // < порога — не трогаем
+      const last = lastCloseBySymbol.get(p.symbol) || 0;
+      if (now - last < 60_000) continue;          // не чаще раза в минуту на символ
+      lastCloseBySymbol.set(p.symbol, now);
+      console.error(
+        `[live] POSITION DRAWDOWN ${p.lossPct.toFixed(2)}% >= ${threshold}% ` +
+        `(symbol=${p.symbol} upnl=${p.upnl.toFixed(2)} wallet=${acct.wallet.toFixed(2)}) — closing`,
+      );
+      const res = await closePositionSymbol(p.symbol);
+      console.error(`[live] close ${p.symbol} ${res.ok ? "OK" : "FAILED"}: ${res.output.slice(0, 300)}`);
+    }
   } catch (e) {
     console.error("[live] drawdown check failed:", String(e));
   }
@@ -254,11 +274,17 @@ router.get("/drawdown", async (_req, res) => {
   try {
     await syncBinanceTime();
     const acct = await liveAccount();
-    const ddPct = acct.wallet > 0 ? (-acct.upnl / acct.wallet) * 100 : 0;
+    const positions = await livePositions(acct.wallet);
+    const worst = positions.reduce(
+      (a, b) => (b.lossPct > (a ? a.lossPct : -Infinity) ? b : a),
+      null as LivePosition | null,
+    );
     res.json({
       bot_env: BOT_ENV, wallet: acct.wallet, upnl: acct.upnl, equity: acct.equity,
-      reference: acct.wallet, drawdown_pct: ddPct, threshold_pct: threshold,
-      enabled: threshold > 0,
+      reference: acct.wallet, threshold_pct: threshold, enabled: threshold > 0,
+      drawdown_pct: worst ? worst.lossPct : 0,
+      worst_symbol: worst ? worst.symbol : null,
+      positions: positions.map((p) => ({ symbol: p.symbol, upnl: p.upnl, loss_pct: p.lossPct })),
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });

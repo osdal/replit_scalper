@@ -35,10 +35,15 @@ async def main() -> None:
         api_secret=os.getenv("BINANCE_API_SECRET") or None,
         testnet=TESTNET,
     )
+    # Опциональный аргумент: закрыть КОНКРЕТНЫЙ символ (а не «худшую» позицию).
+    target = (sys.argv[1] if len(sys.argv) > 1 else "").strip().upper()
     worst = None
     try:
         positions = await client.futures_position_information()
         for p in positions:
+            sym = p.get("symbol")
+            if target and sym != target:
+                continue
             try:
                 amt = float(p.get("positionAmt", 0) or 0)
             except (TypeError, ValueError):
@@ -50,7 +55,7 @@ async def main() -> None:
             except (TypeError, ValueError):
                 upnl = 0.0
             if worst is None or upnl < worst["upnl"]:
-                worst = {"symbol": p.get("symbol"), "amt": amt, "upnl": upnl}
+                worst = {"symbol": sym, "amt": amt, "upnl": upnl}
     finally:
         if worst is None:
             await client.close_connection()

@@ -1242,3 +1242,11 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - High-water mark / «пик» / первоначальный депозит больше **не используются** (файл `data/live_drawdown_peak.json` не нужен).
 - Пример: баланс $43 → порог 5% = $2.15 открытого убытка; прошла сделка, баланс стал $44 → порог = $2.20. База «едет» вместе с балансом.
 - `GET /api/live/drawdown` отдаёт `wallet`, `upnl`, `equity`, `reference`(=wallet), `drawdown_pct`, `threshold_pct`.
+
+### 18.11 Просадка считается ПО КАЖДОЙ позиции отдельно
+- `checkMaxDrawdown` (`artifacts/api-server/src/routes/live.ts`): для каждой открытой позиции
+  `loss% = (-unrealized_position / wallet) * 100`, где `wallet` = текущий `totalWalletBalance` (меняется вместе с балансом после сделок).
+- Если у **конкретной** позиции `loss% ≥ LIVE_MAX_DRAWDOWN_PCT` (5%) — закрывается **именно эта** позиция (`close_worst.py <SYMBOL>`: cancel orders + market reduceOnly; только убыточные), не чаще раза в минуту на символ.
+- **Никакого суммирования между позициями и никакого пика**: база — всегда текущий депозит.
+- Пример: баланс $43 → порог 5% = $2.15 убытка по одной позиции; баланс стал $44 → порог = $2.20.
+- `GET /api/live/drawdown` отдаёт `wallet`, `drawdown_pct` (= максимальный `loss%` по позициям), `worst_symbol`, и `positions[]` со `loss_pct` по каждой позиции.
