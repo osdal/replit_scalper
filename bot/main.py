@@ -2906,8 +2906,85 @@ async def _run_live_or_paper(
             except Exception as e:
                 log.warning(f"[SYNC_CHECK] Error during periodic check: {e}")
 
+    async def _flat_position_reconciler():
+        """Рантайм-сверка (раз в 60с): если трекер держит позицию, а биржа ФЛЭТ —
+        финализируем запись сделки и чистим стейт, чтобы дашборд не показывал
+        фантомные открытые позиции (закрытие вне бота: backstop/флэт/ручное,
+        пока процесс был перезапущен, или внешнее закрытие в рантайме).
+
+        Безопасность: `_get_real_position_qty` → -1 при сбое опроса (НЕ трогаем),
+        0 — точно нет позиции, >0 — позиция есть. Сверяем обе стороны и не трогаем
+        позицию, открытую менее 120с назад (чтобы не гоняться с филом).
+        """
+        while not shutdown_event.is_set():
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                break
+            pos = tracker.position
+            if pos is None or getattr(pos, "remaining_qty", 0) <= 0:
+                continue
+            entry_ms = getattr(pos, "entry_fill_ms", None)
+            if entry_ms and (time.time() * 1000 - float(entry_ms)) < 120_000:
+                continue
+            try:
+                order_mgr._invalidate_position_cache()
+                q_dir = await order_mgr._get_real_position_qty(pos.direction)
+                q_opp = await order_mgr._get_real_position_qty(
+                    "SHORT" if pos.direction == "LONG" else "LONG"
+                )
+            except Exception as e:
+                log.debug(f"[SYNC] reconciler fetch failed: {e}")
+                continue
+            if q_dir < 0 or q_opp < 0:
+                continue  # опрос не удался — состояние неизвестно, не трогаем
+            if q_dir > 1e-9 or q_opp > 1e-9:
+                continue  # позиция реально есть
+            log.warning(
+                f"[SYNC] reconciler: exchange flat but tracker holds {pos.direction} "
+                f"qty={pos.remaining_qty} — finalizing stale trade"
+            )
+            try:
+                import requests as _rq
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+                trades_resp = _rq.get(
+                    f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5
+                ).json()
+                for trade in (trades_resp.get("trades") or []):
+                    if trade.get("is_open"):
+                        try:
+                            pnl_val = await _close_stale_db_trade(
+                                cfg, tracker, order_mgr, log,
+                                api_url=api_url,
+                                trade_id=trade["id"],
+                                entry_time=trade.get("entry_time") or pos.entry_timestamp,
+                                direction=pos.direction,
+                                tp1_price=pos.tp1_price,
+                                tp2_price=pos.tp2_price,
+                                is_reverse=bool(getattr(pos, "is_reverse", False)),
+                                mode=getattr(pos, "mode", None),
+                                pos=pos,
+                                backstop_algo_id=getattr(pos, "backstop_algo_id", None),
+                            )
+                            log.info(
+                                f"[SYNC] reconciler closed stale trade #{trade['id']} "
+                                f"for {cfg.symbol} | pnl={pnl_val:.4f}"
+                            )
+                        except Exception as e:
+                            log.warning(f"[SYNC] reconciler close failed: {e}")
+                        break
+            except Exception as e:
+                log.debug(f"[SYNC] reconciler cleanup error: {e}")
+            if getattr(pos, "backstop_algo_id", None):
+                try:
+                    await order_mgr._cancel_exchange_backstop(pos.backstop_algo_id)
+                except Exception:
+                    pass
+            tracker.position = None
+            tracker._clear_state()
+
     # Запускаем периодическую проверку состояния позиции в фоне
     check_task = asyncio.create_task(periodic_position_check())
+    flat_reconcile_task = asyncio.create_task(_flat_position_reconciler())
     sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, recovery, log, shutdown_event))
 
     async def _watchdog():
@@ -3558,7 +3635,7 @@ async def _run_live_or_paper(
         )
     
     # Останавливаем фоновые задачи
-    _cancel_tasks = [check_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task, graceful_task]
+    _cancel_tasks = [check_task, flat_reconcile_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task, graceful_task]
     if relay_task is not None:
         _cancel_tasks.append(relay_task)
     for task in _cancel_tasks:
