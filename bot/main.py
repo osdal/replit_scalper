@@ -3173,9 +3173,18 @@ async def _run_live_or_paper(
     # лимиты. market_data.get_current_price сам решит, свежая ли WS-цена.
     ws_price: Dict[str, float] = {}
 
+    # FIX: событие «пришла новая цена». Тик виртуального SL/TP просыпается сразу
+    # на каждом обновлении (markPrice@1s/kline), а не ждёт фиксированные 5с — это
+    # заметно уменьшает лаг срабатывания SL и зависимость от интервала/сети.
+    price_event = asyncio.Event()
+
     def _on_ws_price(p: float) -> None:
         ws_price["value"] = p
         ws_price["ts"] = time.time()
+        try:
+            price_event.set()
+        except Exception:
+            pass
 
     async def _latest_price() -> float:
         return await get_current_price(
@@ -3518,7 +3527,15 @@ async def _run_live_or_paper(
         nonlocal last_tick_hb_ts
         while not shutdown_event.is_set():
             try:
-                await asyncio.sleep(5)
+                # Просыпаемся на каждое обновление цены (price_event) либо минимум
+                # раз в 1с: виртуальный SL/TP срабатывает максимально быстро и не
+                # зависит от 5-секундного интервала.
+                try:
+                    await asyncio.wait_for(price_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    price_event.clear()
                 if shutdown_event.is_set():
                     break
                 if not tracker.has_open_position():
