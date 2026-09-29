@@ -9,31 +9,81 @@ from typing import Dict, Optional
 
 import pandas as pd
 from binance import AsyncClient
+from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
+
 
 from config import load_config
 from logger import get_logger, get_events_logger
-from market_data import get_current_price, get_recent_klines, start_kline_polling, start_kline_websocket
+from market_data import (
+    PRICE_WS_MAX_AGE_SEC,
+    get_current_price,
+    get_price_snapshot,
+    get_recent_klines,
+    start_kline_polling,
+    start_kline_websocket,
+)
 from strategy import calculate_indicators, calculate_htf_indicators, get_all_signals, get_htf_trend_latest, Signal, _calc_atr_sl_tp
 from preset_config import get_preset_config
 from signal_handler import SignalHandler
 from order_manager import OrderManager
-from position_tracker import PositionTracker, Position
+from position_tracker import PositionTracker, Position, _to_epoch_ms
 from backtester import run_backtest
 from db_reporter import DbReporter
 from recovery_client import RecoveryClient
 from notifier import Notifier
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
-_load = load_dotenv(os.path.join(_this_dir, "..", ".env")) or load_dotenv(os.path.join(_this_dir, ".env"))
+# Окружение бота: testnet (по умолчанию) или live. Задаётся API-сервером/лаунчером
+# через BOT_ENV и разделяет конфиги, стейт, логи и lock-файлы.
+BOT_ENV = (os.getenv("BOT_ENV") or "testnet").strip().lower() or "testnet"
+_scoped_env = os.path.join(_this_dir, "..", f".env.{BOT_ENV}")
+_load = (
+    load_dotenv(_scoped_env, override=True)
+    or load_dotenv(os.path.join(_this_dir, "..", ".env"))
+    or load_dotenv(os.path.join(_this_dir, ".env"))
+)
 if not _load:
     load_dotenv()
 
 HEARTBEAT_CANDLES = 3
-LOCK_FILE_TEMPLATE = "bot.lock.{symbol}"
+LOCK_FILE_TEMPLATE = "bot.lock.{env}.{symbol}"
 
 # Порог "пыли" по объёму — совпадает с dust-логикой ниже (abs(qty) < 0.001).
 DUST_QTY = 0.001
+
+# FIX A: виртуальные TP/SL считаются по последней ТОРГОВОЙ цене (kline k.c).
+# Mark-цена используется только как fallback, если торговая отсутствует/старше
+# этого порога.
+LAST_PRICE_MAX_AGE_SEC = 5.0
+
+# FIX B: сколько ждать исполнения рабочего TP-лимита обратной ноги, прежде чем
+# заменить его агрессивным marketable-лимитом (ожидание идёт по тикам).
+REVERSE_TP_GRACE_SEC = 10.0
+# FIX B: на сколько процентов marketable-лимит пересекает стакан (заполняется
+# сразу как taker).
+MARKETABLE_LIMIT_OFFSET_PCT = 0.05
+
+# Дедлайны grace-ожидания TP-лимита обратной ноги (per cycle), чтобы не
+# блокировать tick-цикл sleep-loop'ом: филл ждём по тикам.
+_REVERSE_TP_DEADLINES: dict = {}
+
+# Сколько раз подряд и как долго разрешено пытаться открыть reverse-ногу в одном
+# цикле, прежде чем прекратить ретраи и принудительно закрыть цикл. Нужно, чтобы
+# необратимые ошибки (напр. -2027 «max position at current leverage») не
+# зацикливали попытку на каждом тике, но транзиентные сбои пережили окно.
+REVERSE_CHAIN_MAX_ATTEMPTS = 3
+REVERSE_CHAIN_FAIL_WINDOW_SEC = 60.0
+_REVERSE_CHAIN_FAILS: dict = {}  # symbol -> [count, first_ts]
+
+# FIX C: соответствие подтверждённой причины закрытия reverse-ноги метке
+# trades.exit_reason (используется как fallback, если классификатор не дал метку).
+_REVERSE_CLOSED_BY_REASON = {
+    "tp": "REVERSE_BE",
+    "backstop": "REVERSE_BACKSTOP",
+    "market": "REVERSE_MARKET",
+    "chain_stop": "REVERSE_CHAIN_STOP",
+}
 
 # Глобальные переменные для отслеживания recovery-состояния
 _recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recovery": bool}}
@@ -91,41 +141,92 @@ def _reject_should_record(symbol: str, reason: str, now_ts: float) -> bool:
     return False
 
 
-    async def _track_skipped_signal(reporter, signal, cfg, reason):
-        """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
-        reject_reason (например 'max_positions')."""
-        if reporter is None or signal is None:
-            return
-        try:
-            import asyncio as _asyncio
-            payload = {
-                "direction": getattr(signal, "direction", "LONG"),
-                "entry_price": getattr(signal, "entry_price", 0.0),
-                "sl_price": getattr(signal, "sl_price", 0.0),
-                "tp1_price": getattr(signal, "tp1_price", 0.0),
-                "tp2_price": getattr(signal, "tp2_price", 0.0),
-                "preset": getattr(signal, "preset", None),
-                "ema_fast": getattr(signal, "ema_fast", None),
-                "ema_slow": getattr(signal, "ema_slow", None),
-                "volume": getattr(signal, "volume", None),
-                "volume_ma": getattr(signal, "volume_ma", None),
-                "rsi": getattr(signal, "rsi", None),
-                "macd": getattr(signal, "macd", None),
-                "atr": getattr(signal, "atr", None),
-            }
-            # Calculate position size that would have been opened
-            from order_manager import calc_quantity
-            balance = 1000  # Default balance for paper trades
-            qty = calc_quantity(
-                balance=balance,
-                risk_pct=cfg.risk_pct,
-                sl_pct=cfg.sl_pct,
-                entry_price=signal.entry_price,
-                leverage=cfg.leverage,
-            )
-            _asyncio.create_task(reporter.report_rejected(payload, reason, qty, mode=cfg.mode))
-        except Exception:
-            pass
+async def _track_skipped_signal(reporter, signal, cfg, reason):
+    """Фиксирует сигнал, пропущенный лимитами/фильтрами, как rejected trade с
+    reject_reason (например 'max_positions')."""
+    if reporter is None or signal is None:
+        return
+    try:
+        import asyncio as _asyncio
+        payload = {
+            "direction": getattr(signal, "direction", "LONG"),
+            "entry_price": getattr(signal, "entry_price", 0.0),
+            "sl_price": getattr(signal, "sl_price", 0.0),
+            "tp1_price": getattr(signal, "tp1_price", 0.0),
+            "tp2_price": getattr(signal, "tp2_price", 0.0),
+            "preset": getattr(signal, "preset", None),
+            "ema_fast": getattr(signal, "ema_fast", None),
+            "ema_slow": getattr(signal, "ema_slow", None),
+            "volume": getattr(signal, "volume", None),
+            "volume_ma": getattr(signal, "volume_ma", None),
+            "rsi": getattr(signal, "rsi", None),
+            "macd": getattr(signal, "macd", None),
+            "atr": getattr(signal, "atr", None),
+        }
+        # Calculate position size that would have been opened
+        from order_manager import calc_quantity
+        balance = 1000  # Default balance for paper trades
+        qty = calc_quantity(
+            balance=balance,
+            risk_pct=cfg.risk_pct,
+            sl_pct=cfg.sl_pct,
+            entry_price=signal.entry_price,
+            leverage=cfg.leverage,
+        )
+        _asyncio.create_task(reporter.report_rejected(payload, reason, qty, mode=cfg.mode))
+    except Exception:
+        pass
+
+
+# Кэш armed-статуса (live arm-gate): перезапрашиваем не чаще раза в 5 секунд.
+_ARM_CACHE: dict = {"ts": 0.0, "armed": False, "symbol": None}
+
+
+async def _is_armed(cfg, log) -> bool:
+    """Проверяет armed-флаг бота через dashboard API (кэш 5с).
+
+    Только для live-контура (REQUIRE_ARM=true). При ошибке запроса считаем бота
+    НЕ армированным (fail-closed) — безопаснее для реальных денег.
+    """
+    now = time.time()
+    if _ARM_CACHE.get("symbol") == cfg.symbol and (now - float(_ARM_CACHE.get("ts", 0.0))) < 5.0:
+        return bool(_ARM_CACHE.get("armed"))
+    api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+    armed = False
+    try:
+        import requests as _sync
+        r = _sync.get(f"{api_url}/bots/{cfg.symbol}", timeout=5)
+        data = r.json()
+        armed = bool(data.get("armed", False))
+    except Exception as e:
+        log.warning(f"[ARM] armed check failed: {e}")
+    _ARM_CACHE.update(ts=now, armed=armed, symbol=cfg.symbol)
+    return armed
+
+
+# Кэш relay-only статуса: флаг хранится в БД (тумблер в дашборде), опрос раз в 5с.
+_RELAY_ONLY_CACHE: dict = {"ts": 0.0, "value": None, "symbol": None}
+
+
+async def _is_relay_only(cfg, log) -> bool:
+    """True если бот в режиме relay-only (не открывает свои входы).
+
+    Источник правды — флаг бота в БД (можно переключать из дашборда); при
+    недоступности API падаем на env SIGNAL_RELAY_ONLY.
+    """
+    now = time.time()
+    if _RELAY_ONLY_CACHE.get("symbol") == cfg.symbol and (now - float(_RELAY_ONLY_CACHE.get("ts", 0.0))) < 5.0:
+        return bool(_RELAY_ONLY_CACHE.get("value"))
+    val = None
+    try:
+        import requests as _sync
+        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+        r = _sync.get(f"{api_url}/bots/{cfg.symbol}", timeout=5)
+        val = bool(r.json().get("relay_only", False))
+    except Exception:
+        val = os.getenv("SIGNAL_RELAY_ONLY", "false").lower() == "true"
+    _RELAY_ONLY_CACHE.update(ts=now, value=val, symbol=cfg.symbol)
+    return bool(val)
 
 
 def _simulate_exit(direction, entry, sl, tp1, klines):
@@ -361,7 +462,8 @@ async def _simulate_rejected_outcome(current_price, reporter, recovery, log):
 
 
 def _lock_file(symbol: str) -> str:
-    return os.path.join(os.path.dirname(__file__) or ".", LOCK_FILE_TEMPLATE.replace("{symbol}", symbol.lower()))
+    name = LOCK_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", symbol.lower())
+    return os.path.join(os.path.dirname(__file__) or ".", name)
 def _process_is_bot(pid: int, symbol: str) -> bool:
     """Return True only if PID is a live Python process running this bot's main.py."""
     try:
@@ -376,11 +478,25 @@ def _process_is_bot(pid: int, symbol: str) -> bool:
         import subprocess
         import platform
         if platform.system() == "Windows":
+            # Бот запущен дашбордом detached (без своей консоли), поэтому любой
+            # консольный дочерний процесс (wmic/powershell/tasklist) иначе получает
+            # НОВУЮ консоль и мигает окном. CREATE_NO_WINDOW + SW_HIDE это гасят.
+            win_kwargs: dict = {}
+            try:
+                _si = subprocess.STARTUPINFO()
+                _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                _si.wShowWindow = subprocess.SW_HIDE
+                win_kwargs = {
+                    "creationflags": subprocess.CREATE_NO_WINDOW,
+                    "startupinfo": _si,
+                }
+            except Exception:
+                win_kwargs = {}
             # Use wmic; fall back to Get-CimInstance (Windows 10/11) for the command line
             try:
                 result = subprocess.run(
                     ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/value"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, **win_kwargs,
                 )
                 out = result.stdout
             except Exception:
@@ -388,13 +504,13 @@ def _process_is_bot(pid: int, symbol: str) -> bool:
                     result = subprocess.run(
                         ["powershell", "-NoProfile", "-Command",
                          f"Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | Select-Object -ExpandProperty CommandLine"],
-                        capture_output=True, text=True, timeout=8,
+                        capture_output=True, text=True, timeout=8, **win_kwargs,
                     )
                     out = result.stdout
                 except Exception:
                     result = subprocess.run(
                         ["tasklist", "/V", "/FI", f"PID eq {pid}"],
-                        capture_output=True, text=True, timeout=5,
+                        capture_output=True, text=True, timeout=5, **win_kwargs,
                     )
                     out = result.stdout
         else:
@@ -519,32 +635,75 @@ async def _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=None) ->
         open_orders = []
     price_tol = _price_tol(order_mgr, target_tp)
     qty_tol = _qty_tol(order_mgr, pos.remaining_qty)
+    # Живой TP-лимит мог быть выставлен по tick-округлённому уровню: он
+    # отличается от сохранённого state tp1_price менее чем на тик (пример:
+    # state 0.42549025 ↔ reduceOnly BUY 0.4256 при tickSize=0.0001). Поэтому
+    # допускаем один тик биржевого округления СВЕРХ обычного допуска —
+    # фактически max(один тик, _price_tol).
+    tick = float(getattr(order_mgr, "_tick_size", None) or 0.0)
+    tp_tol = max(price_tol, tick)
+    if tick > 0 and target_tp > 0:
+        tick_rounded_tp = round(round(target_tp / tick) * tick, 12)
+        tp_tol = max(tp_tol, abs(target_tp - tick_rounded_tp) + tick + 1e-9)
     for o in open_orders or []:
         try:
             if (o.get("type") or "").upper() != "LIMIT":
                 continue
             if (o.get("side") or "").upper() != expected_side:
                 continue
+            if not _is_reduce_only(o):
+                continue
             o_price = float(o.get("price", 0) or 0)
             o_qty = float(o.get("origQty", o.get("quantity", 0)) or 0)
         except (TypeError, ValueError):
             continue
-        if (o_price > 0 and target_tp > 0 and abs(o_price - target_tp) <= price_tol
-                and abs(o_qty - pos.remaining_qty) <= qty_tol):
+        # reduceOnly LIMIT на закрывающей стороне, цена в пределах допуска,
+        # объём покрывает позицию (в пределах одного шага лота) → это и есть
+        # живой TP, второй выставлять нельзя.
+        if (o_price > 0 and target_tp > 0 and abs(o_price - target_tp) <= tp_tol
+                and o_qty > 0 and o_qty + qty_tol >= pos.remaining_qty):
             tp_present = True
+            log.info(
+                f"[SYNC] TP limit already present | side={expected_side} "
+                f"price={target_tp} qty={pos.remaining_qty} orderPrice={o_price} "
+                f"orderQty={o_qty}"
+            )
             break
-    if tp_present:
-        log.info(
-            f"[SYNC] TP limit already present | side={expected_side} "
-            f"price={target_tp} qty={pos.remaining_qty}"
-        )
-    elif target_tp and target_tp > 0:
+    if not tp_present and target_tp and target_tp > 0:
         try:
             await order_mgr._place_tp_limit(pos.direction, target_tp, pos.remaining_qty)
             log.info(
                 f"[SYNC] Re-placed TP limit | side={expected_side} "
                 f"price={target_tp} qty={pos.remaining_qty} (was missing)"
             )
+        except BinanceAPIException as e:
+            if getattr(e, "code", None) == -2022:
+                # -2022 = reduceOnly отклонён: позиция уже защищена живым
+                # reduceOnly TP (мэтч выше не сработал из-за округления).
+                # Это не ошибка — без повторной проверки не эскалируем.
+                still_present = False
+                try:
+                    recheck = await order_mgr.client.futures_get_open_orders(symbol=symbol)
+                    for o in recheck or []:
+                        if ((o.get("type") or "").upper() == "LIMIT"
+                                and (o.get("side") or "").upper() == expected_side
+                                and bool(o.get("reduceOnly"))):
+                            still_present = True
+                            break
+                except Exception as e2:
+                    log.warning(f"[SYNC] Could not re-check orders after -2022: {e2}")
+                if still_present:
+                    log.info(
+                        "[SYNC] TP limit already covers the position "
+                        "(reduceOnly rejected) — keeping existing order"
+                    )
+                else:
+                    log.error(
+                        "[SYNC] reduceOnly TP rejected (-2022) and no live "
+                        "reduceOnly TP found — protection may be missing"
+                    )
+            else:
+                log.error(f"[SYNC] Failed to re-place TP limit: {e}", exc_info=True)
         except Exception as e:
             log.error(f"[SYNC] Failed to re-place TP limit: {e}", exc_info=True)
 
@@ -604,6 +763,197 @@ async def _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=None) ->
         tracker._save_state()
 
 
+def _stale_close_entry_ms(entry_time) -> int:
+    """UTC-корректное начало окна цикла для stale-close.
+
+    Раньше здесь был naive `fromisoformat(...).timestamp()`, который читал
+    время как локальное (MSK/UTC+3): окно PnL уезжало на 3 часа назад и в
+    строку попадали филлы чужих циклов (row 24167: +2.3391 вместо ≈+0.0004).
+    `_to_epoch_ms` трактует naive-время как UTC (и принимает trailing 'Z').
+    """
+    return _to_epoch_ms(entry_time)
+
+
+def _is_reduce_only(o) -> bool:
+    """True только если ордер явно помечен reduceOnly (Binance может не отдавать ключ)."""
+    return bool(isinstance(o, dict) and o.get("reduceOnly") is True)
+
+
+def _safe_reverse_tp(direction: str, entry: float, tp) -> float:
+    """Не даёт виртуальному TP встать по убыточную сторону от фактического входа.
+
+    Если рассчитанная цель T не на прибыльной стороне (проскальзывание филла),
+    возвращает безопасное значение, которое не сработает мгновенно: 0.0 для SHORT
+    и большое число для LONG.
+    """
+    try:
+        e = float(entry)
+        t = float(tp)
+    except (TypeError, ValueError):
+        return 0.0
+    ok = (t > 0 and (t < e if direction == "SHORT" else t > e))
+    if ok:
+        return t
+    return 0.0 if direction == "SHORT" else e * 1e6
+
+
+STALE_CLOSE_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000
+
+
+def _stale_trade_recent(entry_time) -> bool:
+    """False, если вход stale-строки старше STALE_CLOSE_MAX_AGE_MS (историю не трогаем)."""
+    ms = _stale_close_entry_ms(entry_time)
+    if ms <= 0:
+        return True
+    return (int(time.time() * 1000) - ms) <= STALE_CLOSE_MAX_AGE_MS
+
+
+async def _stale_backstop_executed(cfg, order_mgr, algo_id, log) -> bool:
+    """True только если биржевой backstop (botsl_*) реально исполнился.
+
+    Модульная копия _exchange_backstop_executed: та объявлена локально внутри
+    _run_live_or_paper и недоступна из _sync_position_on_start.
+    """
+    if not algo_id or order_mgr is None or getattr(order_mgr, "client", None) is None:
+        return False
+    try:
+        resp = await order_mgr.client.futures_get_algo_order(algoId=int(algo_id))
+    except Exception as e:
+        log.debug(f"[SYNC] backstop algo status read failed | algoId={algo_id}: {e}")
+        return False
+    if not isinstance(resp, dict):
+        return False
+    status = str(resp.get("algoStatus") or resp.get("status") or "").upper()
+    actual = resp.get("actualOrderId") or resp.get("actual_order_id")
+    return bool(actual) and status in ("TRIGGERED", "FINISHED", "FILLED")
+
+
+async def _classify_stale_close_reason(
+    cfg, tracker, order_mgr, log, *,
+    pos=None, direction: str = "LONG", entry_ms: int = 0,
+    tp1_price: float = 0.0, tp2_price: float = 0.0,
+    is_reverse: bool = False, mode: Optional[str] = None,
+    backstop_algo_id=None,
+) -> str:
+    """Причина закрытия осиротевшей строки trades — без хардкода SL.
+
+    paper            -> paper_close (филлов нет);
+    live reverse     -> REVERSE_BACKSTOP (stop реально исполнился) /
+                        REVERSE_BE (выход у TP) / REVERSE_MARKET;
+    live non-reverse -> TP1 / TP2 (закрывающий филл у уровня) / stale_close.
+    "SL" не выдаётся никогда: он допустим только при фактическом исполнении
+    stop-ордера, а здесь биржа уже во флэте и причина из ордеров неизвестна.
+    """
+    eff_mode = mode or getattr(pos, "mode", None) or cfg.mode or "live"
+    if eff_mode == "paper":
+        return "paper_close"
+
+    exit_price = None
+    if entry_ms > 0 and tracker is not None:
+        try:
+            summary = await tracker._exchange_cycle_summary(entry_ms, direction)
+            if summary:
+                exit_price = summary.get("exit_price")
+        except Exception as e:
+            log.debug(f"[SYNC] stale close fill lookup failed: {e}")
+
+    def _matches(level) -> bool:
+        try:
+            return bool(level and exit_price and tracker._price_close(exit_price, float(level)))
+        except Exception:
+            return False
+
+    if is_reverse:
+        if await _stale_backstop_executed(cfg, order_mgr, backstop_algo_id, log):
+            return "REVERSE_BACKSTOP"
+        if _matches(tp1_price) or _matches(tp2_price):
+            return "REVERSE_BE"
+        return "REVERSE_MARKET"
+
+    if _matches(tp2_price):
+        return "TP2"
+    if _matches(tp1_price):
+        return "TP1"
+    return "stale_close"
+
+
+async def _close_stale_db_trade(
+    cfg, tracker, order_mgr, log, *,
+    api_url: str, trade_id: int, entry_time,
+    direction: str = "LONG", tp1_price: float = 0.0, tp2_price: float = 0.0,
+    is_reverse: bool = False, mode: Optional[str] = None,
+    pos=None, backstop_algo_id=None,
+) -> float:
+    """Закрывает stale (is_open=1) строку trades по факту флэта на бирже.
+
+    Live: сначала tracker-путь close_open_trade_from_exchange — он заполняет
+    exit_price/qty/commission/net-pnl/exit_time из userTrades (UTC-окно). Если
+    он упал — inline PATCH с расчётным PnL. Paper: филлов нет, пишем нейтральную
+    причину paper_close БЕЗ exit_price. Возвращает pnl.
+    """
+    entry_ms = _stale_close_entry_ms(entry_time)
+    exit_ms = int(time.time() * 1000)
+    if entry_ms > 0:
+        # Не суммируем филлы за пределами разумного окна: иначе в старую
+        # открытую строку попадут сделки чужих циклов.
+        exit_ms = min(exit_ms, entry_ms + STALE_CLOSE_MAX_AGE_MS)
+    reason = await _classify_stale_close_reason(
+        cfg, tracker, order_mgr, log,
+        pos=pos, direction=direction, entry_ms=entry_ms,
+        tp1_price=tp1_price, tp2_price=tp2_price,
+        is_reverse=is_reverse, mode=mode, backstop_algo_id=backstop_algo_id,
+    )
+    is_paper = reason == "paper_close"
+
+    pnl_val = 0.0
+    if not is_paper and entry_ms > 0 and order_mgr:
+        try:
+            real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
+            if real_pnl is not None and abs(real_pnl) > 0.0001:
+                pnl_val = real_pnl
+        except Exception:
+            pass
+
+    if not is_paper:
+        prev_trade_id = tracker._trade_id
+        ok = False
+        try:
+            tracker._trade_id = trade_id
+            ok = await tracker.close_open_trade_from_exchange(
+                exit_reason=reason, direction=direction,
+            )
+        except Exception as e:
+            log.warning(f"[SYNC] tracker close path failed for trade #{trade_id}: {e}")
+            ok = False
+        finally:
+            tracker._trade_id = prev_trade_id
+        if ok:
+            return pnl_val
+
+    # Fallback (tracker-путь упал) либо paper: inline PATCH.
+    try:
+        import requests as sync_requests
+        patch_body = {
+            "is_open": False,
+            "exit_reason": reason,
+            "pnl": round(pnl_val, 4),
+            "exit_time": datetime.utcnow().isoformat(),
+            "status": "closed",
+        }
+        if is_paper:
+            log.info(
+                f"[SYNC] paper trade #{trade_id} closed with neutral reason={reason}; "
+                f"exit_price left empty (no exchange fills)"
+            )
+        await asyncio.to_thread(
+            sync_requests.patch, f"{api_url}/trades/{trade_id}",
+            json=patch_body, timeout=5,
+        )
+    except Exception as e:
+        log.debug(f"[SYNC] inline stale PATCH failed for trade #{trade_id}: {e}")
+    return pnl_val
+
+
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
     order_mgr: OrderManager, log, recovery=None, notifier=None,
@@ -639,31 +989,33 @@ async def _sync_position_on_start(
             # Close stale DB trades with real PnL from Binance
             try:
                 import requests as sync_requests
-                import datetime
-                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
-                trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+                trades_resp = (await asyncio.to_thread(
+                    sync_requests.get, f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5
+                )).json()
                 for trade in (trades_resp.get("trades") or []):
                     if trade.get("is_open"):
                         trade_id = trade["id"]
-                        entry_time_str = trade.get("entry_time", "")
-                        exit_ms = int(__import__("time").time() * 1000)
-                        entry_ms = 0
-                        try:
-                            if entry_time_str:
-                                entry_ms = int(datetime.datetime.fromisoformat(entry_time_str[:19].replace("T", " ").replace("Z", "")).timestamp() * 1000)
-                        except Exception:
-                            pass
-                        real_pnl = None
-                        if entry_ms > 0 and order_mgr:
-                            real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
-                        pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
-                        sync_requests.patch(f"{api_url}/trades/{trade_id}", json={
-                            "is_open": False,
-                            "exit_reason": "SL",
-                            "pnl": round(pnl_val, 4),
-                            "exit_time": datetime.datetime.utcnow().isoformat(),
-                            "status": "closed",
-                        }, timeout=5)
+                        stale_entry_time = trade.get("entry_time") or (sync_pos.entry_timestamp if sync_pos else None)
+                        if not _stale_trade_recent(stale_entry_time):
+                            log.warning(
+                                f"[SYNC] Skipping stale trade #{trade_id} for {cfg.symbol}: "
+                                f"entry older than {STALE_CLOSE_MAX_AGE_MS // 3600000}h"
+                            )
+                            continue
+                        pnl_val = await _close_stale_db_trade(
+                            cfg, tracker, order_mgr, log,
+                            api_url=api_url,
+                            trade_id=trade_id,
+                            entry_time=stale_entry_time,
+                            direction=trade.get("direction") or (sync_pos.direction if sync_pos else "LONG"),
+                            tp1_price=trade.get("tp1_price") or (sync_pos.tp1_price if sync_pos else 0.0),
+                            tp2_price=trade.get("tp2_price") or (sync_pos.tp2_price if sync_pos else 0.0),
+                            is_reverse=bool(getattr(sync_pos, "is_reverse", False)),
+                            mode=getattr(sync_pos, "mode", None) or trade.get("mode"),
+                            pos=sync_pos,
+                            backstop_algo_id=getattr(sync_pos, "backstop_algo_id", None),
+                        )
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
                             await recovery.report(pnl=pnl_val)
@@ -692,31 +1044,30 @@ async def _sync_position_on_start(
                 await recovery.release_all_for_symbol()
             try:
                 import requests as sync_requests
-                import datetime
-                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
-                trades_resp = sync_requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+                trades_resp = (await asyncio.to_thread(
+                    sync_requests.get, f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5
+                )).json()
                 for trade in (trades_resp.get("trades") or []):
                     if trade.get("is_open"):
                         trade_id = trade["id"]
-                        entry_time_str = trade.get("entry_time", "")
-                        exit_ms = int(__import__("time").time() * 1000)
-                        entry_ms = 0
-                        try:
-                            if entry_time_str:
-                                entry_ms = int(datetime.datetime.fromisoformat(entry_time_str[:19].replace("T", " ").replace("Z", "")).timestamp() * 1000)
-                        except Exception:
-                            pass
-                        real_pnl = None
-                        if entry_ms > 0 and order_mgr:
-                            real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
-                        pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
-                        sync_requests.patch(f"{api_url}/trades/{trade_id}", json={
-                            "is_open": False,
-                            "pnl": round(pnl_val, 4),
-                            "exit_reason": "SL",
-                            "exit_time": datetime.datetime.utcnow().isoformat(),
-                            "status": "closed",
-                        }, timeout=5)
+                        stale_entry_time = trade.get("entry_time")
+                        if not _stale_trade_recent(stale_entry_time):
+                            log.warning(
+                                f"[SYNC] Skipping stale trade #{trade_id} for {cfg.symbol}: "
+                                f"entry older than {STALE_CLOSE_MAX_AGE_MS // 3600000}h"
+                            )
+                            continue
+                        pnl_val = await _close_stale_db_trade(
+                            cfg, tracker, order_mgr, log,
+                            api_url=api_url,
+                            trade_id=trade_id,
+                            entry_time=stale_entry_time,
+                            direction=trade.get("direction") or "LONG",
+                            tp1_price=trade.get("tp1_price") or 0.0,
+                            tp2_price=trade.get("tp2_price") or 0.0,
+                            mode=trade.get("mode"),
+                        )
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
                             await recovery.report(pnl=pnl_val)
@@ -782,30 +1133,23 @@ async def _sync_position_on_start(
                 # Fetch real PnL and close DB trade
                 try:
                     import requests as s2
-                    import datetime
-                    api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+                    api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
                     trades_resp = s2.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=10", timeout=5).json()
                     for trade in (trades_resp.get("trades") or []):
                         if trade.get("is_open") and pos.entry_timestamp:
-                            entry_ms = 0
-                            try:
-                                if isinstance(pos.entry_timestamp, str):
-                                    entry_ms = int(datetime.datetime.fromisoformat(pos.entry_timestamp).timestamp() * 1000)
-                                else:
-                                    entry_ms = int(pos.entry_timestamp.timestamp() * 1000)
-                            except Exception:
-                                pass
-                            exit_ms = int(__import__("time").time() * 1000)
-                            real_pnl = None
-                            if entry_ms > 0:
-                                real_pnl = await order_mgr.get_realized_pnl(cfg.symbol, entry_ms, exit_ms)
-                            pnl_val = real_pnl if (real_pnl is not None and abs(real_pnl) > 0.0001) else 0.0
-                            s2.patch(f"{api_url}/trades/{trade['id']}", json={
-                                "is_open": False, "exit_reason": "SL",
-                                "pnl": round(pnl_val, 4),
-                                "exit_time": datetime.datetime.utcnow().isoformat(),
-                                "status": "closed",
-                            }, timeout=5)
+                            pnl_val = await _close_stale_db_trade(
+                                cfg, tracker, order_mgr, log,
+                                api_url=api_url,
+                                trade_id=trade["id"],
+                                entry_time=trade.get("entry_time") or pos.entry_timestamp,
+                                direction=pos.direction,
+                                tp1_price=pos.tp1_price,
+                                tp2_price=pos.tp2_price,
+                                is_reverse=bool(getattr(pos, "is_reverse", False)),
+                                mode=getattr(pos, "mode", None),
+                                pos=pos,
+                                backstop_algo_id=getattr(pos, "backstop_algo_id", None),
+                            )
                             log.info(f"[SYNC] Closed stale trade #{trade['id']} after external close | pnl={pnl_val:.4f}")
                             if pnl_val < 0 and recovery:
                                 await recovery.report(pnl=pnl_val)
@@ -890,7 +1234,7 @@ async def _sync_position_on_start(
     if recovery and cfg.mode == "live":
         import requests
         try:
-            api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+            api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
             chains = requests.get(f"{api_url}/recovery/chains", timeout=5).json()
             for ch in chains:
                 if ch.get("locked_by") == cfg.symbol and ch.get("status") == "locked":
@@ -907,7 +1251,7 @@ async def _sync_position_on_start(
     # сделки в БД нет.
     import requests
     try:
-        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5000/api")
+        api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
         existing = requests.get(f"{api_url}/trades?symbol={cfg.symbol}&limit=500", timeout=5).json()
         existing_open = None
         for old_trade in (existing.get("trades") or []):
@@ -1011,7 +1355,10 @@ async def main():
     
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(config_path)
-    log = get_logger(log_file=cfg.log_file, mode=cfg.mode, symbol=cfg.symbol)
+    _log_base = os.path.basename(cfg.log_file or f"{cfg.symbol.lower()}.log")
+    log = get_logger(
+        log_file=os.path.join("logs", BOT_ENV, _log_base), mode=cfg.mode, symbol=cfg.symbol
+    )
 
     log.info(f"Bot starting | mode={cfg.mode} symbol={cfg.symbol} tf={cfg.timeframe}")
     log.info(
@@ -1073,6 +1420,15 @@ async def _run_live_or_paper(
     order_mgr = OrderManager(cfg, log, client=client)
     tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr, notifier=notifier)
     handler   = SignalHandler(cfg, log)
+
+    # Плечо зажимается по максимуму символа сразу на старте (и логируется там
+    # же), чтобы первое же открытие позиции не упало с -4028. _set_leverage
+    # никогда не бросает, поэтому startup не может сломаться из-за этого.
+    if cfg.mode == "live":
+        try:
+            await order_mgr._set_leverage()
+        except Exception as e:
+            log.warning(f"[STARTUP] leverage init failed: {e}")
 
     # LLM-фильтр создаётся ОДИН раз на весь цикл жизни бота: circuit breaker и
     # статус провайдеров должны сохраняться между сигналами (иначе при каждом
@@ -1200,10 +1556,15 @@ async def _run_live_or_paper(
         is_live_close = (pos_mode == "live")
         is_live = (pos_mode == "live")
 
-        async def _force_flat_after_reverse(direction: str) -> None:
+        async def _force_flat_after_reverse(direction: str, closed_by: str = "market") -> None:
             """После закрытия reverse-ноги добиваем биржевой остаток выше пыли и
             сбрасываем трекер в плоское состояние (total_qty/remaining_qty не
-            должны оставаться рассинхронизированными)."""
+            должны оставаться рассинхронизированными).
+
+            closed_by — подтверждённая причина закрытия ("tp"/"backstop"/
+            "market"), используется как fallback-метка, если классификатор
+            ещё не выставил _last_reverse_reason. Добивание остатка рынком —
+            это bot-initiated market, т.е. REVERSE_MARKET."""
             if not is_live_close:
                 return
             try:
@@ -1249,9 +1610,51 @@ async def _run_live_or_paper(
             # Остаток reverse-ноги мог добраться рынком уже ПОСЛЕ снимка
             # _exchange_cycle_summary в момент детекта TP — пересчитываем строку
             # по полному окну [вход, флэт], сохраняя текущую reverse-метку.
-            await tracker.refinalize_cycle_after_flat(
-                getattr(tracker, "_last_reverse_reason", None)
+            reason = getattr(tracker, "_last_reverse_reason", None)
+            if not reason:
+                reason = _REVERSE_CLOSED_BY_REASON.get(closed_by, "REVERSE_MARKET")
+            await tracker.refinalize_cycle_after_flat(reason)
+
+        async def _finalize_skipped_reverse(
+            leg_dir: str, reason: str, preset_before, price: float,
+            candle_ms: int, report: bool,
+        ) -> None:
+            """FIX 2: reverse не добавил ногу (nothing to hedge / книга уже в
+            ноль на T). НЕ вызываем refinalize_cycle_after_flat — в paper он
+            подтягивал биржевые (live) филлы и порождал фантомную строку с чужим
+            exit (#24156). Если позиция реально во флэте — финализируем как
+            обычно; если нет — предупреждаем и оставляем строку как есть."""
+            flat = False
+            try:
+                if is_live_close:
+                    order_mgr._invalidate_position_cache()
+                    real_q = await order_mgr._get_real_position_qty(leg_dir)
+                    flat = (real_q <= 0)
+                else:
+                    flat = (
+                        tracker.position is None
+                        or tracker.position.remaining_qty <= 0.000001
+                    )
+            except Exception as e:
+                log.warning(f"[REVERSE] skipped-reverse flat check failed: {e}")
+            if not flat:
+                log.warning(
+                    f"[REVERSE] reverse skipped ({reason}) and position not flat "
+                    f"| dir={leg_dir} — leaving trade row untouched"
+                )
+                events.warning(
+                    f"REVERSE_SKIP | {reason} | dir={leg_dir} — "
+                    f"position not flat, trade row left untouched"
+                )
+                return
+            pnl = await tracker.apply_hit_async(
+                "SL", price, candle_ms, closed_by="market"
             )
+            if preset_before and tracker.position is None:
+                _on_position_closed(preset_before)
+            events.info(f"SL_CLOSE | reverse skipped ({reason}); pnl={pnl}")
+            if report:
+                await recovery.report_result(pnl)
 
         # «Отклонённая» (rejected) сделка исключается из глобального счётчика серии
         # убытков и recovery — она не должна влиять на риск-контроль (как и на статистику).
@@ -1259,7 +1662,20 @@ async def _run_live_or_paper(
         if hit == "TP1" and not pos.is_recovery:
             events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
             preset_before = getattr(pos, 'preset', None)
-            pnl = await tracker.apply_hit_async(hit, current_price, candle_time_ms)
+            # FIX B: reverse-нога не форсируется рынком, пока рабочий TP-лимит
+            # ещё может исполниться (grace -> marketable limit -> market).
+            closed_by = None
+            if pos.is_reverse:
+                closed_by, _tp_px = await _ensure_reverse_tp_fill(pos)
+                if closed_by is None:
+                    events.info(
+                        f"[TP_CLOSE] reverse TP not confirmed | tp={pos.tp1_price} "
+                        f"price={current_price} — position left open"
+                    )
+                    return
+            pnl = await tracker.apply_hit_async(
+                hit, current_price, candle_time_ms, closed_by=closed_by
+            )
             if preset_before and tracker.position is None:
                 _on_position_closed(preset_before)
             new_sl = tracker.position.sl_price if tracker.position else 'N/A'
@@ -1289,7 +1705,7 @@ async def _run_live_or_paper(
                 # иначе останется висячий closePosition-ордер.
                 await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
                 if pos.is_reverse:
-                    await _force_flat_after_reverse(pos.direction)
+                    await _force_flat_after_reverse(pos.direction, closed_by or "market")
                 await recovery.report_result(pnl, simulated=is_rejected)
         elif hit == "TP1" and pos.is_recovery:
             events.info(f"TP1_HIT_RECOVERY | price={current_price} qty={pos.remaining_qty}")
@@ -1353,6 +1769,290 @@ async def _run_live_or_paper(
             orig_sl = pos.sl_price
             orig_trade_id = getattr(tracker, "_trade_id", None)
 
+            if pos.is_reverse and not is_rejected:
+                # ================= REVERSE CHAIN =================
+                # Виртуальный SL обратной ноги сработал (рынок пошёл назад):
+                # пробуем ещё один разворот к исходной стороне, сайзя ВСЮ
+                # накопленную книгу + уже реализованный PnL цикла в ноль.
+                preset_before = getattr(pos, 'preset', None)
+                chain_step = int(getattr(pos, "reverse_chain_step", 0) or 0)
+                chain_max = int(getattr(cfg, "reverse_chain_max", 2) or 0)
+                # Снимаем защитные ордера текущей обратной ноги.
+                try:
+                    await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+                except Exception as e:
+                    log.debug(f"[REVERSE] cancel chain-leg orders failed: {e}")
+                # Реальное знаковое нетто N (positionAmt), вход книги A и её
+                # НЕреализованный PnL U (для сайзинга FIX 1).
+                unrealized = None
+                position_entry = None
+                try:
+                    order_mgr._invalidate_position_cache()
+                    real_net_qty = await order_mgr._get_real_position_qty(pos.direction)
+                    real_net_entry = await order_mgr._get_real_position_entry(pos.direction)
+                    pos_info = await order_mgr.get_position_info()
+                    if pos_info:
+                        unrealized = float(pos_info.get("unrealized_pnl") or 0.0)
+                        position_entry = float(pos_info.get("entry_price") or 0.0) or None
+                except Exception as e:
+                    log.warning(f"[REVERSE] chain real position fetch failed: {e}")
+                    real_net_qty, real_net_entry = -1.0, None
+                if real_net_qty > 0:
+                    N = real_net_qty if pos.direction == "LONG" else -real_net_qty
+                else:
+                    N = pos.remaining_qty if pos.direction == "LONG" else -pos.remaining_qty
+                cycle_entry = (
+                    real_net_entry if (real_net_entry and real_net_entry > 0)
+                    else pos.entry_price
+                )
+                # Уже реализованный net-PnL цикла (реализовано − комиссия).
+                NET_REALIZED, _, _ = await tracker.cycle_realized_net()
+                # Если биржевые филлы/PnL недоступны (rate-limit/сбой, частый случай
+                # на загруженном testnet), НЕ отдаём net_realized=None: иначе
+                # open_reverse_position падает в legacy-сайзинг, который игнорирует
+                # накопленный убыток цикла и открывает крошечный хедж → на шаге 3
+                # цикл закрывается в минус (REVERSE_BE). Берём накопленный realized
+                # из состояния позиции (реализовано на прошлых разворотах).
+                if NET_REALIZED is None:
+                    NET_REALIZED = float(getattr(pos, "reversed_from_pnl", 0.0) or 0.0)
+                    log.warning(
+                        f"[REVERSE] exchange net_realized unavailable (step={chain_step}) — "
+                        f"using reversed_from_pnl={NET_REALIZED:+.4f}"
+                    )
+                trigger_p = (
+                    pos.sl_price if (pos.sl_price and pos.sl_price > 0) else current_price
+                )
+                reverse_result = await order_mgr.open_reverse_position(
+                    original_direction=pos.direction,
+                    original_entry=cycle_entry,
+                    original_qty=abs(N),
+                    sl_price=trigger_p,
+                    mode=pos_mode,
+                    net_position=N,
+                    net_realized=NET_REALIZED,
+                    step=chain_step,
+                    unrealized=unrealized,
+                    # Если биржевой entry недоступен (exchange=unavailable, частый
+                    # случай при сбоях сети) — берём entry из трекера, иначе A=0 и
+                    # U_eff=0 → хедж сайзится крошечным и цикл не выходит в ноль.
+                    position_entry=position_entry or cycle_entry,
+                )
+                if reverse_result:
+                    rev_entry, rev_qty, rev_tp = reverse_result
+                    _REVERSE_CHAIN_FAILS.pop(cfg.symbol, None)
+                    if rev_qty <= 0:
+                        # FIX 1/2: нога не добавлена (книга уже выходит в ноль
+                        # на T либо хеджировать нечего) — не открываем
+                        # фантомную reverse-ногу и не перефинализируем строку.
+                        await _finalize_skipped_reverse(
+                            pos.direction, "nothing to hedge", preset_before,
+                            current_price, candle_time_ms, not is_rejected,
+                        )
+                        return
+                    if N > 0:
+                        new_dir = "SHORT"
+                    elif N < 0:
+                        new_dir = "LONG"
+                    else:
+                        new_dir = "SHORT" if pos.direction == "LONG" else "LONG"
+                    _tp_safe = _safe_reverse_tp(new_dir, rev_entry, rev_tp)
+                    if _tp_safe != float(rev_tp or 0.0):
+                        log.error(
+                            f"[REVERSE] invalid reverse TP | dir={new_dir} entry={rev_entry} "
+                            f"tp={rev_tp} — virtual TP disabled"
+                        )
+                    rev_tp = _tp_safe
+                    prior_realized = NET_REALIZED if NET_REALIZED is not None else (
+                        getattr(pos, "reversed_from_pnl", 0.0)
+                        + tracker._calc_pnl(pos.direction, cycle_entry, trigger_p, abs(N))
+                    )
+                    cycle_orig_dir = getattr(pos, "reversed_from_direction", "") or pos.direction
+                    cycle_orig_entry = getattr(pos, "reversed_from_entry", 0.0) or cycle_entry
+                    cycle_orig_qty = getattr(pos, "reversed_from_qty", 0.0) or abs(N)
+                    rev_signal = Signal(
+                        direction=new_dir,
+                        entry_price=rev_entry,
+                        sl_price=0.0,
+                        tp1_price=rev_tp,
+                        tp2_price=rev_tp,
+                        timestamp=pd.Timestamp.now(),
+                        preset=preset_before or "reverse",
+                    )
+                    tracker.open(
+                        rev_signal, rev_qty,
+                        is_reverse=True,
+                        reversed_from_pnl=prior_realized,
+                        reversed_from_direction=cycle_orig_dir,
+                        reversed_from_qty=cycle_orig_qty,
+                        reversed_from_entry=cycle_orig_entry,
+                        reverse_chain_step=chain_step + 1,
+                    )
+                    # Та же открытая строка trades продолжает цикл.
+                    tracker._trade_id = orig_trade_id
+                    await tracker.update_open_trade(new_dir, rev_entry, rev_qty)
+                    tracker._save_state()
+                    # Биржевой safety-net новой ноги — от её входа, как сегодня.
+                    if is_live:
+                        # Backstop шире ВИРТУАЛЬНОГО SL ноги (а не её входа): иначе
+                        # при ступенчатом SL (вариант B, 0.8→4.3%) backstop на +2%
+                        # от входа сработал бы раньше виртуального SL и порвал цепочку.
+                        _rev_sl = (
+                            tracker.position.sl_price
+                            if tracker.position is not None else 0.0
+                        ) or rev_entry
+                        order_mgr.backstop_algo_id = await order_mgr._place_exchange_backstop(
+                            new_dir, _rev_sl, qty=rev_qty
+                        )
+                        if tracker.position is not None:
+                            tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                            tracker._save_state()
+                    events.info(
+                        f"REVERSE_CHAIN_OPEN | step={chain_step + 1}/{chain_max} "
+                        f"{new_dir} entry={rev_entry:.4f} qty={rev_qty:.6f} tp={rev_tp:.4f} "
+                        f"N={N} net_realized={NET_REALIZED}"
+                    )
+                    if is_live:
+                        await notifier.send_message(
+                            f"🔁 REVERSE_CHAIN step={chain_step + 1} {cfg.symbol} {new_dir} "
+                            f"| Entry={rev_entry:.4f} Qty={rev_qty:.6f} TP={rev_tp:.4f}"
+                        )
+                else:
+                    # Cap исчерпан или шаг не открылся — принудительно закрываем
+                    # весь нетто. Cap → отдельная метка REVERSE_CHAIN_STOP.
+                    cap_reached = chain_max > 0 and chain_step >= chain_max
+                    closed_by = "chain_stop" if cap_reached else "market"
+                    # FIX 2: не-cap означает, что reverse реально не открылся
+                    # (nothing to hedge / ошибка). Если позиция ещё не во флэте —
+                    # НЕ перефинализируем строку по чужим биржевым филлам: в paper
+                    # это породило фантомный дубль #24156 с live-exit.
+                    if not cap_reached:
+                        flat_before = False
+                        try:
+                            if is_live_close:
+                                order_mgr._invalidate_position_cache()
+                                _rq = await order_mgr._get_real_position_qty(pos.direction)
+                                flat_before = (_rq <= 0)
+                            else:
+                                flat_before = (
+                                    tracker.position is None
+                                    or tracker.position.remaining_qty <= 0.000001
+                                )
+                        except Exception as e:
+                            log.warning(f"[REVERSE] chain flat check failed: {e}")
+                        if not flat_before:
+                            _now = time.time()
+                            _fail = _REVERSE_CHAIN_FAILS.get(cfg.symbol)
+                            if _fail is None:
+                                _fail = [0, _now]
+                            _fail[0] += 1
+                            _REVERSE_CHAIN_FAILS[cfg.symbol] = _fail
+                            _fails, _first_ts = _fail
+                            _persistent = (
+                                _fails >= REVERSE_CHAIN_MAX_ATTEMPTS
+                                and (_now - _first_ts) >= REVERSE_CHAIN_FAIL_WINDOW_SEC
+                            )
+                            if not _persistent:
+                                log.warning(
+                                    f"[REVERSE] reverse skipped and position not flat | "
+                                    f"step={chain_step}/{chain_max} N={N} "
+                                    f"attempt={_fails} over {int(_now - _first_ts)}s — "
+                                    f"leaving trade row untouched"
+                                )
+                                events.warning(
+                                    f"REVERSE_SKIP | step={chain_step}/{chain_max} N={N} "
+                                    f"attempt={_fails} over {int(_now - _first_ts)}s "
+                                    f"— reverse skipped, position not flat, row untouched"
+                                )
+                                # Позиция не закрыта и строка не тронута — серию
+                                # убытков не увеличиваем (учтётся при реальном close).
+                                # Защита снималась перед попыткой reverse — вернём
+                                # биржевой backstop, чтобы нога не осталась без стопа.
+                                if is_live_close:
+                                    # Вернём и TP-лимит, и backstop: защита снималась
+                                    # перед попыткой reverse; без TP нога закроется по рынку.
+                                    _tp_px = pos.tp1_price or pos.tp2_price or 0.0
+                                    if _tp_px and _tp_px > 0:
+                                        try:
+                                            await order_mgr._place_tp_limit(
+                                                pos.direction, _tp_px, pos.remaining_qty
+                                            )
+                                        except Exception as e:
+                                            log.warning(f"[REVERSE] re-place TP after failed reverse: {e}")
+                                    try:
+                                        order_mgr.backstop_algo_id = await order_mgr._place_exchange_backstop(
+                                            pos.direction, pos.entry_price, qty=pos.remaining_qty
+                                        )
+                                        if tracker.position is not None:
+                                            tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                                            tracker._save_state()
+                                    except Exception as e:
+                                        log.warning(f"[REVERSE] re-place backstop after failed reverse: {e}")
+                                return
+                            # Reverse стабильно не открывается (напр. -2027 max position
+                            # at leverage) — прекращаем ретраить каждый тик и
+                            # принудительно закрываем цикл.
+                            log.error(
+                                f"[REVERSE] chain open failed {_fails}x over "
+                                f"{int(_now - _first_ts)}s (step={chain_step}/{chain_max} "
+                                f"N={N}) — force-closing to stop retry loop"
+                            )
+                            events.warning(
+                                f"REVERSE_CHAIN_RETRY_EXHAUSTED | step={chain_step}/{chain_max} "
+                                f"N={N} attempts={_fails} — force-closing"
+                            )
+                            _REVERSE_CHAIN_FAILS.pop(cfg.symbol, None)
+                            cap_reached = True
+                            # Отличаем «исчерпан лимит шагов» от «следующая нога не
+                            # открылась» — в БД уйдёт cycle_close_reason=chain_failed.
+                            closed_by = "chain_failed"
+                    # FIX 3: явная метка REVERSE_CHAIN_STOP при force-close по cap
+                    # (раньше она ставилась только в DB-метку).
+                    if cap_reached:
+                        log.info(
+                            f"REVERSE_CHAIN_STOP | step={chain_step}/{chain_max} "
+                            f"N={N} net_realized={NET_REALIZED} P={trigger_p} "
+                            f"— chain limit reached, force-closing"
+                        )
+                        events.info(
+                            f"REVERSE_CHAIN_STOP | step={chain_step}/{chain_max} "
+                            f"N={N} net_realized={NET_REALIZED} P={trigger_p} "
+                            f"— chain limit reached, force-closing"
+                        )
+                    events.warning(
+                        f"[REVERSE] chain {'limit reached' if cap_reached else 'open failed'} "
+                        f"(step={chain_step}/{chain_max}) — force-closing {pos.direction}"
+                    )
+                    try:
+                        await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
+                    except Exception as e:
+                        log.debug(f"[REVERSE] cancel before chain force-close failed: {e}")
+                    if is_live_close:
+                        try:
+                            closed = await order_mgr.close_position_market(pos.direction, mode=pos_mode)
+                            if not closed:
+                                closed = await order_mgr.close_dust(pos.direction, mode=pos_mode)
+                        except Exception as e:
+                            log.error(f"[REVERSE] chain force-close failed: {e}")
+                    pnl = await tracker.apply_hit_async(
+                        "SL", current_price, candle_time_ms, closed_by=closed_by
+                    )
+                    if preset_before and tracker.position is None:
+                        _on_position_closed(preset_before)
+                    if is_live_close:
+                        await _force_flat_after_reverse(pos.direction, closed_by)
+                    else:
+                        await tracker.refinalize_cycle_after_flat(
+                            "REVERSE_CHAIN_STOP" if cap_reached else None
+                        )
+                    events.info(
+                        f"SL_CLOSE | chain {'stop' if cap_reached else 'fallback'}; pnl={pnl}"
+                    )
+                    if not is_rejected:
+                        await recovery.report_result(pnl)
+                _consecutive_losses += 1
+                _last_loss_time = time.time()
+                return
+
             reverse_result = None
             if not is_rejected and not pos.is_recovery:
                 # Снимаем TP-ордера исходной позиции (SL на бирже не выставляется),
@@ -1364,10 +2064,16 @@ async def _run_live_or_paper(
                 # REVERSE sizing: сайзим от РЕАЛЬНОЙ позиции на бирже, а не от
                 # tracker.remaining_qty — иначе накопленный неттинг-остаток
                 # раздувает следующий reverse.
+                unrealized = None
+                position_entry = None
                 try:
                     order_mgr._invalidate_position_cache()
                     real_rev_qty = await order_mgr._get_real_position_qty(orig_direction)
                     real_rev_entry = await order_mgr._get_real_position_entry(orig_direction)
+                    pos_info = await order_mgr.get_position_info()
+                    if pos_info:
+                        unrealized = float(pos_info.get("unrealized_pnl") or 0.0)
+                        position_entry = float(pos_info.get("entry_price") or 0.0) or None
                 except Exception as e:
                     log.warning(f"[REVERSE] real position fetch failed: {e}")
                     real_rev_qty, real_rev_entry = -1.0, None
@@ -1393,17 +2099,60 @@ async def _run_live_or_paper(
                         f"[REVERSE] source entry | tracker={pos.entry_price:.6f} "
                         f"exchange=unavailable — using tracker"
                     )
-                reverse_result = await order_mgr.open_reverse_position(
-                    original_direction=orig_direction,
-                    original_entry=orig_entry,
-                    original_qty=orig_qty,
-                    sl_price=orig_sl,
-                    mode=pos_mode,
+                # Знаковое нетто N исходной ноги для unified fee/profit-aware
+                # сайзинга 1-го reverse (net_realized=0 — ещё ничего не закрыто).
+                # exchange-недоступность U/A не мешает: U_eff = N*(P-A) по A.
+                net_position = (
+                    orig_qty if orig_direction == "LONG" else -orig_qty
+                ) if orig_qty > 0 else None
+                # Первый разворот: пробуем несколько раз. При транзиентных ошибках
+                # биржи (напр. -4164/-2027, лаг цены после сбоя WS/REST) НЕ закрываем
+                # первую ногу по SL сразу — иначе цикл обрывается на 1-м круге.
+                reverse_result = None
+                for _attempt in range(1, 4):
+                    try:
+                        reverse_result = await order_mgr.open_reverse_position(
+                            original_direction=orig_direction,
+                            original_entry=orig_entry,
+                            original_qty=orig_qty,
+                            sl_price=orig_sl,
+                            mode=pos_mode,
+                    net_position=net_position,
+                    net_realized=0.0 if net_position is not None else None,
+                    unrealized=unrealized,
+                    # См. chain-ветку: fallback на entry трекера, иначе A=0 → U_eff=0
+                    # → крошечный хедж и цикл закрывается в минус.
+                    position_entry=position_entry or orig_entry,
                 )
+                    except Exception as _e:
+                        log.warning(f"[REVERSE] 1st-leg attempt {_attempt}/3 error: {_e}")
+                        reverse_result = None
+                    if reverse_result:
+                        break
+                    if _attempt < 3:
+                        log.warning(
+                            f"[REVERSE] 1st-leg reverse not opened — retry {_attempt}/3 in 2s"
+                        )
+                        await asyncio.sleep(2.0)
 
             if reverse_result:
                 rev_entry, rev_qty, rev_tp = reverse_result
+                if rev_qty <= 0:
+                    # FIX 2: хеджировать нечего — нога не добавлена, не открываем
+                    # фантомную reverse-ногу и не перефинализируем строку.
+                    await _finalize_skipped_reverse(
+                        orig_direction, "nothing to hedge", preset_before,
+                        current_price, candle_time_ms, not is_rejected,
+                    )
+                    return
                 reverse_dir = "SHORT" if orig_direction == "LONG" else "LONG"
+                _tp_safe = _safe_reverse_tp(reverse_dir, rev_entry, rev_tp)
+                if _tp_safe != float(rev_tp or 0.0):
+                    log.error(
+                        f"[REVERSE] invalid reverse TP | dir={reverse_dir} entry={rev_entry} "
+                        f"tp={rev_tp} — virtual TP disabled"
+                    )
+                rev_tp = _tp_safe
                 rev_signal = Signal(
                     direction=reverse_dir,
                     entry_price=rev_entry,
@@ -1423,6 +2172,7 @@ async def _run_live_or_paper(
                     reversed_from_direction=orig_direction,
                     reversed_from_qty=orig_qty,
                     reversed_from_entry=orig_entry,
+                    reverse_chain_step=1,
                 )
                 # Сохраняем trade_id исходной, чтобы при закрытии reverse та же
                 # запись в БД была обновлена как единый результат REVERSE.
@@ -1432,13 +2182,19 @@ async def _run_live_or_paper(
                 # цикл закроется на этой же строке как единый REVERSE.
                 await tracker.update_open_trade(reverse_dir, rev_entry, rev_qty)
                 tracker._save_state()
-                # Биржевой safety-net для НОВОЙ (обратной) ноги. У реверса нет
-                # виртуального SL, поэтому опорный уровень — цена входа: backstop
-                # встанет на exchange_sl_backstop_pct% дальше от неё. Только для
-                # live-ноги (в paper реального ордера на бирже нет).
+                # Биржевой safety-net для НОВОЙ (обратной) ноги. Опорный уровень —
+                # цена входа: backstop встанет на exchange_sl_backstop_pct% дальше
+                # от неё. Виртуальный SL реверса (reverse_sl_pct) ведёт цепочку.
+                # Только для live-ноги (в paper реального ордера на бирже нет).
                 if is_live:
+                    # Backstop шире ВИРТУАЛЬНОГО SL ноги (см. chain-ветку выше):
+                    # при ступенчатом SL backstop от входа порвал бы цепочку.
+                    _rev_sl = (
+                        tracker.position.sl_price
+                        if tracker.position is not None else 0.0
+                    ) or rev_entry
                     order_mgr.backstop_algo_id = await order_mgr._place_exchange_backstop(
-                        reverse_dir, rev_entry, qty=rev_qty
+                        reverse_dir, _rev_sl, qty=rev_qty
                     )
                     if tracker.position is not None:
                         tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
@@ -1578,7 +2334,30 @@ async def _run_live_or_paper(
                                 events.warning(
                                     f"POSITION_SYNC | Full close detected as {hit_type} at price={current_price}"
                                 )
-                                pnl = await tracker.apply_hit_async(hit_type, current_price, candle_time_ms)
+                                # FIX C: внешнее закрытие reverse-ноги. Причину
+                                # определяем по биржевым свидетельствам: реально
+                                # исполненный backstop, исполненный TP-лимит, иначе
+                                # bot-initiated/ручное/гэп = market.
+                                closed_by = None
+                                if pos.is_reverse:
+                                    if await _exchange_backstop_executed(pos):
+                                        closed_by = "backstop"
+                                        events.warning(
+                                            "POSITION_SYNC | reverse backstop exercised "
+                                            "→ REVERSE_BACKSTOP"
+                                        )
+                                    elif await _reverse_tp_limit_filled(pos):
+                                        closed_by = "tp"
+                                        events.warning(
+                                            "POSITION_SYNC | reverse TP limit filled "
+                                            "→ REVERSE_BE"
+                                        )
+                                    else:
+                                        closed_by = "market"
+                                pnl = await tracker.apply_hit_async(
+                                    hit_type, current_price, candle_time_ms,
+                                    closed_by=closed_by,
+                                )
                                 closed_qty = pos.remaining_qty
                                 preset_before = pos.preset if hasattr(pos, 'preset') else None
                                 if preset_before and tracker.position is None:
@@ -1722,18 +2501,19 @@ async def _run_live_or_paper(
                     _consecutive_losses = 0
                     _last_loss_time = 0.0
                     log.info(f"[LOSS_STREAK] Cooldown passed, resetting consecutive losses counter")
-            if _consecutive_losses >= 7:
-                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 7")
-                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_7")
-                return
-            if _consecutive_losses >= 5:
-                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 5")
-                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_5")
-                return
-            if _consecutive_losses >= 3:
-                log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 3")
-                await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_3")
-                return
+            if getattr(cfg, "loss_streak_skip_enabled", True):
+                if _consecutive_losses >= 7:
+                    log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 7")
+                    await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_7")
+                    return
+                if _consecutive_losses >= 5:
+                    log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 5")
+                    await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_5")
+                    return
+                if _consecutive_losses >= 3:
+                    log.debug(f"[LOSS_STREAK] Skip signal for {cfg.symbol}: {_consecutive_losses} consecutive losses >= 3")
+                    await _track_skipped_signal(reporter, raw_signal, cfg, "skip:loss_streak_3")
+                    return
 
             signal = raw_signal
             signal_data = _build_signal_data(signal, cfg)
@@ -1931,6 +2711,23 @@ async def _run_live_or_paper(
                             f"qty={stale_qty:.6f}"
                         )
 
+            # relay-only: свои сигналы не торгуем (вход только из testnet-релея).
+            if await _is_relay_only(cfg, log):
+                log.debug("[RELAY] relay-only mode — own entry skipped")
+                return
+            # Режим auto пока не реализован (заглушка) — новые позиции не открываем.
+            if getattr(cfg, "trade_mode", "manual") == "auto":
+                log.info(f"[TRADE_MODE] auto not implemented yet — entry skipped ({cfg.symbol})")
+                return
+            # ARM-гейт (live): торговля только после явного arm в UI.
+            if os.getenv("REQUIRE_ARM", "false").lower() == "true" and not await _is_armed(cfg, log):
+                log.info(f"[ARM] {cfg.symbol} not armed — entry skipped")
+                await _track_skipped_signal(reporter, signal, cfg, "skip:not_armed")
+                return
+            # Мягкая остановка: новые входы запрещены, текущую позицию доводим по логике.
+            if _stop_requested:
+                log.info("[STOP] graceful stop requested — new entries disabled")
+                return
             result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
             if result is not None:
                 entry_price, qty = result[0], result[1]
@@ -1982,6 +2779,23 @@ async def _run_live_or_paper(
                 if tracker.position is not None:
                     tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
                     tracker._save_state()
+                # Релей testnet→live: публикуем вход + уровни стопа/тейков
+                # (только если задан SIGNAL_RELAY_URL; live не публикует).
+                if os.getenv("SIGNAL_RELAY_URL"):
+                    try:
+                        await reporter.publish_relay_signal({
+                            "symbol": cfg.symbol,
+                            "kind": "entry",
+                            "direction": signal.direction,
+                            "entry_price": entry_price,
+                            "sl_price": signal.sl_price,
+                            "tp1_price": signal.tp1_price,
+                            "tp2_price": signal.tp2_price,
+                            "preset": signal.preset,
+                            "source": "testnet",
+                        })
+                    except Exception as e:
+                        log.debug(f"[RELAY] publish failed: {e}")
                 events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
                 if (getattr(signal, 'mode', None) or cfg.mode) == "live":
                     notifier.send_signal(signal_data)
@@ -2061,7 +2875,19 @@ async def _run_live_or_paper(
                                         hit_type = "SL"
                                     candle_time_ms = int(__import__("time").time() * 1000)
                                     preset_before = getattr(pos, 'preset', None)
-                                    pnl = await tracker.apply_hit_async(hit_type, current_price or pos.entry_price, candle_time_ms)
+                                    # FIX C: причина внешнего закрытия reverse-ноги.
+                                    closed_by = None
+                                    if pos.is_reverse:
+                                        if await _exchange_backstop_executed(pos):
+                                            closed_by = "backstop"
+                                        elif await _reverse_tp_limit_filled(pos):
+                                            closed_by = "tp"
+                                        else:
+                                            closed_by = "market"
+                                    pnl = await tracker.apply_hit_async(
+                                        hit_type, current_price or pos.entry_price,
+                                        candle_time_ms, closed_by=closed_by,
+                                    )
                                     if preset_before and tracker.position is None:
                                         _on_position_closed(preset_before)
                                     await order_mgr.cancel_all_tp_sl(pos.direction, mode=(pos.mode if pos else None) or cfg.mode)
@@ -2087,18 +2913,183 @@ async def _run_live_or_paper(
     async def _watchdog():
         # Таймаут watchdog масштабируется от таймфрейма: на 1h свеча приходит
         # раз в час, поэтому лимит 15 минут убивал бота между свечами.
+        #
+        # По умолчанию watchdog НЕ убивает бота: при пропаже данных (WS/REST
+        # недоступны) процесс остаётся жив, сам переподключается и продолжает,
+        # как только свечи снова пойдут. Это избавляет от «самостопа» после
+        # сетевых сбоев и позволяет оператору не перезапускать бота вручную.
+        # Чтобы вернуть прежнее поведение (остановка в простое данных),
+        # выставить WATCHDOG_SHUTDOWN=true.
         interval_sec = _tf_to_seconds(cfg.timeframe) or 60
         no_candle_timeout = max(interval_sec * 2.5, 900)
+        shutdown_on_stale = os.getenv("WATCHDOG_SHUTDOWN", "false").lower() == "true"
+        stale = False
         while not shutdown_event.is_set():
             await asyncio.sleep(60)
             if shutdown_event.is_set():
                 break
-            if time.time() - last_candle_time[0] > no_candle_timeout:
-                log.error(f"[WATCHDOG] No candles processed for {int(no_candle_timeout)}s, triggering shutdown")
+            is_stale = (time.time() - last_candle_time[0]) > no_candle_timeout
+            if is_stale and not stale:
+                stale = True
+                msg = (
+                    f"[WATCHDOG] No candles processed for {int(no_candle_timeout)}s — "
+                    f"data feed stale"
+                )
+                if shutdown_on_stale:
+                    reason = "watchdog_no_candles"
+                    log.error(f"{msg}, triggering shutdown (stop_reason={reason})")
+                    try:
+                        await reporter.report_stop_reason(reason)
+                    except Exception as e:
+                        log.warning(f"[WATCHDOG] failed to report stop_reason: {e}")
+                    shutdown_event.set()
+                    break
+                log.warning(
+                    f"{msg}; bot stays alive and keeps reconnecting "
+                    f"(set WATCHDOG_SHUTDOWN=true to self-stop)"
+                )
+            elif not is_stale and stale:
+                stale = False
+                log.info("[WATCHDOG] candle feed resumed — bot continues")
+
+
+    watchdog_task = asyncio.create_task(_watchdog())
+
+    # Мягкая остановка (Stop в дашборде): API выставляет stop_requested, бот
+    # перестаёт открывать новые позиции, доводит текущую по своей логике
+    # (TP/SL/reverse) и выходит, когда станет флэт. По истечении
+    # GRACEFUL_STOP_MAX_MIN минут выходит даже с открытой позицией (биржевые
+    # стоп/TP остаются). Kill-кнопка по-прежнему убивает процесс жёстко.
+    _stop_requested = False
+    _stop_requested_since = 0.0
+    _graceful_max_sec = max(0.0, float(os.getenv("GRACEFUL_STOP_MAX_MIN", "60") or 60)) * 60.0
+
+    async def _graceful_stop_watcher():
+        nonlocal _stop_requested, _stop_requested_since
+        while not shutdown_event.is_set():
+            await asyncio.sleep(5)
+            if shutdown_event.is_set():
+                break
+            if not _stop_requested:
+                try:
+                    state = await reporter.get_bot()
+                except Exception:
+                    state = None
+                if state and state.get("stop_requested"):
+                    _stop_requested = True
+                    _stop_requested_since = time.time()
+                    log.info("[STOP] graceful stop requested — new entries disabled; ждём флэт")
+                    try:
+                        events.info("GRACEFUL_STOP_REQUESTED")
+                    except Exception:
+                        pass
+                else:
+                    continue
+            if not tracker.has_open_position():
+                log.info("[STOP] graceful stop: position flat — exiting")
+                shutdown_event.set()
+                break
+            if _graceful_max_sec > 0 and (time.time() - _stop_requested_since) > _graceful_max_sec:
+                log.warning(
+                    f"[STOP] graceful stop timeout ({int(_graceful_max_sec)}s) — "
+                    f"exiting with position still open"
+                )
+                try:
+                    await reporter.report_stop_reason("graceful_stop_timeout")
+                except Exception:
+                    pass
                 shutdown_event.set()
                 break
 
-    watchdog_task = asyncio.create_task(_watchdog())
+    graceful_task = asyncio.create_task(_graceful_stop_watcher())
+
+    # ---- Релей testnet→live: потребление сигналов (только если включено) ----
+    # LIVE получает входы и уровни стопа/тейков от testnet-бота и открывает
+    # позицию СВОИМ объёмом (сайзинг live задаётся отдельно). Arm-гейт соблюдается.
+    _relay_consume = os.getenv("SIGNAL_RELAY_CONSUME", "false").lower() == "true"
+
+    async def _relay_entry(payload: dict) -> tuple:
+        """Пытается открыть позицию по релейному сигналу. Возвращает (ok, note)."""
+        try:
+            direction = str(payload.get("direction") or "").upper()
+            entry_px = float(payload.get("entry_price") or 0)
+            if direction not in ("LONG", "SHORT") or entry_px <= 0:
+                return False, "invalid"
+            # Защита от «просроченных» сигналов.
+            created = payload.get("created_at")
+            if created:
+                try:
+                    ts = pd.to_datetime(str(created), utc=True)
+                    age = (pd.Timestamp.utcnow() - ts).total_seconds()
+                    max_age = float(os.getenv("SIGNAL_RELAY_MAX_AGE_SEC", "300") or 300)
+                    if max_age > 0 and age > max_age:
+                        log.info(f"[RELAY] stale signal ({int(age)}s > {int(max_age)}s) — skipped")
+                        return False, "stale"
+                except Exception:
+                    pass
+            if os.getenv("REQUIRE_ARM", "false").lower() == "true" and not await _is_armed(cfg, log):
+                log.info("[RELAY] not armed — signal skipped")
+                return False, "not_armed"
+            if tracker.has_open_position():
+                log.info("[RELAY] position already open — signal skipped")
+                return False, "position_open"
+            tp1 = float(payload.get("tp1_price") or 0) or entry_px
+            relay_signal = Signal(
+                direction=direction,
+                entry_price=entry_px,
+                sl_price=float(payload.get("sl_price") or 0) or entry_px,
+                tp1_price=tp1,
+                tp2_price=float(payload.get("tp2_price") or 0) or tp1,
+                timestamp=pd.Timestamp.utcnow(),
+                preset=str(payload.get("preset") or "relay"),
+            )
+            log.info(
+                f"[RELAY] executing | {direction} {cfg.symbol} preset={relay_signal.preset} "
+                f"entry={entry_px} sl={relay_signal.sl_price} tp1={relay_signal.tp1_price}"
+            )
+            result = await order_mgr.open_position(relay_signal, mode=cfg.mode)
+            if result is None:
+                log.warning("[RELAY] open_position returned None")
+                return False, "open_failed"
+            entry_price, qty = result[0], result[1]
+            await tracker.open_async(relay_signal, qty=qty)
+            if tracker.position is not None:
+                tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                tracker._save_state()
+            events.info(
+                f"RELAY_ENTRY | {direction} {cfg.symbol} preset={relay_signal.preset} "
+                f"entry={entry_price} qty={qty}"
+            )
+            return True, "opened"
+        except Exception as e:
+            log.error(f"[RELAY] entry failed: {e}", exc_info=True)
+            return False, f"error:{type(e).__name__}"
+
+    async def _relay_consumer():
+        while not shutdown_event.is_set():
+            await asyncio.sleep(5)
+            if shutdown_event.is_set():
+                break
+            try:
+                sigs = await reporter.get_relay_signals()
+            except Exception:
+                sigs = []
+            for s in sigs:
+                ok, note = False, "error"
+                try:
+                    ok, note = await _relay_entry(s)
+                except Exception as e:
+                    log.warning(f"[RELAY] consume error: {e}")
+                    note = f"error:{type(e).__name__}"
+                # Ack в любом случае (consumed/skipped + причина) — для счётчиков в UI.
+                try:
+                    await reporter.ack_relay_signal(
+                        int(s.get("id")), "consumed" if ok else "skipped", note
+                    )
+                except Exception:
+                    pass
+
+    relay_task = asyncio.create_task(_relay_consumer()) if _relay_consume else None
 
     # Последняя цена из WebSocket (markPrice) + время её получения. Используется
     # для SL/TP-тика и heartbeat, чтобы не дёргать REST ticker и не упираться в
@@ -2116,6 +3107,319 @@ async def _run_live_or_paper(
             ws_ts=ws_price.get("ts", 0.0),
             logger=log,
         )
+
+    # FIX 3: последний залогированный источник триггерной цены. Обычные тики —
+    # debug, а СМЕНА источника (last→mark→rest) — info, чтобы аудит видел
+    # переключения без спама на каждом тике.
+    _last_trigger_source = [None]
+
+    def _note_trigger_source(source: str, detail: str) -> None:
+        prev = _last_trigger_source[0]
+        if source != prev:
+            log.info(
+                f"[PRICE] trigger source={source} (changed from {prev or 'none'}) "
+                f"| {detail}"
+            )
+            _last_trigger_source[0] = source
+        else:
+            log.debug(f"[PRICE] trigger source={source} | {detail}")
+
+    async def _latest_trigger_price() -> tuple[float, str]:
+        """FIX A: цена для виртуальных TP/SL.
+
+        Приоритет — последняя ТОРГОВАЯ цена из kline (k.c), mark — только
+        fallback при её отсутствии/устаревании (> LAST_PRICE_MAX_AGE_SEC).
+        Возвращает (price, source), где source ∈ {"last","mark","rest"}.
+        """
+        snap = get_price_snapshot()
+        now = time.time()
+        last_px = float(snap.get("last_price", 0.0) or 0.0)
+        last_age = now - float(snap.get("last_price_ts", 0.0) or 0.0)
+        if last_px > 0 and last_age <= LAST_PRICE_MAX_AGE_SEC:
+            _note_trigger_source("last", f"price={last_px} age={last_age:.2f}s")
+            return last_px, "last"
+        mark_px = float(ws_price.get("value", 0.0) or 0.0)
+        mark_age = now - float(ws_price.get("ts", 0.0) or 0.0)
+        if mark_px > 0 and mark_age <= PRICE_WS_MAX_AGE_SEC:
+            _note_trigger_source(
+                "mark",
+                f"(last missing/stale {last_age:.2f}s) price={mark_px} "
+                f"age={mark_age:.2f}s",
+            )
+            return mark_px, "mark"
+        rest_px = await get_current_price(
+            client, cfg.symbol,
+            ws_price=mark_px,
+            ws_ts=ws_price.get("ts", 0.0),
+            logger=log,
+        )
+        _note_trigger_source("rest", f"price={rest_px}")
+        return rest_px, "rest"
+
+    async def _exchange_backstop_executed(pos) -> bool:
+        """FIX C: True только если биржевой `botsl_*` backstop реально исполнился.
+
+        Признак исполнения: непустой actualOrderId и статус TRIGGERED/FINISHED.
+        Пустой actualOrderId или статус CANCELED/EXPIRED/NEW => не исполнялся
+        (именно этот случай в ZECUSDT давал ложный REVERSE_BACKSTOP).
+        """
+        if cfg.mode != "live" or order_mgr is None or getattr(order_mgr, "client", None) is None:
+            return False
+        algo_id = getattr(pos, "backstop_algo_id", None) if pos is not None else None
+        if not algo_id:
+            return False
+        try:
+            resp = await order_mgr.client.futures_get_algo_order(algoId=int(algo_id))
+        except Exception as e:
+            log.debug(f"[REVERSE] backstop algo status read failed | algoId={algo_id}: {e}")
+            return False
+        if not isinstance(resp, dict):
+            return False
+        status = str(resp.get("algoStatus") or resp.get("status") or "").upper()
+        actual = resp.get("actualOrderId") or resp.get("actual_order_id")
+        executed = bool(actual) and status in ("TRIGGERED", "FINISHED", "FILLED")
+        log.debug(
+            f"[REVERSE] backstop algo check | algoId={algo_id} status={status} "
+            f"actualOrderId={actual} executed={executed}"
+        )
+        return executed
+
+    async def _reverse_tp_limit_filled(pos) -> bool:
+        """FIX C: True, если плановый TP-лимит обратной ноги отсутствует, позиция
+        уже флэт и последняя торговая цена дошла до TP (значит лимит исполнился).
+
+        Вызывать ТОЛЬКО после того, как биржевой backstop признан неисполненным.
+        """
+        if cfg.mode != "live" or order_mgr is None or getattr(order_mgr, "client", None) is None:
+            return False
+        if pos is None:
+            return False
+        direction = pos.direction
+        close_side = "SELL" if direction == "LONG" else "BUY"
+        try:
+            open_orders = await order_mgr.client.futures_get_open_orders(symbol=cfg.symbol)
+        except Exception as e:
+            log.debug(f"[REVERSE] TP limit presence read failed: {e}")
+            return False
+        for o in open_orders or []:
+            if (o.get("type") or "").upper() != "LIMIT":
+                continue
+            if (o.get("side") or "").upper() != close_side:
+                continue
+            if not _is_reduce_only(o):
+                continue
+            return False
+        try:
+            real_qty = await order_mgr._get_real_position_qty(direction)
+        except Exception:
+            return False
+        if real_qty >= DUST_QTY:
+            return False
+        target = pos.tp1_price or pos.tp2_price or 0.0
+        px = float(get_price_snapshot().get("last_price", 0.0) or 0.0)
+        if target > 0 and px > 0:
+            reached = (px <= target) if direction == "SHORT" else (px >= target)
+            if not reached:
+                return False
+        return True
+
+    async def _find_reverse_tp_order(pos) -> Optional[dict]:
+        """Открытый reduceOnly LIMIT, закрывающий обратную ногу (её TP), или None."""
+        if order_mgr is None or getattr(order_mgr, "client", None) is None:
+            return None
+        close_side = "SELL" if pos.direction == "LONG" else "BUY"
+        try:
+            open_orders = await order_mgr.client.futures_get_open_orders(symbol=cfg.symbol)
+        except Exception as e:
+            log.debug(f"[TP_CLOSE] open orders read failed: {e}")
+            return None
+        for o in open_orders or []:
+            if (o.get("type") or "").upper() != "LIMIT":
+                continue
+            if (o.get("side") or "").upper() != close_side:
+                continue
+            if not _is_reduce_only(o):
+                continue
+            return o
+        return None
+
+    def _reverse_price_beyond_tp(pos, price: float) -> bool:
+        """True, если цена всё ещё за плановым TP обратной ноги (условие закрытия)."""
+        target = pos.tp1_price or pos.tp2_price or 0.0
+        if target <= 0 or price <= 0:
+            return False
+        return price <= target if pos.direction == "SHORT" else price >= target
+
+    async def _place_marketable_reduce_limit(pos, qty: float, ref_price: float) -> bool:
+        """FIX B: агрессивный reduceOnly LIMIT, пересекающий стакан (taker-филл)."""
+        if order_mgr is None or getattr(order_mgr, "client", None) is None:
+            return False
+        close_side = "SELL" if pos.direction == "LONG" else "BUY"
+        offset = float(MARKETABLE_LIMIT_OFFSET_PCT) / 100.0
+        raw = ref_price * (1 + offset) if close_side == "BUY" else ref_price * (1 - offset)
+        try:
+            price = await order_mgr._adjust_price(raw, mode="live")
+            adj_qty = await order_mgr._adjust_qty(qty, mode="live")
+        except Exception as e:
+            log.warning(f"[TP_CLOSE] marketable limit price/qty adjust failed: {e}")
+            return False
+        if price <= 0 or adj_qty <= 0:
+            log.warning(
+                f"[TP_CLOSE] marketable limit invalid | price={price} qty={adj_qty}"
+            )
+            return False
+        try:
+            await order_mgr.client.futures_create_order(
+                symbol=cfg.symbol, side=close_side, type="LIMIT",
+                price=price, quantity=adj_qty, timeInForce="GTC", reduceOnly=True,
+            )
+        except Exception as e:
+            log.warning(
+                f"[TP_CLOSE] marketable limit placement failed | side={close_side} "
+                f"price={price} qty={adj_qty}: {e}"
+            )
+            return False
+        try:
+            order_mgr._invalidate_caches()
+        except Exception:
+            pass
+        log.info(
+            f"[TP_CLOSE] replaced with marketable limit | price={price} "
+            f"qty={adj_qty} side={close_side} ref={ref_price}"
+        )
+        return True
+
+    async def _ensure_reverse_tp_fill(pos) -> tuple[Optional[str], float]:
+        """FIX B: не даёт виртуальному TP выбить рабочий лимит по рынку.
+
+        Дерево решений:
+          1. resting TP-лимит FILLED -> ("tp", price);
+          2. NEW/PARTIALLY_FILLED  -> grace-poll до REVERSE_TP_GRACE_SEC:
+               - филл -> ("tp", price);
+               - цена вернулась внутрь TP -> (None, 0.0) — позицию оставляем;
+          3. после grace цена всё ещё за TP и лимит не исполнен -> CANCEL лимита
+             и агрессивный marketable LIMIT:
+               - филл -> ("market", price);
+          4. marketable не сработал -> рыночное закрытие -> ("market", price).
+        Возвращает (None, 0.0), только если закрывать не нужно.
+        """
+        direction = pos.direction
+        target_px = pos.tp1_price or pos.tp2_price or 0.0
+        _deadline_key = (
+            cfg.symbol, str(direction),
+            float(getattr(pos, "entry_price", 0.0) or 0.0),
+            int(getattr(pos, "entry_fill_ms", 0) or 0),
+        )
+        # Paper/testnet без биржи: виртуальный TP сам является моделью филла.
+        if cfg.mode != "live" or order_mgr is None or getattr(order_mgr, "client", None) is None:
+            return "tp", target_px
+
+        last_px, _src = await _latest_trigger_price()
+        order = await _find_reverse_tp_order(pos)
+        if order is not None:
+            status = str(order.get("status") or "").upper()
+            order_id = order.get("orderId")
+            if status == "FILLED":
+                return "tp", last_px
+            if status in ("NEW", "PARTIALLY_FILLED"):
+                # Не блокируем tick-цикл: филл лимита ждём по тикам, а не
+                # sleep-loop'ом. Дедлайн переживает вызовы; FILLED/флэт ловится
+                # в начале функции на следующем тике.
+                now = time.time()
+                deadline = _REVERSE_TP_DEADLINES.get(_deadline_key, 0.0)
+                if deadline <= 0:
+                    _REVERSE_TP_DEADLINES[_deadline_key] = now + REVERSE_TP_GRACE_SEC
+                    log.info(
+                        f"[TP_CLOSE] waiting for limit fill | status={status} "
+                        f"orderId={order_id} tp={target_px} last={last_px}"
+                    )
+                    return None, 0.0
+                if not _reverse_price_beyond_tp(pos, last_px):
+                    log.info(
+                        f"[TP_CLOSE] price returned inside TP band | last={last_px} "
+                        f"tp={target_px} — keeping resting limit"
+                    )
+                    _REVERSE_TP_DEADLINES.pop(_deadline_key, None)
+                    return None, 0.0
+                if now < deadline:
+                    return None, 0.0
+                _REVERSE_TP_DEADLINES.pop(_deadline_key, None)
+                log.info(
+                    f"[TP_CLOSE] waiting for limit fill timed out | tp={target_px} "
+                    f"last={last_px}"
+                )
+                try:
+                    await order_mgr.client.futures_cancel_order(
+                        symbol=cfg.symbol, orderId=order_id
+                    )
+                except Exception as e:
+                    log.warning(f"[TP_CLOSE] cancel resting TP failed: {e}")
+        else:
+            # Лимита нет: либо уже исполнен (позиция флэт), либо снят/пропал.
+            try:
+                order_mgr._invalidate_position_cache()
+                real_qty = await order_mgr._get_real_position_qty(direction)
+            except Exception:
+                real_qty = -1.0
+            if 0.0 <= real_qty < DUST_QTY:
+                return "tp", last_px
+            # Лимита нет, а позиция ещё открыта: переставляем TP-лимит вместо
+            # агрессивного закрытия по рынку (снижает долю REVERSE_MARKET).
+            if real_qty >= DUST_QTY and target_px and target_px > 0:
+                try:
+                    await order_mgr._place_tp_limit(direction, target_px, real_qty)
+                    _REVERSE_TP_DEADLINES[_deadline_key] = time.time() + REVERSE_TP_GRACE_SEC
+                    log.info(
+                        f"[TP_CLOSE] resting TP limit missing — re-placed | dir={direction} "
+                        f"qty={real_qty} tp={target_px} last={last_px} "
+                        f"beyond_tp={_reverse_price_beyond_tp(pos, last_px)}"
+                    )
+                    return None, 0.0
+                except Exception as e:
+                    log.warning(f"[TP_CLOSE] re-place TP failed: {e}")
+            log.info(
+                f"[TP_CLOSE] resting TP limit missing | dir={direction} "
+                f"real_qty={real_qty} tp={target_px} — going aggressive"
+            )
+
+        # 3. агрессивный marketable limit
+        try:
+            order_mgr._invalidate_position_cache()
+            real_qty = await order_mgr._get_real_position_qty(direction)
+        except Exception:
+            real_qty = -1.0
+        if real_qty < 0:
+            real_qty = pos.remaining_qty
+        if real_qty >= DUST_QTY:
+            if await _place_marketable_reduce_limit(pos, real_qty, last_px):
+                for _ in range(int(REVERSE_TP_GRACE_SEC)):
+                    if shutdown_event.is_set():
+                        break
+                    await asyncio.sleep(1.0)
+                    try:
+                        order_mgr._invalidate_position_cache()
+                        q = await order_mgr._get_real_position_qty(direction)
+                    except Exception:
+                        q = -1.0
+                    if 0.0 <= q < DUST_QTY:
+                        log.info(
+                            f"[TP_CLOSE] marketable limit filled | dir={direction} qty={q}"
+                        )
+                        return "market", last_px
+
+        # 4. последний рубеж — market close
+        log.warning(
+            f"[TP_CLOSE] force market close | dir={direction} qty={real_qty} "
+            f"last={last_px} tp={target_px}"
+        )
+        try:
+            await order_mgr.cancel_all_tp_sl(direction, mode=cfg.mode)
+            closed = await order_mgr.close_position_market(direction, mode=cfg.mode)
+            if not closed:
+                closed = await order_mgr.close_dust(direction, mode=cfg.mode)
+        except Exception as e:
+            log.error(f"[TP_CLOSE] force market close failed: {e}")
+        return "market", last_px
 
     async def _heartbeat_task():
         # Регулярный heartbeat между свечами: на 1h без него дашборд показывает
@@ -2142,7 +3446,9 @@ async def _run_live_or_paper(
                     break
                 if not tracker.has_open_position():
                     continue
-                current_price = await _latest_price()
+                # FIX A: виртуальный TP/SL считается по последней торговой цене,
+                # mark — только fallback (см. _latest_trigger_price).
+                current_price, _price_src = await _latest_trigger_price()
                 if current_price <= 0:
                     continue
                 # Обновляем live-цену для дашборда, чтобы unrealized PnL в карточке
@@ -2252,7 +3558,10 @@ async def _run_live_or_paper(
         )
     
     # Останавливаем фоновые задачи
-    for task in (check_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task):
+    _cancel_tasks = [check_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task, graceful_task]
+    if relay_task is not None:
+        _cancel_tasks.append(relay_task)
+    for task in _cancel_tasks:
         if not task.done():
             task.cancel()
             try:
@@ -2263,3 +3572,4 @@ async def _run_live_or_paper(
 
 if __name__ == "__main__":
     asyncio.run(main())
+

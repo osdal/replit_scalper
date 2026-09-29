@@ -46,6 +46,30 @@ class TradeOnlyFilter(logging.Filter):
         return any(kw in record.getMessage() for kw in TRADE_KEYWORDS)
 
 
+# Диагностический файл: все WARNING+ плюс ключевые reverse/chain события (в т.ч.
+# INFO-строки сайзинга), чтобы причина завершения цикла была видна в файле даже
+# если stdout бота (api_*_stdout.log) не захватывается на Windows.
+DIAG_KEYWORDS = (
+    "[REVERSE]",
+    "REVERSE_CHAIN",
+    "chain ",
+    "chain_limit",
+    "[WATCHDOG]",
+    "[CAP]",
+    "[LEVERAGE]",
+    "[FILLS]",
+    "force-clos",
+)
+
+
+class DiagFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        msg = record.getMessage()
+        return any(kw in msg for kw in DIAG_KEYWORDS)
+
+
 class SymbolInjectFilter(logging.Filter):
     """Добавляет record.symbol, используемый в %(symbol)s формата events логгера."""
     def __init__(self, symbol: str):
@@ -79,11 +103,20 @@ def get_logger(
     fh.setFormatter(formatter)
     fh.addFilter(TradeOnlyFilter())
 
+    # Полный диагностический лог (WARNING+ и reverse/chain события) рядом с
+    # основным: <name>_diag.log. Не зависит от захвата stdout API-сервером.
+    diag_file = os.path.splitext(log_file)[0] + "_diag.log"
+    dh = RotatingFileHandler(diag_file, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    dh.setLevel(logging.DEBUG)
+    dh.setFormatter(formatter)
+    dh.addFilter(DiagFilter())
+
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     ch.setFormatter(formatter)
 
     logger.addHandler(fh)
+    logger.addHandler(dh)
     logger.addHandler(ch)
 
     _loggers[log_file] = logger

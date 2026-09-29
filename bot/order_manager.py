@@ -1,6 +1,9 @@
 import asyncio
+import datetime
+import json as _json
 import logging
 import math
+import os
 import time
 from typing import Optional, Tuple
 
@@ -13,9 +16,38 @@ from binance.enums import (
     TIME_IN_FORCE_GTC,
 )
 
-from config import Config
+from config import Config, reverse_w_pct_for_step
 from rate_limit import is_ban_error, reset_ban_state, wait_for_ban
 from strategy import Signal
+
+# Аудит ордеров (только live): пишем в logs/<env>/orders_audit.jsonl.
+BOT_ENV = (os.getenv("BOT_ENV") or "testnet").strip().lower() or "testnet"
+_AUDIT_ENABLED = BOT_ENV == "live"
+_AUDIT_PATH = os.path.join("logs", BOT_ENV, "orders_audit.jsonl")
+
+
+def _live_default_margin() -> float:
+    """Глобальный дефолт маржи для live (USD, env LIVE_DEFAULT_MARGIN_USD)."""
+    if BOT_ENV != "live":
+        return 0.0
+    try:
+        return float(os.getenv("LIVE_DEFAULT_MARGIN_USD", "0") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _audit(event: str, **fields) -> None:
+    """Пишет аудит-строку по ордеру (no-op вне live). Никогда не бросает."""
+    if not _AUDIT_ENABLED:
+        return
+    try:
+        rec = {"ts": datetime.datetime.utcnow().isoformat() + "Z", "env": BOT_ENV, "event": event}
+        rec.update(fields)
+        os.makedirs(os.path.dirname(_AUDIT_PATH), exist_ok=True)
+        with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 # TTL кэшей для дорогих read-only вызовов. Баланс — короткий, но достаточный,
 # чтобы не дёргать REST несколько раз в одном цикле; инвалидируется после
@@ -51,6 +83,93 @@ def _round_step(value: float, step: float) -> float:
     return round(math.floor(value / step) * step, precision)
 
 
+def _extract_max_leverage(data: object) -> Optional[int]:
+    """Достаёт максимально допустимое плечо из ответа futures_leverage_bracket.
+
+    python-binance возвращает ``[{"symbol": ..., "brackets": [...]}]``, но форма
+    может отличаться (dict, список bracket-записей). Максимум — ``initialLeverage``
+    самой низкой корзины (bracket 1 / минимальный notionalFloor). Парсим защитно
+    и возвращаем None, если распознать не удалось.
+    """
+    blocks = []
+    if isinstance(data, dict):
+        blocks.append(data)
+    elif isinstance(data, list):
+        blocks.extend(item for item in data if isinstance(item, dict))
+
+    for blk in blocks:
+        brackets = blk.get("brackets")
+        if brackets is None and ("initialLeverage" in blk or "leverage" in blk):
+            # Ответ уже является одной bracket-записью.
+            brackets = [blk]
+        if not isinstance(brackets, list):
+            continue
+        best_key = None
+        best_lev = None
+        for b in brackets:
+            if not isinstance(b, dict):
+                continue
+            raw_lev = b.get("initialLeverage", b.get("leverage"))
+            try:
+                lev = int(float(raw_lev))
+            except (TypeError, ValueError):
+                continue
+            if lev < 1:
+                continue
+            try:
+                bracket_no = int(b.get("bracket", 1))
+            except (TypeError, ValueError):
+                bracket_no = 1
+            try:
+                floor = float(b.get("notionalFloor", 0) or 0)
+            except (TypeError, ValueError):
+                floor = 0.0
+            key = (bracket_no, floor)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_lev = lev
+        if best_lev is not None:
+            return best_lev
+    return None
+
+
+def _extract_notional_cap(data: object, leverage: int) -> Optional[float]:
+    """Максимальный нотионал (USD) для выбранного плеча из futures_leverage_bracket.
+
+    Берём самую «узкую» корзину, которая ещё допускает наше плечо
+    (initialLeverage >= leverage) — её notionalCap и есть потолок позиции.
+    """
+    blocks = []
+    if isinstance(data, dict):
+        blocks.append(data)
+    elif isinstance(data, list):
+        blocks.extend(item for item in data if isinstance(item, dict))
+
+    for blk in blocks:
+        brackets = blk.get("brackets")
+        if brackets is None and ("initialLeverage" in blk or "leverage" in blk):
+            brackets = [blk]
+        if not isinstance(brackets, list):
+            continue
+        eligible = []
+        for b in brackets:
+            if not isinstance(b, dict):
+                continue
+            try:
+                lev = int(float(b.get("initialLeverage", b.get("leverage"))))
+                cap = float(b.get("notionalCap", 0) or 0)
+                floor = float(b.get("notionalFloor", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if lev >= leverage and cap > 0:
+                eligible.append((floor, cap))
+        if eligible:
+            # минимальный floor → самый низкий cap для нашего плеча
+            eligible.sort(key=lambda x: x[0])
+            return eligible[0][1]
+    return None
+
+
 class OrderManager:
     def __init__(self, cfg: Config, logger: logging.Logger, client: Optional[AsyncClient] = None):
         self.cfg = cfg
@@ -62,19 +181,30 @@ class OrderManager:
         # Биржевые лимиты объёма: LOT_SIZE.maxQty и MARKET_LOT_SIZE.maxQty.
         self._max_qty: Optional[float] = None
         self._market_max_qty: Optional[float] = None
+        # Биржевой минимум нотионала (MIN_NOTIONAL.notional), USD. 0 = нет/неизвестно.
+        self._min_notional: Optional[float] = None
         # AlgoId живого биржевого backstop-стопа (STOP_MARKET, closePosition=true).
         # None = защиты на бирже нет. Персистится через Position.backstop_algo_id.
         self.backstop_algo_id: Optional[int] = None
         # Read-only кэши дорогих вызовов (balance / position info).
-        self._balance_cache = {"value": None, "ts": 0.0, "mode": None}
+        self._balance_cache = {"value": None, "free": None, "ts": 0.0, "mode": None}
         self._position_cache = {"value": None, "ts": 0.0, "symbol": None}
+        # Кэш максимально допустимого плеча символа (bracket 1 initialLeverage).
+        self._max_leverage_cache: Optional[int] = None
+        # Кэш биржевого потолка нотионала для текущего плеча.
+        self._notional_cap_cache: Optional[float] = None
+        # Кэш equity (с нереализованным PnL) для потолка % от счёта.
+        self._equity_cache = {"value": None, "ts": 0.0}
+        # Последнее залогированное (configured, effective) для [LEVERAGE] clamped,
+        # чтобы логировать зажим на старте и при каждом изменении, но не каждый вход.
+        self._last_leverage_log: Optional[Tuple[int, int]] = None
 
     # ------------------------------------------------------------------ #
     #  Read-only cache helpers                                             #
     # ------------------------------------------------------------------ #
 
     def _invalidate_balance_cache(self) -> None:
-        self._balance_cache.update(value=None, ts=0.0, mode=None)
+        self._balance_cache.update(value=None, free=None, ts=0.0, mode=None)
 
     def _invalidate_position_cache(self) -> None:
         self._position_cache.update(value=None, ts=0.0, symbol=None)
@@ -95,6 +225,7 @@ class OrderManager:
         for s in info["symbols"]:
             if s["symbol"] == self.cfg.symbol:
                 self._price_precision = s.get("pricePrecision", 2)
+                self._min_notional = 0.0
                 for f in s["filters"]:
                     if f["filterType"] == "LOT_SIZE":
                         self._step_size = float(f["stepSize"])
@@ -103,8 +234,22 @@ class OrderManager:
                         self._market_max_qty = float(f["maxQty"])
                     if f["filterType"] == "PRICE_FILTER":
                         self._tick_size = float(f["tickSize"])
+                    if f["filterType"] == "MIN_NOTIONAL":
+                        try:
+                            self._min_notional = float(f.get("notional", 0) or 0)
+                        except (TypeError, ValueError):
+                            self._min_notional = 0.0
                 return
         raise RuntimeError(f"Symbol {self.cfg.symbol} not found in futures_exchange_info")
+
+    async def _get_min_notional_usd(self) -> float:
+        """MIN_NOTIONAL символа в USD (0 = неизвестно/не задан)."""
+        if self._min_notional is None:
+            try:
+                await self._get_symbol_filters()
+            except Exception as e:
+                self.log.debug(f"[LIVE] minNotional fetch failed: {e}")
+        return float(self._min_notional or 0.0)
 
     def _order_max_qty(self) -> Optional[float]:
         """Максимум qty на один ордер: MARKET_LOT_SIZE имеет приоритет над LOT_SIZE."""
@@ -118,6 +263,59 @@ class OrderManager:
             return round(qty, 3)
         await self._get_symbol_filters()
         return _round_step(qty, self._step_size)
+
+    async def _place_market_split(
+        self, side: str, qty: float, mode: str, fallback_price: float = 0.0
+    ) -> Tuple[float, float, int]:
+        """Отправляет market-ордер(ы) суммарным объёмом qty, разбивая на части не
+        больше биржевого maxQty (ограничение на ОДИН ордер). Каждая часть обязана
+        пройти биржевой MIN_NOTIONAL, иначе ордер отклонят (-4164) — поэтому
+        «хвост» меньше минимума либо подрезается в предыдущую часть, либо
+        отбрасывается. Возвращает (filled_qty, vwap, chunks). Если весь объём
+        отправить не удалось, filled_qty < qty (вызывающий считает это клампом).
+        """
+        await self._get_symbol_filters()
+        max_qty = self._order_max_qty()
+        price_ref = fallback_price if fallback_price and fallback_price > 0 else 0.0
+        min_notional = await self._get_min_notional_usd()
+        min_qty = (min_notional / price_ref) if (price_ref > 0 and min_notional > 0) else 0.0
+        remaining = qty
+        filled = 0.0
+        notional = 0.0
+        chunks = 0
+        while remaining > 1e-12 and chunks < 50:
+            if not max_qty or max_qty <= 0 or remaining <= max_qty:
+                if min_qty > 0 and remaining < min_qty:
+                    # остаток меньше MIN_NOTIONAL — отправить нельзя, отбрасываем
+                    self.log.warning(
+                        f"[REVERSE] split remainder below minNotional — dropping | "
+                        f"remaining={remaining} min_qty={min_qty} price_ref={price_ref}"
+                    )
+                    break
+                chunk = remaining
+            else:
+                chunk = max_qty
+                # не оставляем «хвост» меньше MIN_NOTIONAL — подрезаем текущую часть
+                if min_qty > 0 and (remaining - chunk) < min_qty:
+                    chunk = remaining - min_qty
+                if chunk <= 0 or chunk > max_qty:
+                    chunk = max_qty
+            chunk = await self._adjust_qty(chunk, mode=mode)
+            if chunk <= 0:
+                break
+            order = await self.client.futures_create_order(
+                symbol=self.cfg.symbol, side=side, type=ORDER_TYPE_MARKET, quantity=chunk,
+            )
+            _audit("reverse_market_chunk", symbol=self.cfg.symbol, side=side,
+                   qty=chunk, orderId=(order or {}).get("orderId"))
+            fp = await self._get_fill_price(order, fallback_price)
+            if fp and fp > 0:
+                notional += chunk * fp
+            filled += chunk
+            chunks += 1
+            remaining = round(remaining - chunk, 12)
+        vwap = (notional / filled) if filled > 0 and notional > 0 else 0.0
+        return filled, vwap, chunks
 
     async def _adjust_price(self, price: float, mode: Optional[str] = None) -> float:
         if mode is None:
@@ -248,8 +446,12 @@ class OrderManager:
             for asset in account:
                 if asset["asset"] == "USDT":
                     balance = float(asset["balance"])
+                    try:
+                        free = float(asset.get("availableBalance") or 0.0)
+                    except (TypeError, ValueError):
+                        free = 0.0
                     reset_ban_state()
-                    cache.update(value=balance, ts=now, mode=mode)
+                    cache.update(value=balance, free=free, ts=now, mode=mode)
                     return balance
             raise RuntimeError("USDT balance not found")
         except BinanceAPIException as e:
@@ -266,6 +468,33 @@ class OrderManager:
             self.log.warning(f"[CACHE] using cached balance ${cache['value']:.2f}")
             return cache["value"]
         self.log.warning("[CACHE] no cached balance available, returning 0.0")
+        return 0.0
+
+    async def get_free_balance(self, mode: Optional[str] = None) -> float:
+        """Свободная маржа (availableBalance) в USDT для live.
+
+        Это депозит БЕЗ уже занятой под открытые позиции маржи: именно от него
+        берётся position_size_pct. Для не-live возвращаем paper_balance.
+
+        Использует тот же кэш, что и get_balance (availableBalance приходит в
+        том же ответе futures_account_balance), поэтому лишнего REST-вызова в
+        пределах одного цикла нет.
+        """
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
+            return self.cfg.paper_balance
+
+        now = time.monotonic()
+        cache = self._balance_cache
+        if (cache.get("free") is not None and cache["mode"] == mode
+                and (now - cache["ts"]) < BALANCE_CACHE_TTL_SEC):
+            return float(cache["free"])
+
+        # Освежаем через get_balance: он заполняет и value, и free.
+        await self.get_balance(mode)
+        if cache.get("free") is not None and cache["mode"] == mode:
+            return float(cache["free"])
         return 0.0
 
     # ------------------------------------------------------------------ #
@@ -440,6 +669,7 @@ class OrderManager:
             reduceOnly=True,
         )
         self.log.info(f"[LIVE] TP limit placed | side={side} price={price} qty={qty}")
+        _audit("tp_limit", symbol=self.cfg.symbol, side=side, price=price, qty=qty)
 
     async def _place_all_orders(
         self,
@@ -472,6 +702,72 @@ class OrderManager:
         # провале TP-ордеров не оставить висячий backstop без позиции в трекере.
         await self._place_exchange_backstop(direction, sl_price, qty=total_qty)
 
+    def _reverse_fee_params(self) -> Tuple[float, float, float]:
+        """(f_in, f_out, p) для unified reverse-сайзинга в ДОЛЯХ (не %).
+
+        f_in  — комиссия входа новой ноги: ордер market → taker;
+        f_out — комиссия выхода: КОНСЕРВАТИВНО taker, потому что плановый
+                TP-лимит может не исполниться/истечь и позиция закроется
+                рыночным (reduceOnly) ордером;
+        p     — целевой профит сверх безубытка как доля от notional выхода.
+        """
+        taker = float(getattr(self.cfg, "taker_fee_pct", 0.05) or 0.0) / 100.0
+        p = float(getattr(self.cfg, "reverse_profit_pct", 0.1) or 0.0) / 100.0
+        return taker, taker, p
+
+    def _reverse_sizing(
+        self, P: float, N: float, net_realized: float, U_eff: float, new_dir: str,
+        w_pct: Optional[float] = None,
+    ) -> Optional[Tuple[float, float, float, float, float, float, float]]:
+        """Единый fee/profit-aware сайзинг реверса (1-й reverse и шаги цепочки).
+
+        Подбирает совокупное знаковое нетто S_total (и новое плечо q = S_total - N)
+        так, чтобы на T весь цикл давал профит p*|S_total|*T с учётом комиссий:
+
+            w  = reverse_breakeven_pct/100 + reverse_fee_buffer_pct/100
+            T  = P*(1+w)  (новое плечо LONG, N<0) | P*(1-w) (SHORT, N>0)
+            f_in  = taker_fee_pct/100
+            f_out = taker_fee_pct/100   (консервативно taker, см. _reverse_fee_params)
+            p     = reverse_profit_pct/100
+            |S_total| = [ -(net_realized + U_eff) + f_in*|N|*P ]
+                        / [ |T-P| - f_in*P - (f_out+p)*T ]
+            S_total = sign(new_leg) * |S_total|,  q = S_total - N
+
+        U_eff = N*(P-A) считается вызывающим (A — entryPrice книги, fallback на
+        биржевой unRealizedProfit). Возвращает (T, S_total, q, f_in, f_out, p, w)
+        либо None, если знаменатель <= 0 или |S_total| <= 0: сайзинг невозможен,
+        caller финализирует/принудительно закрывает как сегодня.
+        """
+        base_w = (
+            float(w_pct) if w_pct is not None
+            else float(getattr(self.cfg, "reverse_breakeven_pct", 0.5) or 0.0)
+        )
+        w = (
+            base_w
+            + float(getattr(self.cfg, "reverse_fee_buffer_pct", 0.0) or 0.0)
+        ) / 100.0
+        T = P * (1 + w) if new_dir == "LONG" else P * (1 - w)
+        f_in, f_out, p = self._reverse_fee_params()
+        denom = abs(T - P) - f_in * P - (f_out + p) * T
+        if P <= 0 or denom <= 0:
+            self.log.warning(
+                f"[REVERSE] sizing aborted | denominator={denom} P={P} T={T} "
+                f"N={N} net_realized={net_realized} U_eff={U_eff} "
+                f"f_in={f_in} f_out={f_out} p={p} w={w} — no new leg"
+            )
+            return None
+        s_abs = (-(net_realized + U_eff) + f_in * abs(N) * P) / denom
+        if s_abs <= 0:
+            self.log.warning(
+                f"[REVERSE] sizing aborted | |S_total|={s_abs} denominator={denom} "
+                f"P={P} T={T} N={N} net_realized={net_realized} U_eff={U_eff} "
+                f"f_in={f_in} f_out={f_out} p={p} w={w} — no new leg"
+            )
+            return None
+        S_total = s_abs if new_dir == "LONG" else -s_abs
+        q = S_total - N
+        return T, S_total, q, f_in, f_out, p, w
+
     async def open_reverse_position(
         self,
         original_direction: str,
@@ -479,9 +775,29 @@ class OrderManager:
         original_qty: float,
         sl_price: float,
         mode: Optional[str] = None,
+        net_position: Optional[float] = None,
+        net_realized: Optional[float] = None,
+        step: Optional[int] = None,
+        unrealized: Optional[float] = None,
+        position_entry: Optional[float] = None,
     ) -> Optional[Tuple[float, float, float]]:
         """
         Разворот при срабатывании SL.
+
+        net_position / net_realized / unrealized / position_entry — данные книги
+        цикла (необязательные). Когда они доступны, используется ЕДИНЫЙ
+        fee/profit-aware сайзинг и для 1-го reverse, и для шагов цепочки
+        (см. _reverse_sizing / _open_reverse_position_chain): сайзинг считается
+        от всего нетто N, уже-реализованного net_realized цикла и НЕреализованного
+        U_eff книги на триггере P, чтобы вывести ВСЮ книгу в целевой профит
+        p*|S_total|*T на T. Для 1-го reverse net_realized=0, N — знаковая исходная
+        позиция, U_eff — её unrealized на триггере; step=None (cap цепочки не
+        применяется). unrealized — unRealizedProfit с биржи, position_entry —
+        entryPrice книги (для консистентного U_eff = N*(P-A)).
+        При step >= cfg.reverse_chain_max новый шаг не открывается (возврат None —
+        вызывающий принудительно закрывает позицию). Если данные книги недоступны
+        (net_position/net_realized не переданы) — legacy per-leg формула
+        (обратная совместимость, в лог пишется path=legacy).
 
         Исходная позиция НЕ закрывается отдельным ордером. В обратную сторону
         отправляется рыночный ордер, оставляющий удерживаемый (хедж) объём.
@@ -514,6 +830,53 @@ class OrderManager:
         """
         if mode is None:
             mode = self.cfg.mode
+
+        # Единый fee/profit-aware сайзинг используется И для 1-го reverse, И для
+        # шагов цепочки, когда доступны данные книги цикла. Для 1-го reverse
+        # step не задан → cap цепочки не применяется (step=0 в chain-методе).
+        if net_position is not None and net_realized is not None:
+            if step is not None:
+                try:
+                    max_steps = int(getattr(self.cfg, "reverse_chain_max", 10) or 0)
+                except (TypeError, ValueError):
+                    max_steps = 0
+                # max_steps <= 0 = без лимита шагов (добавляем ногу сколько нужно).
+                if max_steps > 0 and step >= max_steps:
+                    self.log.warning(
+                        f"[REVERSE] chain limit reached (step={step}) — no new leg"
+                    )
+                    return None
+            return await self._open_reverse_position_chain(
+                original_direction=original_direction,
+                original_entry=original_entry,
+                original_qty=original_qty,
+                sl_price=sl_price,
+                mode=mode,
+                net_position=net_position,
+                net_realized=net_realized,
+                step=int(step or 0),
+                unrealized=unrealized,
+                position_entry=position_entry,
+            )
+        # Fallback: unified-входы недоступны → legacy per-leg формула.
+        # ВАЖНО: для шагов ЦЕПОЧКИ (step>0) legacy недопустима — она считает
+        # безубыток только текущей ноги и игнорирует уже накопленный убыток
+        # цикла, из-за чего открывается крошечный хедж и цикл закрывается в
+        # минус на TP. В таком случае ногу не открываем, caller финализирует
+        # (принудительное закрытие / повтор).
+        if step is not None and int(step) > 0:
+            self.log.error(
+                f"[REVERSE] chain step={step}: unified inputs unavailable "
+                f"(net_position={net_position} net_realized={net_realized}) — "
+                f"refusing legacy under-sized hedge"
+            )
+            return None
+        self.log.warning(
+            f"[REVERSE] unified inputs unavailable (step={step} "
+            f"net_position={net_position} net_realized={net_realized}) — "
+            f"using legacy per-leg sizing"
+        )
+
         reverse_dir = "SHORT" if original_direction == "LONG" else "LONG"
 
         pct = float(getattr(self.cfg, "reverse_breakeven_pct", 0.5) or 0.5) / 100
@@ -565,10 +928,13 @@ class OrderManager:
                     return None
 
         mult = (held_qty / original_qty) if original_qty else 0.0
+        f_in, f_out, p = self._reverse_fee_params()
         self.log.info(
             f"[REVERSE] sizing | dir={original_direction} E={original_entry} S={sl_price} "
             f"P3_plan={p3_plan} pct={pct * 100}% qty={original_qty} held={held_qty} "
-            f"send={send_qty} mult={mult}"
+            f"send={send_qty} mult={mult} N=None net_realized=None U_eff=None "
+            f"A={original_entry} P={sl_price} T={p3_plan} |S_total|={held_qty} "
+            f"q={send_qty} f_in={f_in} f_out={f_out} p={p} path=legacy"
         )
 
         if mode == "live":
@@ -631,17 +997,23 @@ class OrderManager:
         p_star = None
         tp_price = None
         tp_ok = False
+        # FIX 2: хеджировать нечего — новую отслеживаемую ногу НЕ создаём
+        # (held_qty=0 в возврате). Иначе caller открывал фантомную reverse-ногу
+        # и перефинализировал строку по чужим биржевым филлам.
+        no_hedge = False
         if qh <= 0:
             self.log.warning(
-                f"[REVERSE] nothing to hedge (Qh={qh}) — skipping TP | "
+                f"[REVERSE] nothing to hedge (Qh={qh}) — no new leg | "
                 f"dir={reverse_dir} E_rev={entry_price} E={original_entry} Qo={original_qty}"
             )
+            no_hedge = True
             tp_price = await self._adjust_price(p3_ref, mode=mode)
         elif abs(original_entry - entry_price) <= 0:
             self.log.warning(
-                f"[REVERSE] |E - E_rev| <= 0 — nothing to hedge, skipping TP | "
+                f"[REVERSE] |E - E_rev| <= 0 — nothing to hedge, no new leg | "
                 f"dir={reverse_dir} E={original_entry} E_rev={entry_price}"
             )
+            no_hedge = True
             tp_price = await self._adjust_price(p3_ref, mode=mode)
         else:
             move = original_qty * abs(original_entry - entry_price) / qh
@@ -675,7 +1047,10 @@ class OrderManager:
             dist_pct = abs(entry_price - tp_price) / entry_price * 100 if entry_price else 0.0
             self.log.info(
                 f"[REVERSE] be | E={original_entry} E_rev={entry_price} Qo={original_qty} "
-                f"Qh={qh} P3={p3_ref} P*={tp_price} pct={pct * 100}% dist_pct={dist_pct}"
+                f"Qh={qh} P3={p3_ref} P*={tp_price} pct={pct * 100}% dist_pct={dist_pct} "
+                f"N=None net_realized=None U_eff=None A={original_entry} P={sl_price} "
+                f"T={p3_ref} |S_total|={qh} q={original_qty + qh} "
+                f"f_in={f_in} f_out={f_out} p={p} path=legacy"
             )
             self.log.info(
                 f"[REVERSE] hedge | planned={held_qty} actual={qh} "
@@ -697,6 +1072,10 @@ class OrderManager:
                 f"hedge_actual={qh} send_minus_orig={fallback_held} real_qty={real_qty}"
             )
         held_qty = tp_qty
+        if no_hedge:
+            # Сигнал caller'у «нога не добавлена» (FIX 2): не открывать
+            # reverse-позицию в трекере и не перефинализировать строку.
+            held_qty = 0.0
 
         # TP обратной позиции ровно на P* (или не ставим, если геометрия
         # невозможна/хеджировать нечего).
@@ -708,6 +1087,375 @@ class OrderManager:
                 self.log.error(f"[REVERSE] Failed to place TP: {e}", exc_info=True)
 
         return entry_price, held_qty, tp_price
+
+    async def _open_reverse_position_chain(
+        self,
+        original_direction: str,
+        original_entry: float,
+        original_qty: float,
+        sl_price: float,
+        mode: str,
+        net_position: float,
+        net_realized: float,
+        step: int = 0,
+        unrealized: Optional[float] = None,
+        position_entry: Optional[float] = None,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Шаг reverse-ЦЕПОЧКИ (и 1-й reverse при step=0): выводит книгу в профит.
+
+        P — текущая цена триггера (виртуальный SL обратной ноги; для 1-го reverse
+        step=0), N — знаковое нетто на бирже (positionAmt), net_realized — уже
+        реализованный net-PnL цикла (для 1-го reverse = 0), U_eff — НЕреализованный
+        PnL открытой книги на P = N*(P-A) при известном входе A, иначе unrealized
+        с биржи. Новое плечо q противоположно N, а совокупная позиция S_total
+        подбирается единой формулой (см. _reverse_sizing) так, чтобы на
+        T = P*(1±w) весь цикл давал профит p*|S_total|*T с учётом комиссий:
+
+            w         = reverse_breakeven_pct/100 + reverse_fee_buffer_pct/100
+            T         = P*(1+w)  (новое плечо LONG) | P*(1-w) (новое плечо SHORT)
+            f_in      = taker_fee_pct/100          # новая нога — market
+            f_out     = taker_fee_pct/100          # консервативно taker-выход
+            p         = reverse_profit_pct/100
+            |S_total| = [ -(net_realized + U_eff) + f_in*|N|*P ]
+                        / [ |T-P| - f_in*P - (f_out+p)*T ]
+            S_total   = sign(new_leg) * |S_total|  # знаковое нетто ПОСЛЕ
+            q         = S_total - N                # знаковый объём нового плеча
+
+        FIX 1: без U_eff сайзинг не учитывал текущий убыток открытой позиции и
+        цикл закрывался не в ноль, а в ≈ -1% номинала.
+
+        Валидация: sign(q) == -sign(N) (либо N == 0), |q| > 0; |q| клампится по
+        биржевому maxQty (при клампе точный ноль недостижим — warning). Возвращает
+        (entry_price, held_qty, tp_price), где held_qty = |нетто после входа|, а
+        TP (reduceOnly LIMIT) ставится на T на весь этот объём. held_qty == 0 —
+        особая метка «нога не добавлена» (nothing to hedge / книга уже выходит в
+        ноль на T): caller не должен открывать reverse в трекере.
+        """
+        try:
+            P = float(sl_price or 0.0)
+            N = float(net_position or 0.0)
+            nr = float(net_realized or 0.0)
+        except (TypeError, ValueError):
+            self.log.warning(
+                f"[REVERSE] chain invalid inputs | sl={sl_price} "
+                f"N={net_position} net_realized={net_realized} — no new leg"
+            )
+            return None
+        if P <= 0:
+            self.log.warning(f"[REVERSE] chain invalid trigger P={P} — no new leg")
+            return None
+        try:
+            U = float(unrealized) if unrealized is not None else 0.0
+        except (TypeError, ValueError):
+            U = 0.0
+        try:
+            A = float(position_entry) if position_entry is not None else 0.0
+        except (TypeError, ValueError):
+            A = 0.0
+
+        # Направление нового плеча — противоположно знаку N (назад к исходной
+        # стороне). При N == 0 падаем на противоположное original_direction.
+        if N > 0:
+            new_dir = "SHORT"
+        elif N < 0:
+            new_dir = "LONG"
+        else:
+            new_dir = "SHORT" if original_direction == "LONG" else "LONG"
+
+        # step == 0 → это 1-й reverse (собственный аудит-лог [REVERSE] sizing/be
+        # в дополнение к [REVERSE] chain).
+        is_first = (step == 0)
+        # unrealized открытой книги. Берём КОНСЕРВАТИВНУЮ оценку убытка: биржевой
+        # unrealizedProfit может прийти нулевым/устаревшим (особенно на testnet,
+        # где один аккаунт делят десятки ботов) — тогда сайзинг считает убыток
+        # цикла почти нулевым, хедж получается крошечным и TP-выход НЕ закрывает
+        # цикл в ноль (наблюдалось: цикл −3$ при хедже, посчитанном на −0.45$).
+        # Поэтому если рассчитанный N*(P−A) того же знака и по модулю больше
+        # биржевого U — доверяем ему; биржевой U берём, только когда он учитывает
+        # реальный убыток не меньше расчётного (например, из-за проскальзывания).
+        u_price = (N * (P - A)) if A > 0 else None
+        if u_price is not None:
+            if (abs(U) > 1e-9 and (U < 0) == (u_price < 0) and abs(U) >= abs(u_price)):
+                U_eff = U
+            else:
+                U_eff = u_price
+        else:
+            U_eff = U
+        # Ступенчатая цель по шагу цепочки (вариант B): 0.5, 0.5, 1, 2, 4, 8 % …
+        w_step = reverse_w_pct_for_step(self.cfg, step)
+        # Единый fee/profit-aware сайзинг: используется и для 1-го reverse, и для
+        # шагов цепочки. None → сайзинг невозможен (denominator/|S_total| <= 0).
+        sizing = self._reverse_sizing(P, N, nr, U_eff, new_dir, w_pct=w_step)
+        if sizing is None:
+            return None
+        T, S_total, q, f_in, f_out, p, w = sizing
+        # Итоговая цель TP. Если после фактического филла делается top-up до
+        # требуемого нетто — цель пересчитывается от ФАКТИЧЕСКОГО входа (T2),
+        # иначе остаётся плановая T от триггера P. Раньше T2 терялся и TP
+        # ставился по цене, не соответствующей реальному нетто (недобор).
+        T_target = T
+        # Edge case: требуемое нетто того же знака, что и текущее, и не больше
+        # его по модулю — книга уже выводится в ноль на T без новой ноги.
+        # Не отправляем ордер, только ставим reduceOnly TP на |N| по T.
+        if (N != 0 and (S_total > 0) == (N > 0) and abs(S_total) <= abs(N)):
+            T_adj = await self._adjust_price(T, mode=mode)
+            pos_dir = "LONG" if N > 0 else "SHORT"
+            self.log.info(
+                f"[REVERSE] chain | no new leg needed (book already reaches zero) "
+                f"| step={step} N={N} net_realized={nr} U_eff={U_eff} A={A} "
+                f"P={P} T={T_adj} |S_total|={abs(S_total)} q={q} "
+                f"f_in={f_in} f_out={f_out} p={p} w={w}"
+            )
+            if mode == "live":
+                try:
+                    await self._get_symbol_filters()
+                    tp_qty = await self._adjust_qty(abs(N), mode=mode)
+                    if tp_qty > 0:
+                        await self._place_tp_limit(pos_dir, T_adj, tp_qty)
+                        self.log.info(
+                            f"[REVERSE] chain TP (no new leg) placed | {pos_dir} "
+                            f"tp={T_adj} qty={tp_qty}"
+                        )
+                except Exception as e:
+                    self.log.error(
+                        f"[REVERSE] chain no-leg TP placement failed: {e}",
+                        exc_info=True,
+                    )
+            return P, 0.0, T_adj
+        # S_total обязан быть на стороне нового плеча (иначе геометрия цикла
+        # невыполнима: убыток/прибыль цикла не выводится в ноль этой стороной).
+        if (S_total > 0) != (new_dir == "LONG"):
+            self.log.warning(
+                f"[REVERSE] chain geometry mismatch | dir={new_dir} N={N} "
+                f"net_realized={nr} S_total={S_total} — no new leg"
+            )
+            return None
+
+        # q = S_total - N уже посчитан unified-сайзингом.
+        if abs(q) <= 0:
+            self.log.warning(
+                f"[REVERSE] chain zero q | step={step} N={N} S_total={S_total}"
+            )
+            return None
+        # q обязано быть противоположно N (закрываем/переворачиваем нетто).
+        if N != 0 and ((q > 0) == (N > 0)):
+            self.log.warning(
+                f"[REVERSE] chain sign mismatch | N={N} q={q} "
+                f"(sign(q) != -sign(N)) — no new leg"
+            )
+            return None
+
+        qty = abs(q)
+        capped = False
+        # Потолок нотионала (конфиг/%equity/биржевой брекет) — ограничение на ВЕСЬ
+        # нетто, его не обходим. А биржевой maxQty на ОДИН ордер обходим разбивкой
+        # (см. _place_market_split ниже), иначе хедж режется и цикл не выходит в ноль.
+        if mode == "live":
+            cap_usd = await self._notional_cap_usd()
+            if cap_usd > 0 and P and P > 0:
+                max_qty_cap = cap_usd / P
+                if qty > max_qty_cap:
+                    self.log.warning(
+                        f"[REVERSE] chain qty capped by notional cap | requested={qty} "
+                        f"cap_qty={max_qty_cap} notional_cap=${cap_usd:.2f}"
+                    )
+                    qty = max_qty_cap
+                    capped = True
+        qty = await self._adjust_qty(qty, mode=mode)
+        if qty <= 0:
+            self.log.warning(f"[REVERSE] chain qty={qty} <= 0 — no new leg")
+            return None
+
+        signed_qty = qty if q > 0 else -qty
+
+        # MARKET-ордер нового плеча. Если объём больше биржевого maxQty на один
+        # ордер — шлём несколькими частями суммарно на весь объём.
+        side = _direction_to_side("LONG" if signed_qty > 0 else "SHORT")
+        entry_price = P
+        if mode == "live":
+            try:
+                await self._set_leverage()
+                filled, vwap, chunks = await self._place_market_split(side, qty, mode, fallback_price=P)
+                if filled <= 0:
+                    raise RuntimeError("market split returned no fill")
+                if filled < qty - 1e-9:
+                    # не удалось отправить весь объём — цикл в ноль не выведется
+                    capped = True
+                if chunks > 1:
+                    self.log.warning(
+                        f"[REVERSE] chain market split | side={side} requested={qty} "
+                        f"filled={filled} chunks={chunks} vwap={vwap:.8f}"
+                    )
+            except Exception as e:
+                self.log.error(
+                    f"[REVERSE] chain market order failed | side={side} qty={qty}: {e}",
+                    exc_info=True,
+                )
+                return None
+            # Вход изменил позицию/баланс — кэши невалидны.
+            self._invalidate_caches()
+            if vwap and vwap > 0:
+                entry_price = vwap
+            signed_qty = filled if q > 0 else -filled
+            qty = filled
+        else:
+            self.log.info(
+                f"[PAPER] Reverse chain send {side} qty={qty} @ {entry_price}"
+            )
+        if entry_price is None or entry_price <= 0:
+            self.log.error(
+                f"[REVERSE] chain invalid fill price={entry_price} — aborting TP"
+            )
+            return None
+
+        # Фактическое нетто после ордера. Без клампа = S_total; при клампе
+        # используем реально достижимый объём (цикл в ноль не выводится).
+        if capped:
+            actual_net = N + signed_qty
+        else:
+            actual_net = S_total
+        tp_qty = await self._adjust_qty(abs(actual_net), mode=mode)
+        if tp_qty <= 0:
+            self.log.warning(
+                f"[REVERSE] chain TP qty={tp_qty} <= 0 | actual_net={actual_net}"
+            )
+            return None
+
+        # Добор хеджа: если по ФАКТИЧЕСКОМУ входу требуемое нетто больше
+        # достигнутого (проскальзывание между триггером и филлом), добавляем
+        # недостающий объём — чтобы TP хеджа покрывал убыток первой ноги.
+        # Ограничения: live, не кламплено, в пределах maxQty и потолка нотионала.
+        if mode == "live" and not capped:
+            try:
+                _Uf = N * (entry_price - A) if A > 0 else U
+                resize2 = self._reverse_sizing(entry_price, N, nr, _Uf, new_dir, w_pct=w_step)
+                if resize2 is not None:
+                    T2 = float(resize2[0])
+                    S_req = float(resize2[1])
+                    if (S_req > 0) == (new_dir == "LONG"):
+                        need = abs(S_req) - abs(actual_net)
+                        add_qty = await self._adjust_qty(need, mode=mode) if need > 0 else 0.0
+                        cap_usd2 = await self._notional_cap_usd()
+                        if cap_usd2 > 0 and entry_price > 0:
+                            room = cap_usd2 - abs(actual_net) * entry_price
+                            add_qty = 0.0 if room <= 0 else min(add_qty, room / entry_price)
+                            add_qty = await self._adjust_qty(add_qty, mode=mode)
+                        if add_qty > 0:
+                            side2 = _direction_to_side(new_dir)
+                            add_filled, add_vwap, add_chunks = await self._place_market_split(
+                                side2, add_qty, mode, fallback_price=entry_price
+                            )
+                            self._invalidate_caches()
+                            if add_filled > 0:
+                                fill2 = add_vwap if add_vwap and add_vwap > 0 else entry_price
+                                prev = abs(actual_net)
+                                tot = prev + add_filled
+                                if tot > 0:
+                                    entry_price = (entry_price * prev + fill2 * add_filled) / tot
+                                actual_net = actual_net + (add_filled if new_dir == "LONG" else -add_filled)
+                                tp_qty = await self._adjust_qty(abs(actual_net), mode=mode)
+                                T_target = T2
+                                T_adj = await self._adjust_price(T2, mode=mode)
+                                self.log.warning(
+                                    f"[REVERSE] top-up hedge added | dir={new_dir} add={add_filled} "
+                                    f"chunks={add_chunks} net={actual_net} tp={T_adj} (to cover first-leg loss)"
+                                )
+            except Exception as e:
+                self.log.warning(f"[REVERSE] top-up skipped: {e}")
+
+        T_adj = await self._adjust_price(T_target, mode=mode)
+
+        # Геометрия: LONG TP выше входа, SHORT — ниже. Округление по tickSize
+        # может схлопнуть на/за вход — сдвигаем на тик в прибыльную сторону.
+        def _tp_correct(tp: float) -> bool:
+            return tp > entry_price if new_dir == "LONG" else tp < entry_price
+
+        tp_ok = _tp_correct(T_adj)
+        if not tp_ok:
+            # Фактический филл ушёл от триггера P (проскальзывание/гэп): цель
+            # T = P*(1±w) оказалась по убыточную сторону от реального входа.
+            # Оставлять её нельзя — виртуальный TP сработает сразу при открытии
+            # и закроет хедж по цене входа (цикл не выйдет в безубыток). Поэтому
+            # пересчитываем цель от ФАКТИЧЕСКОГО входа.
+            U_at_fill = N * (entry_price - A) if A > 0 else U
+            resized = self._reverse_sizing(entry_price, N, nr, U_at_fill, new_dir, w_pct=w_step)
+            if resized is not None:
+                T_recalc = await self._adjust_price(resized[0], mode=mode)
+                if _tp_correct(T_recalc):
+                    self.log.warning(
+                        f"[REVERSE] chain T recalculated from actual fill | dir={new_dir} "
+                        f"entry={entry_price} P={P} old_T={T_adj} new_T={T_recalc}"
+                    )
+                    T_adj = T_recalc
+                    tp_ok = True
+        if not tp_ok:
+            tick = self._tick_size if mode == "live" else None
+            if tick and tick > 0:
+                nudged = T_adj + tick if new_dir == "LONG" else T_adj - tick
+                T_adj = await self._adjust_price(nudged, mode=mode)
+            tp_ok = _tp_correct(T_adj)
+        if not tp_ok:
+            self.log.error(
+                f"[REVERSE] chain T on wrong side of fill — TP skipped | "
+                f"dir={new_dir} entry={entry_price} T={T_adj} N={N} S_total={S_total}"
+            )
+
+        # Наблюдаемость: ожидаемый PnL всего цикла, если TP реально исполнится на
+        # T_adj. Если он отрицательный — хедж недобрал (cap/сайзинг) и цикл
+        # закроется в минус даже как REVERSE_BE: логируем числа для диагностики.
+        try:
+            _exp_cycle = (
+                nr + N * (entry_price - A)
+                + actual_net * (T_adj - entry_price)
+                - f_in * abs(q) * entry_price
+                - f_out * tp_qty * T_adj
+            )
+            if _exp_cycle < -1e-9:
+                self.log.warning(
+                    f"[REVERSE] chain TP leaves cycle negative | step={step} "
+                    f"expected={_exp_cycle:+.4f} T={T_adj} entry={entry_price} "
+                    f"net={actual_net} q={q} nr={nr} N={N} A={A} capped={capped}"
+                )
+            else:
+                self.log.info(
+                    f"[REVERSE] chain TP expected_cycle_pnl={_exp_cycle:+.4f} "
+                    f"step={step} T={T_adj}"
+                )
+        except Exception:
+            pass
+
+        mult = abs(q) / abs(N) if N else 0.0
+        self.log.info(
+            f"[REVERSE] chain | step={step} N={N} net_realized={nr} U_eff={U_eff} "
+            f"A={A} P={P} T={T_adj} |S_total|={abs(S_total)} q={q} "
+            f"f_in={f_in} f_out={f_out} p={p} w={w} mult={mult}"
+        )
+        if is_first:
+            # 1-й reverse: сохраняем привычные аудит-строки [REVERSE] sizing/be,
+            # добавляя в них unified-поля (fee/profit-aware сайзинг).
+            self.log.info(
+                f"[REVERSE] sizing | N={N} net_realized={nr} U_eff={U_eff} A={A} "
+                f"P={P} T={T_adj} |S_total|={abs(S_total)} q={q} "
+                f"f_in={f_in} f_out={f_out} p={p} w={w} mult={mult} path=unified"
+            )
+            self.log.info(
+                f"[REVERSE] be | E={original_entry} E_rev={entry_price} "
+                f"Qo={original_qty} Qh={tp_qty} P={P} T={T_adj} "
+                f"N={N} net_realized={nr} U_eff={U_eff} A={A} "
+                f"|S_total|={abs(S_total)} q={q} f_in={f_in} f_out={f_out} "
+                f"p={p} w={w} mult={mult} path=unified"
+            )
+
+        if mode == "live" and tp_qty > 0 and tp_ok:
+            try:
+                await self._place_tp_limit(new_dir, T_adj, tp_qty)
+                self.log.info(
+                    f"[REVERSE] chain TP placed | {new_dir} tp={T_adj} qty={tp_qty}"
+                )
+            except Exception as e:
+                self.log.error(f"[REVERSE] chain TP placement failed: {e}", exc_info=True)
+
+        return entry_price, tp_qty, T_adj
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -739,6 +1487,48 @@ class OrderManager:
         sl_distance = abs(signal.entry_price - effective_sl_price)
         sl_distance_pct = (sl_distance / signal.entry_price * 100) if signal.entry_price > 0 else 0.0
 
+        # position_size_pct: МАРЖА = % от СВОБОДНОГО депозита (availableBalance),
+        # только live. Приоритет ниже position_size_usd: явный USD-размер перебивает
+        # процент. Открытые позиции не учитываются — availableBalance уже без
+        # занятой под них маржи.
+        pct_margin = 0.0
+        pct_free_balance = 0.0
+        if not is_recovery and self.cfg.position_size_usd <= 0 and BOT_ENV == "live":
+            try:
+                pct = float(getattr(self.cfg, "position_size_pct", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            if pct > 0:
+                pct_free_balance = await self.get_free_balance(mode)
+                if pct_free_balance > 0:
+                    margin = pct_free_balance * pct / 100
+                    # Нижний порог нотионала: процент от малого свободного депозита
+                    # не должен уходить ниже MIN_NOTIONAL биржи, иначе ордер отклонят.
+                    min_notional = await self._get_min_notional_usd()
+                    min_margin = (min_notional / self.cfg.leverage) if min_notional > 0 else 0.0
+                    if min_margin > 0 and margin < min_margin:
+                        if min_margin <= pct_free_balance:
+                            margin = math.ceil(min_margin * 100) / 100
+                            self.log.info(
+                                f"[LIVE] position_size_pct below minNotional "
+                                f"(floor=${min_notional:.2f}) — margin bumped to ${margin:.2f}"
+                            )
+                        else:
+                            self.log.warning(
+                                f"[LIVE] position_size_pct below minNotional "
+                                f"(floor=${min_notional:.2f}) and free balance "
+                                f"${pct_free_balance:.2f} too low — fallback to legacy sizing"
+                            )
+                            margin = 0.0
+                    else:
+                        margin = round(margin, 2)
+                    pct_margin = margin if margin > 0 else 0.0
+                else:
+                    self.log.warning(
+                        "[LIVE] position_size_pct set but free balance unavailable — "
+                        "fallback to legacy sizing"
+                    )
+
         if is_recovery:
             # Recovery FIRST — must size to cover debt, ignore fixed sizing
             # Recovery: qty = target_profit / (entry * tp1_pct%)
@@ -753,6 +1543,34 @@ class OrderManager:
                     f"target={recovery_target:.4f} qty={raw_qty:.6f}"
                 )
                 return None
+        elif self.cfg.position_size_usd > 0:
+            # МАРЖА в USD (ручной объём из UI): позиция = margin * leverage.
+            margin = self.cfg.position_size_usd
+            raw_qty = (margin * self.cfg.leverage) / signal.entry_price
+            self.log.info(
+                f"[LIVE] Size by position_size_usd(margin) | margin=${margin:.2f} "
+                f"leverage={self.cfg.leverage}x notional=~${margin * self.cfg.leverage:.2f} "
+                f"entry={signal.entry_price:.6f} qty={raw_qty:.6f}"
+            )
+        elif pct_margin > 0:
+            # МАРЖА = % от СВОБОДНОГО депозита (availableBalance): позиция = margin * leverage.
+            margin = pct_margin
+            raw_qty = (margin * self.cfg.leverage) / signal.entry_price
+            self.log.info(
+                f"[LIVE] Size by position_size_pct | free_margin=${pct_free_balance:.2f} "
+                f"pct={self.cfg.position_size_pct}% margin=${margin:.2f} "
+                f"leverage={self.cfg.leverage}x notional=~${margin * self.cfg.leverage:.2f} "
+                f"entry={signal.entry_price:.6f} qty={raw_qty:.6f}"
+            )
+        elif _live_default_margin() > 0:
+            # Глобальный дефолт live-окружения: маржа из LIVE_DEFAULT_MARGIN_USD.
+            margin = _live_default_margin()
+            raw_qty = (margin * self.cfg.leverage) / signal.entry_price
+            self.log.info(
+                f"[LIVE] Size by LIVE_DEFAULT_MARGIN_USD | margin=${margin:.2f} "
+                f"leverage={self.cfg.leverage}x notional=~${margin * self.cfg.leverage:.2f} "
+                f"entry={signal.entry_price:.6f} qty={raw_qty:.6f}"
+            )
         elif self.cfg.margin_pct > 0:
             # margin_pct = % от депозита на маржу.
             # margin = round(balance * pct / 100, 1)  (до 1 знака после запятой).
@@ -793,6 +1611,17 @@ class OrderManager:
                     entry_price=signal.entry_price,
                     leverage=self.cfg.leverage,
                 )
+        # Потолок нотионала (конфиг / % от equity с нереализованным PnL / брекет биржи).
+        if mode == "live" and raw_qty > 0 and signal.entry_price > 0:
+            cap_usd = await self._notional_cap_usd()
+            if cap_usd > 0:
+                max_qty_cap = cap_usd / signal.entry_price
+                if raw_qty > max_qty_cap:
+                    self.log.info(
+                        f"[CAP] qty clamped by notional cap | requested={raw_qty:.6f} "
+                        f"capped={max_qty_cap:.6f} notional_cap=${cap_usd:.2f}"
+                    )
+                    raw_qty = max_qty_cap
         qty = await self._adjust_qty(raw_qty, mode=mode)
 
         if qty > 0 and sl_distance > 0:
@@ -820,6 +1649,7 @@ class OrderManager:
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
             )
+            _audit("entry", symbol=self.cfg.symbol, direction=signal.direction, qty=qty, orderId=(order or {}).get("orderId"))
             # Вход изменил позицию/баланс — кэши невалидны.
             self._invalidate_caches()
             entry_price = await self._get_fill_price(order, signal.entry_price)
@@ -985,6 +1815,7 @@ class OrderManager:
                 quantity=qty,
                 reduceOnly=True,
             )
+            _audit("close_market", symbol=self.cfg.symbol, direction=direction, qty=qty)
             # Закрытие изменило позицию/баланс — кэши невалидны.
             self._invalidate_caches()
             self.log.info(f"[LIVE] Force closed | {direction} qty={qty}")
@@ -1033,11 +1864,175 @@ class OrderManager:
         else:
             self.log.info(f"[PAPER] Would move SL to breakeven | price={entry_price}")
 
+    async def _get_symbol_max_leverage(self) -> Optional[int]:
+        """Максимально допустимое плечо символа из futures_leverage_bracket.
+
+        Кэшируется на инстансе после первого успешного чтения. Бросает только
+        ошибки самого REST-вызова — их обрабатывает _set_leverage.
+        """
+        if self._max_leverage_cache is not None:
+            return self._max_leverage_cache
+        data = await self.client.futures_leverage_bracket(symbol=self.cfg.symbol)
+        max_lev = _extract_max_leverage(data)
+        if max_lev is not None:
+            self._max_leverage_cache = max_lev
+        return max_lev
+
+    async def _get_symbol_notional_cap(self) -> Optional[float]:
+        """Биржевой потолок нотионала (USD) для текущего плеча символа."""
+        if self._notional_cap_cache is not None:
+            return self._notional_cap_cache
+        try:
+            leverage = int(self.cfg.leverage)
+        except (TypeError, ValueError):
+            leverage = 1
+        try:
+            data = await self.client.futures_leverage_bracket(symbol=self.cfg.symbol)
+            cap = _extract_notional_cap(data, leverage)
+            if cap is not None:
+                self._notional_cap_cache = cap
+            return cap
+        except Exception as e:
+            self.log.debug(f"[CAP] bracket notional fetch failed: {e}")
+            return None
+
+    async def _get_equity(self) -> float:
+        """Equity счёта с учётом нереализованного PnL (totalMarginBalance)."""
+        now = time.time()
+        cache = self._equity_cache
+        if cache["value"] is not None and (now - cache["ts"]) < 30.0:
+            return float(cache["value"])
+        try:
+            acct = await self.client.futures_account()
+            eq = float(acct.get("totalMarginBalance") or 0.0)
+            if eq <= 0:
+                eq = float(acct.get("totalWalletBalance") or 0.0) + float(acct.get("totalUnrealizedProfit") or 0.0)
+            if eq > 0:
+                cache.update(value=eq, ts=now)
+                return eq
+        except Exception as e:
+            self.log.debug(f"[CAP] equity fetch failed: {e}")
+        return float(cache["value"] or 0.0)
+
+    async def _get_available_margin(self) -> float:
+        """Свободная маржа (availableBalance) — потолок объёма, чтобы не ловить -2019."""
+        now = time.time()
+        cache = getattr(self, "_avail_margin_cache", None)
+        if cache and cache.get("value") is not None and (now - float(cache.get("ts", 0.0))) < 30.0:
+            return float(cache["value"])
+        try:
+            acct = await self.client.futures_account()
+            avail = float(acct.get("availableBalance") or 0.0)
+            self._avail_margin_cache = {"value": avail, "ts": now}
+            return avail
+        except Exception as e:
+            self.log.debug(f"[CAP] available margin fetch failed: {e}")
+        return 0.0
+
+    async def _notional_cap_usd(self) -> float:
+        """Потолок нотионала: min(абсолютный, % от equity, доступная маржа×плечо, биржевой брекет)."""
+        caps = []
+        try:
+            abs_cap = float(getattr(self.cfg, "max_position_notional_usd", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            abs_cap = 0.0
+        if abs_cap > 0:
+            caps.append(abs_cap)
+        try:
+            pct = float(getattr(self.cfg, "max_position_pct_equity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct > 0:
+            eq = await self._get_equity()
+            if eq > 0:
+                caps.append(eq * pct / 100.0)
+        # Доступная маржа × плечо (с запасом 5%) — чтобы хедж/вход не упирались в -2019.
+        try:
+            avail = await self._get_available_margin()
+            if avail > 0:
+                lev = int(self.cfg.leverage) if self.cfg.leverage else 1
+                caps.append(avail * lev * 0.95)
+        except Exception:
+            pass
+        bracket_cap = await self._get_symbol_notional_cap()
+        if bracket_cap and bracket_cap > 0:
+            caps.append(bracket_cap)
+        return min(caps) if caps else 0.0
+
+    def _log_leverage_clamp(self, configured: int, effective: int) -> None:
+        """Логирует зажим плеча на старте и при каждом изменении, но не каждый вход."""
+        if effective >= configured:
+            return
+        if self._last_leverage_log == (configured, effective):
+            return
+        self._last_leverage_log = (configured, effective)
+        self.log.info(f"[LEVERAGE] clamped {configured} → {effective} (symbol max)")
+
     async def _set_leverage(self) -> None:
-        await self.client.futures_change_leverage(
-            symbol=self.cfg.symbol,
-            leverage=self.cfg.leverage,
-        )
+        """Применяет плечо, зажимая его по биржевому максимуму символа.
+
+        Никогда не бросает наружу: любые ошибки (в т.ч. -4028) только
+        логируются, чтобы не срывать открытие позиции вызывающим кодом.
+        """
+        symbol = getattr(self.cfg, "symbol", None)
+        if not symbol or self.client is None:
+            self.log.warning("[LEVERAGE] symbol/client unavailable — skipping leverage change")
+            return
+        try:
+            configured = int(self.cfg.leverage)
+        except (TypeError, ValueError):
+            self.log.warning(
+                f"[LEVERAGE] invalid configured leverage={self.cfg.leverage!r} — skipping"
+            )
+            return
+        if configured < 1:
+            self.log.warning(
+                f"[LEVERAGE] invalid configured leverage={configured} (<1) — skipping"
+            )
+            return
+
+        max_allowed: Optional[int] = None
+        try:
+            max_allowed = await self._get_symbol_max_leverage()
+        except Exception as e:
+            self.log.warning(f"[LEVERAGE] bracket read failed for {symbol}: {e}")
+
+        effective = configured
+        if max_allowed is not None and max_allowed >= 1:
+            effective = min(configured, max_allowed)
+
+        try:
+            await self.client.futures_change_leverage(symbol=symbol, leverage=effective)
+            self._log_leverage_clamp(configured, effective)
+            return
+        except BinanceAPIException as e:
+            if getattr(e, "code", None) != -4028:
+                self.log.warning(
+                    f"[LEVERAGE] could not set {effective}x for {symbol}: {e}"
+                )
+                return
+            # -4028: значение не помещается в bracket-лимиты. Один retry с
+            # распарсенным максимумом, иначе с безопасным fallback 20x.
+            fallback = max_allowed if (max_allowed is not None and max_allowed >= 1) else 20
+            if fallback == effective:
+                self.log.warning(
+                    f"[LEVERAGE] -4028 for {effective}x on {symbol}; symbol max "
+                    f"unknown or unchanged — retry skipped"
+                )
+                return
+            self.log.warning(
+                f"[LEVERAGE] -4028 for {effective}x on {symbol} — "
+                f"falling back to {fallback}x"
+            )
+            try:
+                await self.client.futures_change_leverage(symbol=symbol, leverage=fallback)
+                self._log_leverage_clamp(configured, fallback)
+            except Exception as e2:
+                self.log.warning(
+                    f"[LEVERAGE] fallback to {fallback}x failed for {symbol}: {e2}"
+                )
+        except Exception as e:
+            self.log.warning(f"[LEVERAGE] could not set {effective}x for {symbol}: {e}")
 
     async def get_realized_pnl(
         self, symbol: str, entry_time_ms: int, exit_time_ms: int,

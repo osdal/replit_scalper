@@ -71,6 +71,83 @@ class DbReporter:
     async def report_stopped(self) -> None:
         await self._patch({"is_running": False, "position": None})
 
+    async def report_stop_reason(self, reason: Optional[str]) -> None:
+        """Фиксирует причину самоостановки бота (напр. watchdog) для дашборда.
+
+        Сбрасывается API при следующем старте бота.
+        """
+        await self._patch({"stop_reason": reason})
+
+    async def get_bot(self) -> Optional[dict]:
+        """Читает состояние бота из API (используется для stop_requested)."""
+        session = await self._get_session()
+        if session is None:
+            return None
+        try:
+            async with session.get(
+                f"{API_URL}/bots/{self.symbol}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400:
+                    return None
+                return await resp.json()
+        except Exception:
+            return None
+
+    # ---------------- relay signals (testnet -> live) ----------------
+    async def publish_relay_signal(self, payload: dict) -> bool:
+        """Публикует сигнал в live-API (env SIGNAL_RELAY_URL). Best-effort."""
+        base = os.getenv("SIGNAL_RELAY_URL")
+        if not base:
+            return False
+        session = await self._get_session()
+        if session is None:
+            return False
+        try:
+            async with session.post(
+                f"{base.rstrip('/')}/signals",
+                json=_clean_nums(dict(payload)),
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400:
+                    self.log.warning(f"[RELAY] publish failed: {resp.status}")
+                    return False
+                return True
+        except Exception as e:
+            self.log.debug(f"[RELAY] publish error: {e}")
+            return False
+
+    async def get_relay_signals(self) -> list:
+        session = await self._get_session()
+        if session is None:
+            return []
+        try:
+            async with session.get(
+                f"{API_URL}/signals?symbol={self.symbol}&limit=20",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400:
+                    return []
+                data = await resp.json()
+                return data.get("signals") or []
+        except Exception as e:
+            self.log.debug(f"[RELAY] fetch error: {e}")
+            return []
+
+    async def ack_relay_signal(self, signal_id: int, status: str = "consumed", note: Optional[str] = None) -> None:
+        session = await self._get_session()
+        if session is None:
+            return
+        try:
+            async with session.post(
+                f"{API_URL}/signals/{signal_id}/ack",
+                json={"status": status, "note": note},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                return
+        except Exception:
+            return
+
     async def report_rejected(self, signal_data: dict, reason: str, qty: float = 0.0, mode: str = "paper") -> Optional[int]:
         """Записывает сигнал, отклонённый риск-контролем, как сделку со статусом 'rejected'.
         Включает все детали как у обычной сделки, только с пометкой причины отклонения.

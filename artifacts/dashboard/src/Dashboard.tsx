@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import LivePanel from "./LivePanel";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -13,7 +14,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 import {
-  Activity, TrendingUp, TrendingDown, DollarSign, BarChart2,
+  Activity, TrendingUp, TrendingDown, DollarSign, BarChart2, AlertTriangle, Zap,
   Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2,
 } from "lucide-react";
 
@@ -45,7 +46,20 @@ interface Bot {
   tp2_pct: number;
   timeframe: string;
   llm_status?: LLMStatus | null;
+  stop_reason?: string | null;
+  stop_requested?: boolean;
+  reverse_chain_max?: number;
+  max_position_notional_usd?: number;
+  max_position_pct_equity?: number;
+  position_size_usd?: number;
+  trade_mode?: string;
 }
+
+// Причины самоостановки бота (пишет сам бот, API сбрасывает при следующем старте).
+const STOP_REASON_LABELS: Record<string, string> = {
+  watchdog_no_candles: "самостоп: нет свечей",
+  process_exited: "процесс завершился",
+};
 
 interface LLMProviderStatus {
   name: string;
@@ -77,6 +91,10 @@ interface Trade {
   commission?: number | null;
   status?: string;
   reject_reason?: string | null;
+  leg_pnl?: number | null;
+  cycle_pnl?: number | null;
+  chain_depth?: number | null;
+  cycle_close_reason?: string | null;
 }
 
 interface Stats {
@@ -209,7 +227,33 @@ function llmProviderBadges(status: LLMStatus) {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: () => void; isToggling: boolean; onDelete: (symbol: string) => void }) {
+function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete }: { bot: Bot; onToggle: () => void; onKill: () => void; onSaveConfig: (symbol: string, cfg: Record<string, unknown>) => void; isToggling: boolean; onDelete: (symbol: string) => void }) {
+  const [showCfg, setShowCfg] = useState(false);
+  const [cfg, setCfg] = useState<Record<string, string>>({});
+
+  const openCfg = () => {
+    setCfg({
+      leverage: String(bot.leverage ?? ""),
+      risk_pct: String(bot.risk_pct ?? ""),
+      sl_pct: String(bot.sl_pct ?? ""),
+      tp1_pct: String(bot.tp1_pct ?? ""),
+      reverse_chain_max: String(bot.reverse_chain_max ?? 10),
+      max_position_notional_usd: String(bot.max_position_notional_usd ?? 0),
+      max_position_pct_equity: String(bot.max_position_pct_equity ?? 0),
+      position_size_usd: String(bot.position_size_usd ?? 0),
+      trade_mode: String(bot.trade_mode ?? "manual"),
+    });
+    setShowCfg((v) => !v);
+  };
+
+  const saveCfg = () => {
+    const payload: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(cfg)) {
+      payload[k] = k === "trade_mode" ? v : Number(v);
+    }
+    onSaveConfig(bot.symbol, payload);
+  };
+
   const pos = bot.position;
   const isLong = pos?.direction === "LONG";
   const unrealizedPnl = pos && bot.current_price
@@ -220,8 +264,8 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
 
   return (
     <Card className="border border-zinc-800 bg-zinc-900 text-white">
-      <CardHeader className="pb-2 flex flex-row items-center justify-between">
-        <div className="flex items-center gap-2">
+      <CardHeader className="pb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-lg font-bold">{bot.symbol}</CardTitle>
           <Badge variant={bot.mode === "live" ? "destructive" : "secondary"} className="text-xs">
             {bot.mode.toUpperCase()}
@@ -229,7 +273,26 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
           <Badge variant={bot.is_running ? "default" : "outline"} className="text-xs">
             {bot.is_running ? "● RUNNING" : "○ STOPPED"}
           </Badge>
+          {bot.is_running && bot.stop_requested && (
+            <Badge
+              variant="destructive"
+              className="text-xs"
+              title="Мягкая остановка: бот доводит позицию и выходит"
+            >
+              ⏳ STOPPING
+            </Badge>
+          )}
+          {!bot.is_running && bot.stop_reason && (
+            <Badge
+              variant="destructive"
+              className="text-xs"
+              title={`Причина самоостановки: ${bot.stop_reason}`}
+            >
+              ⚠ {STOP_REASON_LABELS[bot.stop_reason] ?? bot.stop_reason}
+            </Badge>
+          )}
         </div>
+        <div className="flex items-center gap-1.5 shrink-0">
         <Button
           size="sm"
           variant={bot.is_running ? "destructive" : "default"}
@@ -240,6 +303,25 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
           {isToggling ? <><RefreshCw className="w-3 h-3 mr-1 animate-spin" />...</> :
            bot.is_running ? <><Square className="w-3 h-3 mr-1" />Stop</> : <><Play className="w-3 h-3 mr-1" />Start</>}
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={openCfg}
+          className="h-7 px-2 border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+          title="Настройки бота"
+        >
+          <Settings className="w-3 h-3" />
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onKill}
+          disabled={isToggling || !bot.is_running}
+          className="h-7 px-2 border-red-700 text-red-300 hover:bg-red-900/40"
+          title="Жёстко убить процесс (позиции/ордера на бирже остаются)"
+        >
+          <Zap className="w-3 h-3" />
+        </Button>
         <button
           onClick={() => onDelete(bot.symbol)}
           className="p-2 rounded hover:bg-red-900/50 transition-colors text-zinc-500 hover:text-red-400"
@@ -247,6 +329,7 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
+        </div>
       </CardHeader>
 
       <CardContent className="space-y-3">
@@ -318,6 +401,48 @@ function BotCard({ bot, onToggle, isToggling, onDelete }: { bot: Bot; onToggle: 
         ) : (
           <div className="rounded-lg bg-zinc-800 p-3 text-center text-zinc-500 text-sm mt-2">
             No open position
+          </div>
+        )}
+
+        {showCfg && (
+          <div className="rounded-lg bg-zinc-800 p-3 space-y-2 mt-2">
+            <div className="text-xs font-semibold text-zinc-400">CONFIG</div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+              {([
+                ["leverage", "Плечо"],
+                ["risk_pct", "Риск %"],
+                ["sl_pct", "SL %"],
+                ["tp1_pct", "TP1 %"],
+                ["reverse_chain_max", "Лимит реверсов (0=∞)"],
+                ["max_position_notional_usd", "Потолок нотионала $"],
+                ["max_position_pct_equity", "Потолок % equity"],
+                ["position_size_usd", "Маржа $ (0=дефолт)"],
+              ] as [string, string][]).map(([key, label]) => (
+                <label key={key} className="flex flex-col gap-0.5">
+                  <span className="text-zinc-400">{label}</span>
+                  <input
+                    value={cfg[key] ?? ""}
+                    onChange={(e) => setCfg((c) => ({ ...c, [key]: e.target.value }))}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                  />
+                </label>
+              ))}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-zinc-400">trade_mode</span>
+                <select
+                  value={cfg.trade_mode ?? "manual"}
+                  onChange={(e) => setCfg((c) => ({ ...c, trade_mode: e.target.value }))}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5"
+                >
+                  <option value="manual">manual</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+            </div>
+            <div className="flex gap-2 pt-1 items-center">
+              <Button size="sm" onClick={saveCfg} className="h-7">Save</Button>
+              <span className="text-[11px] text-zinc-500">применяется после Stop → Start</span>
+            </div>
           </div>
         )}
       </CardContent>
@@ -421,6 +546,13 @@ function reasonBadge(reason: string): ReasonBadge {
         title: "reverse leg was closed by the exchange backstop — a real loss",
         className: "bg-orange-600/20 text-orange-300 border-orange-500/40",
       };
+    case "REVERSE_CHAIN_STOP":
+      return {
+        variant: "secondary",
+        label: "Reverse chain stop",
+        title: "reverse chain limit reached — the bot force-closed the position at market",
+        className: "bg-amber-600/20 text-amber-300 border-amber-500/40",
+      };
     case "REVERSE":
       return {
         variant: "secondary",
@@ -482,14 +614,14 @@ function TradesTable({ trades }: { trades: Trade[] }) {
         <Table>
           <TableHeader>
             <TableRow className="border-zinc-800 hover:bg-transparent">
-              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Reason", "Mode", "Open", "Close"].map((h) => (
+              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Leg", "Cycle", "Legs", "Reason", "Mode", "Open", "Close"].map((h) => (
                 <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
               ))}
             </TableRow>
           </TableHeader>
           <TableBody>
             {trades.length === 0 && (
-              <TableRow><TableCell colSpan={12} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
+              <TableRow><TableCell colSpan={15} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
             )}
             {trades.map((t) => {
               const gross = grossPnl(t);
@@ -528,6 +660,15 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                     </>
                   )}
                 </TableCell>
+                <TableCell className={`font-mono text-sm ${t.leg_pnl == null ? "text-zinc-600" : t.leg_pnl >= 0 ? "text-green-400" : "text-red-400"}`} title="PnL последней ноги цикла">
+                  {t.leg_pnl == null ? "—" : `${t.leg_pnl >= 0 ? "+" : ""}${fmt(t.leg_pnl, 4)}`}
+                </TableCell>
+                <TableCell className={`font-mono text-sm ${t.cycle_pnl == null ? "text-zinc-600" : t.cycle_pnl >= 0 ? "text-green-400" : "text-red-400"}`} title="Итог цикла (все ноги, net)">
+                  {t.cycle_pnl == null ? "—" : `${t.cycle_pnl >= 0 ? "+" : ""}${fmt(t.cycle_pnl, 4)}`}
+                </TableCell>
+                <TableCell className="text-zinc-400 text-xs" title="Число ног в цикле">
+                  {t.chain_depth == null ? "—" : t.chain_depth}
+                </TableCell>
                 <TableCell>
                   {t.status === "rejected" ? (
                     <div className="flex flex-col gap-1">
@@ -544,14 +685,24 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                       })()}
                     </div>
                   ) : (
-                    t.exit_reason && (() => {
-                      const b = reasonBadge(t.exit_reason);
-                      return (
-                        <Badge variant={b.variant} title={b.title} className={`text-xs ${b.className ?? ""}`}>
-                          {b.label}
-                        </Badge>
-                      );
-                    })()
+                    <div className="flex flex-col gap-1">
+                      {t.exit_reason && (() => {
+                        const b = reasonBadge(t.exit_reason);
+                        return (
+                          <Badge variant={b.variant} title={b.title} className={`text-xs ${b.className ?? ""}`}>
+                            {b.label}
+                          </Badge>
+                        );
+                      })()}
+                      {t.cycle_close_reason && (
+                        <span
+                          className="text-[10px] text-zinc-500 font-mono"
+                          title="Причина завершения reverse-цикла (почему не пошли на следующий круг)"
+                        >
+                          {t.cycle_close_reason}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </TableCell>
                 <TableCell>
@@ -645,8 +796,11 @@ export default function Dashboard() {
   const [optJobs, setOptJobs] = useState(1);
   // Фильтр по торговой паре
   const [selectedSymbol, setSelectedSymbol] = useState<string>("all");
-  const symbols = [...new Set(trades.map(t => t.symbol))].sort();
+  const symbols = [...new Set([...bots.map(b => b.symbol), ...trades.map(t => t.symbol)])]
+    .filter(Boolean)
+    .sort();
   const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
+  const IS_LIVE = import.meta.env.VITE_THEME === "live";
   // Inline backtest state
   const [btSymbol, setBtSymbol] = useState("BTCUSDT");
   const [btStartDate, setBtStartDate] = useState("2024-01-01");
@@ -686,12 +840,16 @@ export default function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [b, t, s] = await Promise.all([fetchBots(), fetchTrades(undefined, 100), fetchStats()]);
+      // Фильтруем на сервере по выбранной монете: клиентский фильтр по уже
+      // загруженной странице иначе показывает меньше сделок, чем вкладка
+      // Статистика (она агрегирует всю таблицу).
+      const tradeSymbol = selectedSymbol === "all" ? undefined : selectedSymbol;
+      const [b, t, s] = await Promise.all([fetchBots(), fetchTrades(tradeSymbol, 1000), fetchStats()]);
       setBots(Array.isArray(b) ? b : []);
       const allTrades = Array.isArray(t?.trades) ? t.trades : [];
       // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
       // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
-      setTrades(allTrades.filter((tr) => !String(tr.reject_reason || "").startsWith("skip:")));
+      setTrades(allTrades.filter((tr: Trade) => !String(tr.reject_reason || "").startsWith("skip:")));
       setStats(Array.isArray(s) ? s : []);
       setLastRefresh(new Date());
     } catch {
@@ -699,7 +857,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedSymbol]);
 
   useEffect(() => {
     load();
@@ -743,6 +901,32 @@ export default function Dashboard() {
       await load();
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleKill = async (bot: Bot) => {
+    if (!confirm(
+      `Жёстко убить процесс ${bot.symbol}?\n\n` +
+      `Позиция и ордера на бирже останутся — управляй ими вручную или через kill-switch.`
+    )) return;
+    if (toggling) return;
+    setToggling(bot.symbol);
+    try {
+      await killBot(bot.symbol);
+      await new Promise(r => setTimeout(r, 1000));
+      await load();
+    } finally {
+      setToggling(null);
+    }
+  };
+
+  const handleSaveConfig = async (symbol: string, cfg: Record<string, unknown>) => {
+    try {
+      await updateConfig(symbol, cfg);
+      await new Promise(r => setTimeout(r, 500));
+      await load();
+    } catch (e) {
+      alert(`Save failed: ${e}`);
     }
   };
 
@@ -891,11 +1075,18 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
+    <div className={IS_LIVE
+      ? "min-h-screen bg-red-950 text-red-50 p-4 md:p-6"
+      : "min-h-screen bg-zinc-950 text-white p-4 md:p-6"}>
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
 <div>
-           <h1 className="text-2xl font-bold">Trading Bot Dashboard</h1>
+           <h1 className="text-2xl font-bold">
+             Trading Bot Dashboard
+             {IS_LIVE && (
+               <span className="ml-2 rounded bg-red-600 px-2 py-0.5 align-middle text-sm">LIVE REAL MONEY</span>
+             )}
+           </h1>
            <p className="text-zinc-400 text-sm mt-0.5">
              Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
              <span className={`ml-2 inline-block w-2 h-2 rounded-full ${apiUp ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={apiUp ? "API connected" : "API disconnected"} />
@@ -960,13 +1151,19 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} />
+                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} onKill={() => handleKill(bot)} onSaveConfig={handleSaveConfig} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} />
                 ))}
               </div>
             )}
           </div>
 
           <Tabs defaultValue="chart">
+            {IS_LIVE && (
+              <div className="mb-3 rounded-md border-2 border-red-600 bg-red-950/40 px-3 py-2 text-red-300">
+                <span className="font-semibold">LIVE REAL MONEY</span>
+                <span className="ml-2 text-xs">окружение live, API :5001 — интерфейс намеренно красный, чтобы не путать с тестнетом</span>
+              </div>
+            )}
             <TabsList className="bg-zinc-900 border border-zinc-800">
               <TabsTrigger value="chart" className="data-[state=active]:bg-zinc-700">
                 <TrendingUp className="w-4 h-4 mr-1.5" />PnL Chart
@@ -986,6 +1183,11 @@ export default function Dashboard() {
               <TabsTrigger value="recovery" className="data-[state=active]:bg-zinc-700">
                 <Link2 className="w-4 h-4 mr-1.5" />Recovery
               </TabsTrigger>
+              {IS_LIVE && (
+                <TabsTrigger value="live" className="data-[state=active]:bg-red-800">
+                  <AlertTriangle className="w-4 h-4 mr-1.5" />LIVE
+                </TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="chart" className="mt-4">
@@ -1023,6 +1225,12 @@ export default function Dashboard() {
               </div>
               <TradesTable trades={filteredTrades} />
             </TabsContent>
+
+            {IS_LIVE && (
+              <TabsContent value="live" className="mt-4">
+                <LivePanel bots={bots as any} onChanged={load} />
+              </TabsContent>
+            )}
 
             <TabsContent value="stats" className="mt-4">
               <StatsTable stats={stats} />

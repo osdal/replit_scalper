@@ -25,21 +25,42 @@ import "./env";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { db, botsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { reloadConfigsFromYaml, autoRestartBots } from "./routes/bots";
+import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates } from "./routes/bots";
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
+import { configPath, assertEnvMatchesExchange } from "./botPaths";
+import { checkDailyLossLimit, checkMaxDrawdown } from "./routes/live";
+import { syncBinanceTime } from "./grid-orders-lib";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 loadRootEnv();
+assertEnvMatchesExchange();
+
+// Идемпотентная миграция схемы для уже существующих БД: новая колонка сайзинга
+// (% свободного депозита). Должна выполниться ДО первого SELECT по botsTable,
+// иначе drizzle обратится к несуществующей колонке.
+try {
+  await db.run(sql`ALTER TABLE bots ADD COLUMN position_size_pct REAL NOT NULL DEFAULT 1`);
+  logger.info("Added column bots.position_size_pct");
+} catch {
+  /* колонка уже есть */
+}
+// Причина завершения reverse-цикла (chain_tp/chain_failed/…) — для разбора сделок.
+try {
+  await db.run(sql`ALTER TABLE trades ADD COLUMN cycle_close_reason TEXT`);
+  logger.info("Added column trades.cycle_close_reason");
+} catch {
+  /* колонка уже есть */
+}
 
 /**
  * Помечает is_running=0 у ботов, чей процесс не найден, и возвращает список
@@ -53,25 +74,27 @@ async function resetStaleRunningBots(): Promise<string[]> {
     const bots = await db.select().from(botsTable);
     for (const bot of bots) {
       if (!bot.is_running) continue;
-      const configFile = `config_${bot.symbol.replace("USDT", "").toLowerCase()}.yaml`;
+      const cfgPath = configPath(bot.symbol);
       let isAlive = false;
       try {
         if (process.platform === "win32") {
           const { stdout } = await execAsync(
-            `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
+            `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
+            { windowsHide: true },
           );
           try {
             const processes = JSON.parse(stdout);
             const procList = Array.isArray(processes) ? processes : [processes];
-            isAlive = procList.some((p: any) => p.CommandLine?.includes(configFile));
+            isAlive = procList.some((p: any) => p.CommandLine?.includes(cfgPath));
           } catch {
             isAlive = false;
           }
         } else {
           const { stdout } = await execAsync(
-            `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
+            `ps aux | grep "python.*main.py.*${cfgPath}" | grep -v grep`,
+            { windowsHide: true },
           );
-          isAlive = stdout.includes(configFile);
+          isAlive = stdout.includes(cfgPath);
         }
       } catch {}
       if (!isAlive) {
@@ -117,6 +140,19 @@ resetStaleRunningBots()
       }
       logger.info({ port }, "Server listening");
       stopGridEngine = startGridEngine();
+      // Дневной лимит убытка (только live) — проверяем раз в минуту.
+      setInterval(() => { void checkDailyLossLimit(); }, 60_000);
+      // Лимит просадки (только live): при достижении порога закрываем самую
+      // убыточную позицию. Проверяем часто (каждые 20с).
+      setInterval(() => { void checkMaxDrawdown(); }, 20_000);
+      // Синк часов с Binance (иначе подписанные запросы падают с -1021 и
+      // проверка просадки не может получить equity). Обновляем раз в 5 мин.
+      void syncBinanceTime();
+      setInterval(() => { void syncBinanceTime(); }, 300_000);
+      // Сверяем is_running с реальными процессами ботов, чтобы дашборд всегда
+      // показывал актуальный статус и давал нажать Start после падения/самостопа,
+      // даже если событие exit процесса было потеряно.
+      setInterval(() => { void reconcileBotRunningStates(); }, 30_000);
     });
   });
 

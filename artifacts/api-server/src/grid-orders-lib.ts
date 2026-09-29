@@ -45,8 +45,37 @@ function sign(params: Record<string, string | number>, apiSecret: string): strin
   return crypto.createHmac("sha256", apiSecret).update(qs).digest("hex");
 }
 
+/**
+ * Смещение локальных часов относительно Binance (мс). Сбитые часы дают
+ * -1021 "Timestamp outside of the recvWindow" на всех подписанных запросах,
+ * из-за чего, например, не работает проверка просадки. Периодически
+ * синхронизируем offset по /fapi/v1/time.
+ */
+let binanceTimeOffsetMs = 0;
+let binanceTimeSyncedAt = 0;
+
+export async function syncBinanceTime(): Promise<number> {
+  try {
+    const { baseUrl } = getBinanceEnv();
+    const r = await fetch(`${baseUrl}/fapi/v1/time`);
+    const j: any = await r.json();
+    const server = Number(j?.serverTime);
+    if (server > 0) {
+      binanceTimeOffsetMs = server - Date.now();
+      binanceTimeSyncedAt = Date.now();
+    }
+  } catch {
+    /* сеть недоступна — оставляем прежний offset/recvWindow */
+  }
+  return binanceTimeOffsetMs;
+}
+
+function binanceTimestamp(): number {
+  return Date.now() + binanceTimeOffsetMs;
+}
+
 function signedQuery(params: Record<string, string | number>, apiSecret: string): string {
-  const p = { ...params, timestamp: Date.now() };
+  const p = { ...params, timestamp: binanceTimestamp(), recvWindow: 60000 };
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(p)) qs.set(k, String(v));
   qs.set("signature", sign(p, apiSecret));

@@ -3,23 +3,10 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { BOT_DIR, configPath } from "../botPaths";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Resolve BOT_DIR так же, как в bots.ts — от корня проекта
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
-let BOT_DIR: string;
-if (process.env.BOT_DIR) {
-  const envBotDir = process.env.BOT_DIR;
-  if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
-    BOT_DIR = envBotDir;
-  } else {
-    BOT_DIR = path.join(PROJECT_ROOT, envBotDir);
-  }
-} else {
-  BOT_DIR = path.join(PROJECT_ROOT, "bot");
-}
 
 const router = Router();
 
@@ -41,7 +28,7 @@ router.post("/run", (req, res) => {
   }
 
   const jobId = `${symbol}_${Date.now()}`;
-  const configFile = config || `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
+  const configFile = config || configPath(symbol);
 
   const args = [
     "optimizer.py",

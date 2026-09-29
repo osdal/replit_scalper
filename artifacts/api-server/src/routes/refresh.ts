@@ -8,32 +8,25 @@ import { spawn, exec, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import { BOT_CONFIG_DIR, configPath, statePath } from "../botPaths";
 
 const execAsync = promisify(exec);
 const router = Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
-let BOT_DIR: string;
-if (process.env.BOT_DIR) {
-  BOT_DIR = path.isAbsolute(process.env.BOT_DIR)
-    ? process.env.BOT_DIR
-    : path.join(PROJECT_ROOT, process.env.BOT_DIR);
-} else {
-  BOT_DIR = path.join(PROJECT_ROOT, "bot");
-}
 
 async function findBotPid(symbol: string): Promise<number | null> {
-  const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
+  const cfgPath = configPath(symbol);
   try {
     const { stdout } = await execAsync(
-      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
+      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
+      { windowsHide: true },
     );
     try {
       const processes = JSON.parse(stdout);
       const procList = Array.isArray(processes) ? processes : [processes];
       for (const p of procList) {
-        if (p.CommandLine?.includes(configFile)) {
+        if (p.CommandLine?.includes(cfgPath)) {
           const pid = parseInt(p.ProcessId);
           if (!isNaN(pid) && pid > 0) return pid;
         }
@@ -46,27 +39,27 @@ async function findBotPid(symbol: string): Promise<number | null> {
 }
 
 async function stopAllBots(): Promise<void> {
-  const configFiles = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+  const configFiles = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
   for (const file of configFiles) {
     const symbol = file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT";
     const pid = await findBotPid(symbol);
     if (pid) {
       try {
         if (process.platform === "win32") {
-          await execAsync(`taskkill /PID ${pid} /F`);
+          await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
         }
       } catch (e) {}
     }
-    const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
+    const stateFile = statePath(symbol);
     try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
   }
   await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
 }
 
 async function reloadConfigsFromYaml(): Promise<void> {
-  const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+  const configs = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
   for (const file of configs) {
-    const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
+    const raw = yaml.load(fs.readFileSync(path.join(BOT_CONFIG_DIR, file), "utf8")) as Record<string, unknown>;
     const symbol = (raw.symbol as string).toUpperCase();
     const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     const values = {

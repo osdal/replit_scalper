@@ -22,6 +22,25 @@ _KLINES_CACHE_MAX_KEYS = 64
 _klines_cache: Dict[tuple, tuple] = {}
 _klines_locks: Dict[tuple, asyncio.Lock] = {}
 
+# Последняя ТОРГОВАЯ цена из kline-стрима (k.c текущей свечи) и mark-цена из
+# @markPrice. Держим их раздельно: mark может кратко отклониться от последней
+# сделки, и виртуальные TP/SL должны считаться по фактической цене сделки,
+# а mark — только как fallback. Оба значения с собственным timestamp.
+_last_traded_price: float = 0.0
+_last_traded_ts: float = 0.0
+_mark_price: float = 0.0
+_mark_price_ts: float = 0.0
+
+
+def get_price_snapshot() -> Dict[str, float]:
+    """Снимок last/mark с их timestamp для выбора источника триггера в боте."""
+    return {
+        "last_price": _last_traded_price,
+        "last_price_ts": _last_traded_ts,
+        "mark_price": _mark_price,
+        "mark_price_ts": _mark_price_ts,
+    }
+
 
 def _prune_klines_cache() -> None:
     if len(_klines_cache) <= _KLINES_CACHE_MAX_KEYS:
@@ -183,10 +202,17 @@ async def start_kline_websocket(
     open/high/low/close/volume и .name = open_time (pd.Timestamp).
 
     on_price вызывается на каждом markPrice-апдейте — используется ботом для
-    SL/TP-тика и heartbeat, чтобы не дёргать REST ticker.
+    SL/TP-тика и heartbeat, чтобы не дёргать REST ticker (mark также доступен
+    через get_price_snapshot()).
+
+    Последняя торговая цена (k.c) доступна через get_price_snapshot() с
+    отдельным timestamp — она обновляется на каждом kline-апдейте, включая
+    незакрытую свечу, и является приоритетным источником для TP/SL.
 
     При обрыве — реконнект с экспоненциальным backoff.
     """
+    global _last_traded_price, _last_traded_ts, _mark_price, _mark_price_ts
+
     bm = BinanceSocketManager(client)
     sym = symbol.lower()
     stream_to_interval: Dict[str, str] = {
@@ -204,8 +230,11 @@ async def start_kline_websocket(
         if shutdown_event and shutdown_event.is_set():
             break
         try:
-            # category=None — используем базовый URL (совместимо с testnet).
-            async with bm.futures_multiplex_socket(streams, category=None) as stream:
+            # category="market" — корректный путь для market-стримов USD-M.
+            # На реальном эндпоинте category=None даёт соединение БЕЗ данных
+            # (стрим не идёт), а на тестнете работает; "market" проверенно
+            # работает в обоих окружениях.
+            async with bm.futures_multiplex_socket(streams, category="market") as stream:
                 if logger:
                     logger.info(
                         f"[WS] Connected | {symbol} intervals={list(handlers.keys())}"
@@ -232,6 +261,15 @@ async def start_kline_websocket(
                     event = data.get("e")
                     if event == "kline":
                         k = data.get("k") or {}
+                        # Последняя торговая цена — на КАЖДОМ апдейте свечи
+                        # (в т.ч. незакрытой): k.c = close текущей свечи.
+                        try:
+                            traded = float(k.get("c", 0) or 0)
+                        except (TypeError, ValueError):
+                            traded = 0.0
+                        if traded > 0:
+                            _last_traded_price = traded
+                            _last_traded_ts = time.time()
                         if not k.get("x"):
                             continue
                         iv = stream_to_interval.get(msg.get("stream", ""))
@@ -254,13 +292,16 @@ async def start_kline_websocket(
                                     f"Candle handler error ({iv}): {e}",
                                     exc_info=True,
                                 )
-                    elif event == "markPriceUpdate" and on_price is not None:
+                    elif event == "markPriceUpdate":
                         try:
                             price = float(data.get("p", 0) or 0)
-                            if price > 0:
+                        except (TypeError, ValueError):
+                            price = 0.0
+                        if price > 0:
+                            _mark_price = price
+                            _mark_price_ts = time.time()
+                            if on_price is not None:
                                 on_price(price)
-                        except Exception:
-                            pass
         except asyncio.CancelledError:
             raise
         except Exception as e:

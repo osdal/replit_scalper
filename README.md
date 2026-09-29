@@ -289,8 +289,10 @@ P* = E_rev ∓ Qo * |E - E_rev| / Qh
 
 - `TP1` / `TP2` — тейк-профиты.
 - `SL` — стоп-лосс.
-- `REVERSE_BE` — reverse-цикл закрыт по break-even цели (≈0 минус комиссии).
-- `REVERSE_BACKSTOP` — reverse-нога закрыта биржевым backstop-ордером (реальный убыток).
+- `REVERSE_BE` — reverse-цикл закрыт по плановой break-even цели (≈0 минус комиссии), т.е. TP-лимит обратной ноги реально исполнился.
+- `REVERSE_BACKSTOP` — reverse-нога закрыта биржевым backstop-ордером; метка ставится **только** если backstop действительно исполнился (непустой `actualOrderId`, статус `TRIGGERED`/`FINISHED`), а не просто отменён.
+- `REVERSE_MARKET` — reverse-нога закрыта ботом по рынку/агрессивным marketable-лимитом, вручную или по гэпу (без исполнения планового TP-лимита и без срабатывания backstop).
+- `REVERSE_CHAIN_STOP` — достигнут лимит reverse-цепочки (`reverse_chain_max`), бот принудительно закрыл позицию по рынку (см. 3.6c).
 - `REVERSE` — legacy-метка старых reverse-сделок.
 
 ### 3.6b Комиссии reverse-цикла (важно)
@@ -306,6 +308,37 @@ P* = E_rev ∓ Qo * |E - E_rev| / Qh
 | Reverse | 307 | 0.4333 | taker | 0.0665 |
 | TP | 228 | 0.4310 | maker | 0.0197 |
 | **Итого** | | | | **0.1036** на ~$266 оборота |
+
+### 3.6c Ограниченная reverse-цепочка (2-й разворот)
+
+Если **первый разворот не удался** (рынок «пилит» обратно в сторону исходного направления), бот может
+открыть **второй разворот** обратно на исходную сторону. Размер второй ноги считается так, чтобы
+**весь** ордербук (плюс уже реализованный PnL цикла, минус комиссии) вышел в ноль на целевой цене.
+
+**Формулы** (`P` — текущая цена, `N` — текущий знаковый нетто-объём; `w` — в долях):
+
+```
+w       = reverse_breakeven_pct + reverse_fee_buffer_pct
+T       = P * (1 ± w)               # цель: - для LONG, + для SHORT
+S_total = -net_realized / (T - P)   # суммарный требуемый размер книги
+q       = S_total - N               # объём новой ноги
+```
+
+**Новые ключи конфига** (значения по умолчанию):
+
+| Ключ | По умолчанию | Смысл |
+|------|--------------|-------|
+| `reverse_sl_pct` | `1.0` | Виртуальный SL reverse-ноги, % |
+| `reverse_chain_max` | `2` | Максимум шагов reverse-цепочки |
+| `reverse_fee_buffer_pct` | `0.1` | Буфер на комиссии в целевой цене, % |
+
+**Поведение при достижении лимита**: когда шаг доходит до `reverse_chain_max`, бот **принудительно
+закрывает позицию по рынку** и помечает цикл `REVERSE_CHAIN_STOP` (см. 3.6a).
+
+**Риск (важно)**: требуемый размер **растёт с каждым неудачным разворотом** (martingale-подобно; вторая
+нога может быть ≈**2–3×** первой). Поэтому цепочка ограничена, а худший сценарий — **сильный тренд без
+откатов** (tail-риск). При этом `reverse_sl_pct=1%` заставляет бота действовать **раньше** биржевого
+backstop `2%` — уже это само по себе снижает убыток от пилы.
 
 ---
 
@@ -927,7 +960,7 @@ Daily-скрипт регистрируется в планировщике за
 
 ### 2026-09-19
 - **Strict break-even reverse sizing**: `send_qty = held_plan + Qo`, где `held_plan = Qo*|E-S|/|S-P3_plan|`; точная цель выхода от фактического reverse-филла `P* = E_rev ∓ Qo*|E-E_rev|/Qh` (Qh — фактический net reverse qty) — цикл `REVERSE_BE` закрывается в ≈0 минус комиссии (см. 3.6).
-- **Метки выходов**: `REVERSE_BE` (break-even цель), `REVERSE_BACKSTOP` (биржевой backstop — реальный убыток), legacy `REVERSE`, плюс `TP1`/`TP2`/`SL` в `trades.exit_reason`; `refinalize_cycle_after_flat` перезаписывает строку trades по фактическому флэту (см. 3.6a).
+- **Метки выходов**: `REVERSE_BE` (плановый TP-лимит исполнен), `REVERSE_BACKSTOP` (биржевой backstop реально исполнился), `REVERSE_MARKET` (bot-initiated market/marketable, ручное или гэп), legacy `REVERSE`, плюс `TP1`/`TP2`/`SL` в `trades.exit_reason`; `refinalize_cycle_after_flat` перезаписывает строку trades по фактическому флэту (см. 3.6a).
 - **Комиссии reverse-цикла**: три ноги и оборот ≈2.5–3.5× позиции — «безубыточный» цикл стоит ≈0.04–0.1% оборота (см. 3.6b).
 - **Восстановление бота из state**: stop сохраняет state-файл; старт предпочитает сохранённые уровни при совпадении с биржевой позицией, пересчитывает только при расхождении, не делает принудительный market-close при пробитом SL и досоздаёт биржевую защиту (TP limit + `botsl_*` backstop) — см. 3.4a.
 - **Runtime-конфиг grid-движка**: `GET|POST /api/grid-engine/config`, персистентность в `data/grid-engine.json`, auto-дефолты `autoTpPct`/`autoSlPct`/`autoEdgePct`/`autoGate`/`autoOrderUsd`/`autoLeverage`/`autoMax`/`autoTotalMax` (см. 5.1, 17.10a); блок `Auto defaults` и переключатель Manual/Auto, пишущий `autoEnabled` в серверный конфиг (см. 17.10b).
@@ -1146,3 +1179,44 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - Триггеры считаются по **MARK_PRICE**, а не по последней цене (last price).
 - При перестановке TP есть короткое окно **cancel + place**, в которое TP на бирже отсутствует.
 - Signal-based fallback-закрытия работают только пока **открыт браузер**; серверная защита (STOP/TP на бирже) продолжает действовать и при закрытом браузере.
+
+
+## 18. Live-контур, вариант B (ступенчатая цель) и лимиты риска (29.09.2026)
+
+### 18.1 Две среды
+- **testnet**: боты `bot/configs/testnet/config_<sym>.yaml`, БД `data/bot.db`, API :5000, дашборд :5173.
+- **live**: боты `bot/configs/live/config_<sym>.yaml`, БД `data/bot_live.db`, API :5001, дашборд :5176 (`start_live.ps1`).
+- Старые `bot/config_*.yaml` удалены — конфиги только в `bot/configs/<env>/`.
+- Relay: testnet публикует сигналы в live-API (`SIGNAL_RELAY_URL`); live-боты с `relay_only=1` только потребляют.
+- **Важно**: для testnet задан `DASHBOARD_API_URL=http://localhost:5000/api`. Без него `bot/main.py` по умолчанию ходит на `:5001` (live) и читает чужие флаги `relay_only` — из-за этого торговали только символы с `relay_only=0` в live-БД.
+
+### 18.2 Сайзинг (приоритет)
+`position_size_usd` → `position_size_pct` (live, % свободной маржи `availableBalance`) → `LIVE_DEFAULT_MARGIN_USD` → `margin_pct` → `fixed_notional_usd` → `fixed_qty` → `fixed_risk_usd` (testnet) → `risk_pct`.
+Потолки: `max_position_notional_usd`, `max_position_pct_equity`, `availableBalance×leverage×0.95`, bracket-cap; снизу — MIN_NOTIONAL.
+
+### 18.3 Reverse-цепочка
+- Unified fee/profit-aware сайзинг: цель `T = P·(1±w)`, совокупное нетто `S_total` считается так, чтобы цикл вышел в безубыток с учётом комиссий; `reverse_chain_max` (10).
+- **Вариант B** (`REVERSE_STEP_DOUBLING=true`, включён и на testnet, и на live): цель по шагу `0.5, 0.5, 1, 2, 4, 8 %…` (шаги 0–1 базовые, далее ×2), виртуальный SL = цель + 0.3 % (чтобы TP оставался достижимым, P(TP)≈50 %+). Реализация — `reverse_w_pct_for_step` / `reverse_sl_pct_for_step` в `bot/config.py`.
+- Исправления:
+  - при недоступности биржевого entry берётся entry трекера (иначе `A=0` → `U_eff=0` → крошечный хедж и цикл закрывался в минус);
+  - `net_realized` fallback на `reversed_from_pnl`;
+  - для `step>0` legacy-сайзинг запрещён;
+  - крупный хедж разбивается на несколько market-ордеров ≤ биржевого `maxQty` (сплит) с учётом MIN_NOTIONAL (`_place_market_split`);
+  - биржевой backstop ставится от **виртуального SL** (а не от входа), т.к. SL ступенчатый.
+
+### 18.4 Лимиты риска (live)
+- **Дневной лимит** `LIVE_DAILY_LOSS_LIMIT_USD=10`: net за UTC-сутки ≤ −$10 → `stopAllBots()` + `flattenAll()` («заморозка»), `artifacts/api-server/src/routes/live.ts`.
+- **Просадка** `LIVE_MAX_DRAWDOWN_PCT=5`: просадка от **максимума баланса** (high-water mark, `data/live_drawdown_peak.json`) ≥ 5 % → закрытие **одной самой убыточной** позиции (`bot/close_worst.py`, market reduceOnly), **без остановки ботов**. Проверка каждые 20 с, кулдаун 5 мин.
+  - Референс: `LIVE_DEPOSIT_USD=0` → пик баланса; `>0` → фиксированный депозит.
+- **Синк времени Binance**: `syncBinanceTime()` + `recvWindow=60000` в `artifacts/api-server/src/grid-orders-lib.ts` — без него подписанные запросы падают с `-1021` и лимиты не срабатывают.
+
+### 18.5 Диагностика
+- `bot/logs/<env>/<sym>_diag.log` — `WARNING+` и reverse/chain события (не зависит от захвата stdout бота API-сервером).
+- `trades.cycle_close_reason` — причина завершения reverse-цикла: `chain_tp` (TP обратной ноги), `chain_backstop`, `chain_max`, `chain_failed` (следующая нога не открылась), `chain_market`.
+- В дашборде (вкладка Live) показываются дневной лимит и просадка.
+
+### 18.6 Прочее
+- Watchdog пропажи свечей: `WATCHDOG_SHUTDOWN` (по умолчанию `false` — бот не самоостанавливается).
+- Первый reverse: до 3 ретраев (транзиентные `-4164`/`-2027`).
+- Дашборд: header карточки бота — `flex-wrap`, чтобы кнопка Start/Stop не пропадала у ботов со `stop_reason`.
+- Скрипты: `bot/close_all.py` (флэт всех позиций), `bot/close_worst.py` (закрыть одну самую убыточную), `bot/cycle_stats.py` (статистика циклов), `start_live.ps1` (запуск live-контура).

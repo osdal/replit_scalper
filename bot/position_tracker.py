@@ -10,17 +10,27 @@ from notifier import Notifier
 import logging
 
 from strategy import Signal
-from config import Config
+from config import Config, reverse_sl_pct_for_step
 
 if TYPE_CHECKING:
     from db_reporter import DbReporter
     from order_manager import OrderManager
 
-STATE_FILE_TEMPLATE = "state_{symbol}.json"
+# Окружение (testnet/live) разделяет файлы состояния, чтобы два контура не
+# перетирали друг друга.
+BOT_ENV = (os.getenv("BOT_ENV") or "testnet").strip().lower() or "testnet"
+STATE_FILE_TEMPLATE = "state_{env}_{symbol}.json"
+_LEGACY_STATE_FILE_TEMPLATE = "state_{symbol}.json"
 
 
 def _state_file(symbol: str) -> str:
-    return STATE_FILE_TEMPLATE.replace("{symbol}", symbol.lower())
+    name = STATE_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", symbol.lower())
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)) or ".", name)
+
+
+def _legacy_state_file(symbol: str) -> str:
+    name = _LEGACY_STATE_FILE_TEMPLATE.replace("{symbol}", symbol.lower())
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)) or ".", name)
 
 
 def _to_epoch_ms(value) -> int:
@@ -102,6 +112,7 @@ class Position:
     voting_bases: list = field(default_factory=list)  # согласовавшие стратегии (только бэктест)
     backstop_algo_id: Optional[int] = None  # algoId биржевого safety-net STOP_MARKET (closePosition)
     entry_fill_ms: Optional[int] = None     # фактическое время входа (мс, UTC) с биржи — начало окна цикла
+    reverse_chain_step: int = 0             # шаг reverse-цепочки в цикле: 0=исходная нога, 1/2=после reverse
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.direction == "LONG":
@@ -123,9 +134,13 @@ class PositionTracker:
         # Фактическое время входа (мс, UTC) текущего цикла. Переживает очистку
         # self.position, чтобы close-репортинг использовал его как начало окна.
         self._entry_fill_ms: Optional[int] = None
-        # Метка последнего reverse-выхода (REVERSE_BE / REVERSE_BACKSTOP).
-        # Нужна re-finalize после добивания остатка, чтобы сохранить причину.
+        # Метка последнего reverse-выхода (REVERSE_BE / REVERSE_BACKSTOP /
+        # REVERSE_MARKET / REVERSE_CHAIN_STOP). Нужна re-finalize после добивания
+        # остатка, чтобы сохранить причину.
         self._last_reverse_reason: Optional[str] = None
+        # Отчётность по циклу: PnL последней ноги и глубина цепочки.
+        self._last_leg_pnl: float = 0.0
+        self._last_chain_depth: int = 1
 
     # ------------------------------------------------------------------ #
     #  Persistence                                                         #
@@ -165,6 +180,8 @@ class PositionTracker:
             "reject_reason":   p.reject_reason,
             "backstop_algo_id": p.backstop_algo_id,
             "entry_fill_ms":   p.entry_fill_ms,
+            "is_reverse":      p.is_reverse,
+            "reverse_chain_step": p.reverse_chain_step,
         }
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
@@ -180,8 +197,16 @@ class PositionTracker:
             self.log.error(f"[STATE] Failed to clear state: {e}")
 
     def load_state(self) -> bool:
+        migrated_from_legacy = False
         if not os.path.exists(self._state_file):
-            return False
+            # Одноразовая миграция старого имени (state_<symbol>.json) — только для
+            # testnet, чтобы live никогда не подхватил чужое состояние.
+            legacy = _legacy_state_file(self.cfg.symbol)
+            if BOT_ENV == "testnet" and os.path.exists(legacy):
+                self._state_file = legacy
+                migrated_from_legacy = True
+            else:
+                return False
         try:
             with open(self._state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -213,6 +238,8 @@ class PositionTracker:
                 reject_reason=data.get("reject_reason"),
                 backstop_algo_id=data.get("backstop_algo_id"),
                 entry_fill_ms=data.get("entry_fill_ms"),
+                is_reverse=data.get("is_reverse", False),
+                reverse_chain_step=data.get("reverse_chain_step", 0) or 0,
             )
             self._trade_id = data.get("trade_id")
             self._entry_fill_ms = self.position.entry_fill_ms
@@ -225,6 +252,17 @@ class PositionTracker:
                 f"qty={self.position.remaining_qty} "
                 f"tp1_hit={self.position.tp1_hit}"
             )
+            if migrated_from_legacy:
+                # Переносим состояние в env-неймспейс: пишем под новым именем и
+                # убираем legacy-файл, чтобы больше не было двусмысленности.
+                self._state_file = _state_file(self.cfg.symbol)
+                self._save_state()
+                try:
+                    legacy = _legacy_state_file(self.cfg.symbol)
+                    if os.path.exists(legacy):
+                        os.remove(legacy)
+                except Exception as e:
+                    self.log.warning(f"[STATE] legacy state cleanup failed: {e}")
             return True
         except Exception as e:
             self.log.error(f"[STATE] Failed to load state: {e}")
@@ -398,7 +436,7 @@ class PositionTracker:
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close error: {e}")
 
-    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None, commission: Optional[float] = None) -> None:
+    async def _report_close_with_id(self, trade_id: int, exit_price: float, qty: float, pnl: float, reason: str, entry_price: float = 0.0, reject_reason: Optional[str] = None, commission: Optional[float] = None, cycle_close_reason: Optional[str] = None) -> None:
         """Закрывает сделку по указанному trade_id (используется после _clear_state)."""
         if not self.reporter:
             return
@@ -428,7 +466,7 @@ class PositionTracker:
                     pnl_to_use = real_pnl
                     commission_to_use = self._estimated_commission(entry_price, exit_price, qty)
             status = "rejected" if reject_reason else "closed"
-            success = await self.reporter.patch_trade(trade_id, {
+            _close_data = {
                 "exit_price":  exit_price,
                 "qty":         qty,
                 "pnl":         pnl_to_use,
@@ -437,7 +475,13 @@ class PositionTracker:
                 "exit_time":   datetime.datetime.utcnow().isoformat(),
                 "is_open":     False,
                 "status":      status,
-            })
+                "cycle_pnl":   pnl_to_use,
+                "leg_pnl":     round(float(self._last_leg_pnl or 0.0), 4),
+                "chain_depth": int(self._last_chain_depth or 1),
+            }
+            if cycle_close_reason:
+                _close_data["cycle_close_reason"] = cycle_close_reason
+            success = await self.reporter.patch_trade(trade_id, _close_data)
             if not success:
                 # Запись не найдена (например после очистки БД) — создаём новую
                 self.log.warning(f"[REPORTER] trade #{trade_id} not found, creating new record")
@@ -459,6 +503,8 @@ class PositionTracker:
                 }
                 if reject_reason:
                     new_trade["reject_reason"] = reject_reason
+                if cycle_close_reason:
+                    new_trade["cycle_close_reason"] = cycle_close_reason
                 await self.reporter.report_trade(new_trade)
         except Exception as e:
             self.log.debug(f"[REPORTER] report_close_with_id error: {e}")
@@ -569,16 +615,38 @@ class PositionTracker:
                 f"{self._trade_id}; falling back to candle entry_time"
             )
 
-    def _classify_reverse_exit(self, p_before: Optional[Position], exit_price: Optional[float], hit: str) -> str:
-        """REVERSE_BE, если обратная нога вышла на плановом TP (P3), иначе
-        REVERSE_BACKSTOP (биржевой backstop или любой другой рыночный выход).
+    def _classify_reverse_exit(
+        self, p_before: Optional[Position], exit_price: Optional[float],
+        hit: str, closed_by: Optional[str] = None,
+    ) -> str:
+        """Классифицирует выход обратной ноги.
 
-        Сравниваем фактическую цену выхода с запланированными tp1/tp2 обратной
-        позиции с допуском в один тик / небольшую относительную погрешность.
+        closed_by — подтверждённая причина закрытия от caller'а:
+          "backstop" — биржевой `botsl_*` реально исполнился (actualOrderId +
+                       статус TRIGGERED/FINISHED) → REVERSE_BACKSTOP;
+          "tp"       — плановый TP-лимит обратной ноги фактически исполнен →
+                       REVERSE_BE;
+          "chain_stop" — исчерпан лимит reverse-цепочки, бот принудительно
+                       закрыл весь нетто → REVERSE_CHAIN_STOP;
+          None/"market" — бот закрыл сам (marketable/market), ручное/внешнее
+                       закрытие или гэп.
+
+        Правила:
+          - REVERSE_CHAIN_STOP — ТОЛЬКО при достижении cap reverse-цепочки;
+          - REVERSE_BACKSTOP — когда биржевой backstop исполнился;
+          - REVERSE_BE — закрытие по плановому TP (closed_by == "tp") ИЛИ цена
+            выхода совпадает с tp1/tp2 обратной позиции в пределах допуска;
+          - иначе REVERSE_MARKET (bot-initiated market/forced, manual, gap).
         """
+        if closed_by in ("chain_stop", "chain_failed"):
+            return "REVERSE_CHAIN_STOP"
+        if closed_by == "backstop":
+            return "REVERSE_BACKSTOP"
+        if closed_by == "tp":
+            return "REVERSE_BE"
         if exit_price is None or exit_price <= 0:
             # Цена выхода недоступна: planned-TP хит обратной ноги трактуем как BE.
-            return "REVERSE_BE" if hit == "TP1" else "REVERSE_BACKSTOP"
+            return "REVERSE_BE" if hit == "TP1" else "REVERSE_MARKET"
         targets = [
             getattr(p_before, "tp1_price", 0.0) if p_before else 0.0,
             getattr(p_before, "tp2_price", 0.0) if p_before else 0.0,
@@ -586,7 +654,38 @@ class PositionTracker:
         for target in targets:
             if target and target > 0 and self._price_close(exit_price, target):
                 return "REVERSE_BE"
-        return "REVERSE_BACKSTOP"
+        return "REVERSE_MARKET"
+
+    def _reverse_close_reason(self, closed_by: Optional[str]) -> str:
+        """Краткая причина завершения reverse-цикла для БД (разбор «почему не
+        пошли на следующий круг»): chain_tp / chain_backstop / chain_max /
+        chain_failed / chain_market."""
+        if closed_by == "tp":
+            return "chain_tp"
+        if closed_by == "backstop":
+            return "chain_backstop"
+        if closed_by == "chain_stop":
+            return "chain_max"
+        if closed_by == "chain_failed":
+            return "chain_failed"
+        return "chain_market"
+
+    def _reverse_virtual_sl(self, direction: str, entry: float, step: int = 0) -> float:
+        """Виртуальный SL обратной ноги от её входа.
+
+        Вариант B: SL ступенчатый по шагу цепочки (reverse_sl_pct_for_step):
+        SL = цель(шаг) + 0.3%, чтобы TP оставался достижимым.
+        reverse SHORT: sl = entry*(1+pct/100); reverse LONG: sl = entry*(1-pct/100).
+        При некорректном entry возвращает 0.0 (SL не проверяется).
+        """
+        try:
+            e = float(entry or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if e <= 0:
+            return 0.0
+        pct = float(reverse_sl_pct_for_step(self.cfg, step) or 0.0) / 100.0
+        return e * (1 + pct) if direction == "SHORT" else e * (1 - pct)
 
     # ------------------------------------------------------------------ #
     #  Trading logic                                                       #
@@ -601,6 +700,7 @@ class PositionTracker:
         reversed_from_direction: str = "",
         reversed_from_qty: float = 0.0,
         reversed_from_entry: float = 0.0,
+        reverse_chain_step: int = 0,
     ) -> None:
         # Reverse — продолжение того же цикла/строки БД, поэтому фактическое
         # время входа исходной ноги переносится в обратную ногу: окно закрытия
@@ -609,10 +709,19 @@ class PositionTracker:
             getattr(self.position, "entry_fill_ms", None)
             if (is_reverse and self.position is not None) else None
         )
+        # У обратной ноги всегда есть РЕАЛЬНЫЙ виртуальный SL (от её входа),
+        # чтобы её провал мог запустить следующий шаг reverse-цепочки.
+        sl_price = (
+            self._reverse_virtual_sl(
+                signal.direction, signal.entry_price,
+                max(0, int(reverse_chain_step or 1) - 1),
+            )
+            if is_reverse else signal.sl_price
+        )
         self.position = Position(
             direction=signal.direction,
             entry_price=signal.entry_price,
-            sl_price=signal.sl_price,
+            sl_price=sl_price,
             tp1_price=signal.tp1_price,
             tp2_price=signal.tp2_price,
             total_qty=qty,
@@ -640,9 +749,12 @@ class PositionTracker:
             reversed_from_qty=reversed_from_qty,
             reversed_from_entry=reversed_from_entry,
             entry_fill_ms=carried_fill_ms,
+            reverse_chain_step=int(reverse_chain_step or 0),
         )
         self._trade_id = None
         self._entry_fill_ms = carried_fill_ms
+        # Отчётность: глубина цепочки (1 = исходная нога, 2 = после reverse, ...).
+        self._last_chain_depth = int(reverse_chain_step or 0) + 1
         self._save_state()
         tag = " [RECOVERY]" if is_recovery else ""
         tag += " [REJECTED]" if reject_reason else ""
@@ -815,8 +927,16 @@ class PositionTracker:
             self.log.error(f"[ERROR] TP1 processing failed", exc_info=True)
             raise
 
-    async def apply_hit_async(self, hit: str, close_price: float, candle_time_ms: int) -> float:
-        """Применяет hit и репортит в БД."""
+    async def apply_hit_async(
+        self, hit: str, close_price: float, candle_time_ms: int,
+        closed_by: Optional[str] = None,
+    ) -> float:
+        """Применяет hit и репортит в БД.
+
+        closed_by — подтверждённая причина закрытия reverse-ноги
+        ("tp"/"backstop"/"market"), прокидывается в _classify_reverse_exit.
+        Для не-reverse сделок игнорируется.
+        """
         p = self.position
         is_recovery_tp1_full_close = hit == "TP1" and p and p.is_recovery
         tp1_qty = 0.0
@@ -847,14 +967,18 @@ class PositionTracker:
         p_before = p
         is_reverse = is_reverse_before
         # Итог reverse пишется отдельным блоком ниже; метка уточняется по
-        # фактической цене выхода (REVERSE_BE / REVERSE_BACKSTOP). Для остальных —
+        # подтверждённой причине (closed_by) и фактической цене выхода
+        # (REVERSE_BE / REVERSE_BACKSTOP / REVERSE_MARKET). Для остальных —
         # прежняя семантика (SL/TP1/TP2 из apply_hit либо сам hit).
         exit_reason = (
-            self._classify_reverse_exit(p_before, close_price, hit)
+            self._classify_reverse_exit(p_before, close_price, hit, closed_by=closed_by)
             if is_reverse else (exit_reason_override or hit)
         )
         if is_reverse:
             self._last_reverse_reason = exit_reason
+        cycle_close_reason: Optional[str] = (
+            self._reverse_close_reason(closed_by) if is_reverse else None
+        )
         orig_dir = getattr(p_before, "reversed_from_direction", "") if p_before else ""
         orig_entry = getattr(p_before, "reversed_from_entry", 0.0) if p_before else 0.0
         orig_qty = getattr(p_before, "reversed_from_qty", 0.0) if p_before else 0.0
@@ -967,6 +1091,13 @@ class PositionTracker:
             else:
                 total_trade_pnl = ex_pnl
 
+        # Нога (последняя) vs цикл: leg_pnl фиксируем ДО добавления orig_leg_pnl,
+        # иначе потеряем результат самой обратной ноги.
+        try:
+            self._last_leg_pnl = float(total_trade_pnl or 0.0)
+        except (TypeError, ValueError):
+            self._last_leg_pnl = 0.0
+
         # Если закрылась reverse-позиция — пишем единый результат REVERSE.
         # Убыток исходной ноги (на уровне SL) сохранён в orig_leg_pnl при развороте;
         # отдельно исходную закрывать не нужно — она уже сведена неттингом.
@@ -985,11 +1116,14 @@ class PositionTracker:
                 )
             else:
                 ex_exit, ex_qty, ex_pnl, ex_comm = _close_values(close_price, total_pnl, report_qty)
-                # Метка по фактической цене выхода обратной ноги: выход на
-                # плановом P3 (tp1/tp2) → REVERSE_BE, иначе REVERSE_BACKSTOP.
-                reverse_reason = self._classify_reverse_exit(p_before, ex_exit, hit)
+                # Метка по фактической цене выхода обратной ноги и подтверждённой
+                # причине: backstop (только реально исполненный) → REVERSE_BACKSTOP,
+                # плановый TP-лимит → REVERSE_BE, иначе REVERSE_MARKET.
+                reverse_reason = self._classify_reverse_exit(
+                    p_before, ex_exit, hit, closed_by=closed_by
+                )
                 self._last_reverse_reason = reverse_reason
-                await self._report_close_with_id(trade_id_before, ex_exit, report_qty, ex_pnl, reverse_reason, entry_price_before, reject_reason=reject_before, commission=ex_comm)
+                await self._report_close_with_id(trade_id_before, ex_exit, report_qty, ex_pnl, reverse_reason, entry_price_before, reject_reason=reject_before, commission=ex_comm, cycle_close_reason=cycle_close_reason)
                 if exchange is None:
                     await self._sync_pnl_from_exchange(cycle_entry_ms, trade_id_before, candle_time_ms)
                 total_trade_pnl = ex_pnl
@@ -1077,6 +1211,7 @@ class PositionTracker:
         entry_ref_side: Optional[str] = None,
         entry_ref_price: float = 0.0,
         entry_ref_qty: float = 0.0,
+        require_flat: bool = True,
     ) -> Optional[dict]:
         """Считает реальные параметры закрытия цикла по userTrades.
 
@@ -1159,9 +1294,14 @@ class PositionTracker:
                 continue
             if t_ms > flat_ms:
                 flat_ms = t_ms
-        if flat_ms <= 0:
-            # Закрывающих филлов ещё нет — не выдумываем частичный итог.
-            return None
+        if require_flat:
+            if flat_ms <= 0:
+                # Закрывающих филлов ещё нет — не выдумываем частичный итог.
+                return None
+        else:
+            # Оценка уже-реализованного PnL цикла (reverse-цепочка): окно
+            # заканчиваем текущим временем и суммируем все филлы от входа.
+            flat_ms = now_ms
 
         close_qty = 0.0
         close_notional = 0.0
@@ -1189,10 +1329,51 @@ class PositionTracker:
             "exit_price": exit_price,
             "close_qty": close_qty,
             "commission": commission,
+            "realized": realized,
             "pnl": realized - commission,
             "fills_count": len(parsed),
             "last_fill_time": flat_ms,
         }
+
+    async def cycle_realized_net(self) -> tuple[Optional[float], float, float]:
+        """(net_realized, realized, commission) по окну текущего цикла на NOW.
+
+        net_realized = realized − commission (уже реализовано на бирже к этому
+        моменту). Нужно для сайзинга следующего шага reverse-цепочки: цикл ещё
+        не флэт, поэтому вызываем _exchange_cycle_summary(require_flat=False).
+        Возвращает (None, 0.0, 0.0), если биржевые филлы недоступны (тогда
+        вызывающий откатывается на legacy per-leg формулу).
+        """
+        if not self.order_mgr or not getattr(self.order_mgr, "client", None):
+            return None, 0.0, 0.0
+        p = self.position
+        direction = (p.direction if p is not None else None) or "LONG"
+        trade_id = self._trade_id
+        try:
+            entry_ms = await self._entry_time_ms(
+                trade_id, prefer_db=bool(p is not None and p.is_reverse)
+            )
+        except Exception as e:
+            self.log.warning(f"[REVERSE] cycle_realized_net entry time failed: {e}")
+            return None, 0.0, 0.0
+        entry_fill_ms = self._entry_fill_ms
+        if not entry_fill_ms and p is not None:
+            entry_fill_ms = getattr(p, "entry_fill_ms", None)
+        # Fallback-поиск входа: вход цикла — противоположная (исходная) нога.
+        orig_dir = getattr(p, "reversed_from_direction", "") if p is not None else ""
+        entry_ref_side = "BUY" if (orig_dir or direction) == "LONG" else "SELL"
+        summary = await self._exchange_cycle_summary(
+            entry_ms, direction,
+            entry_fill_ms=entry_fill_ms,
+            entry_ref_side=entry_ref_side,
+            require_flat=False,
+        )
+        if summary is None:
+            return None, 0.0, 0.0
+        realized = float(summary.get("realized", 0.0) or 0.0)
+        commission = float(summary.get("commission", 0.0) or 0.0)
+        net_realized = float(summary.get("pnl", realized - commission) or 0.0)
+        return net_realized, realized, commission
 
     async def refinalize_cycle_after_flat(self, exit_reason: Optional[str] = None) -> bool:
         """Пере-финализирует строку trades по ПОЛНОМУ окну [вход цикла, флэт].
@@ -1296,8 +1477,12 @@ class PositionTracker:
                 "exit_time":   exit_time,
                 "is_open":     False,
                 "status":      (row or {}).get("status") if (row or {}).get("status") == "rejected" else "closed",
+                "cycle_pnl":   pnl,
+                "leg_pnl":     round(float(self._last_leg_pnl or 0.0), 4),
+                "chain_depth": int(self._last_chain_depth or 1),
             }
-            # exit_reason не трогаем, если явно не передан (сохраняем REVERSE_BE/BACKSTOP).
+            # exit_reason не трогаем, если явно не передан (сохраняем
+            # REVERSE_BE / REVERSE_BACKSTOP / REVERSE_MARKET).
             if exit_reason:
                 data["exit_reason"] = exit_reason
 
@@ -1433,6 +1618,9 @@ class PositionTracker:
                 "exit_time":   exit_time,
                 "is_open":     False,
                 "status":      "closed",
+                "cycle_pnl":   pnl,
+                "leg_pnl":     round(float(self._last_leg_pnl or pnl or 0.0), 4),
+                "chain_depth": int(self._last_chain_depth or 1),
             })
             if not success:
                 self.log.warning(
@@ -1469,7 +1657,7 @@ class PositionTracker:
                 self.cfg.symbol, entry_time_ms, exit_time_ms,
             )
             if real_pnl is not None and abs(real_pnl) > 0.0001:
-                await self.reporter.patch_trade(trade_id, {"pnl": round(real_pnl, 4)})
+                await self.reporter.patch_trade(trade_id, {"pnl": round(real_pnl, 4), "cycle_pnl": round(real_pnl, 4)})
                 self.log.info(f"[PNL_SYNC] Updated trade #{trade_id} PnL to {real_pnl:.4f} from Binance")
         except Exception as e:
             self.log.warning(f"[PNL_SYNC] Failed to sync PnL: {e}")

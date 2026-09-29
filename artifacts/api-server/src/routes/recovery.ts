@@ -279,16 +279,18 @@ const RECOVERY_LOCK_TTL_MS = (() => {
 })();
 
 async function isBotProcessAlive(symbol: string): Promise<boolean> {
-  const configFile = `config_${String(symbol).replace("USDT", "").toLowerCase()}.yaml`;
+  const configFile = `config_${String(symbol).replace(/USDT$/i, "").replace(/[^A-Za-z0-9]/g, "").toLowerCase()}.yaml`;
   try {
     let stdout = "";
     if (process.platform === "win32") {
       ({ stdout } = await execAsync(
-        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"`
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"`,
+        { windowsHide: true },
       ));
     } else {
       ({ stdout } = await execAsync(
-        `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`
+        `ps aux | grep "python.*main.py.*${configFile}" | grep -v grep`,
+        { windowsHide: true },
       ));
     }
     return stdout.includes(configFile);

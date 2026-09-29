@@ -581,6 +581,12 @@ export function exitReasonMeta(raw: unknown): { label: string; className: string
         className: "bg-red-100 text-red-700",
         title: "Reverse leg was closed by the exchange backstop — a real loss.",
       };
+    case "REVERSE_CHAIN_STOP":
+      return {
+        label: "Reverse chain stop",
+        className: "bg-amber-100 text-amber-700",
+        title: "reverse chain limit reached — the bot force-closed the position at market",
+      };
     case "REVERSE":
       return {
         label: "Reverse",

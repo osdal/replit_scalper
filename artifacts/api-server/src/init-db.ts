@@ -11,7 +11,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-config({ path: path.resolve(__dirname, "../../../.env") });
+const BOT_ENV = (process.env.BOT_ENV || "testnet").trim().toLowerCase() || "testnet";
+config({ path: path.resolve(__dirname, `../../../.env.${BOT_ENV}`) });
+config({ path: path.resolve(__dirname, "../../../.env"), override: false });
 
 // Use absolute paths from .env for reliability
 const projectRoot = path.resolve(__dirname, "../../../");
@@ -20,6 +22,11 @@ const BOT_DIR = process.env.BOT_DIR
       ? process.env.BOT_DIR
       : path.join(projectRoot, process.env.BOT_DIR))
   : path.join(projectRoot, "bot");
+const BOT_CONFIG_DIR = process.env.BOT_CONFIG_DIR
+  ? (path.isAbsolute(process.env.BOT_CONFIG_DIR)
+      ? process.env.BOT_CONFIG_DIR
+      : path.join(projectRoot, process.env.BOT_CONFIG_DIR))
+  : path.join(BOT_DIR, "configs", BOT_ENV);
 
 // Создаём таблицы
 await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
@@ -35,7 +42,17 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
   auto_mode INTEGER NOT NULL DEFAULT 1, paper_balance REAL NOT NULL DEFAULT 1000,
   log_file TEXT NOT NULL, is_running INTEGER NOT NULL DEFAULT 0,
   last_heartbeat TEXT, current_price REAL, position TEXT,
-  llm_status TEXT, updated_at TEXT NOT NULL
+  llm_status TEXT, updated_at TEXT NOT NULL,
+  trade_mode TEXT NOT NULL DEFAULT 'manual',
+  position_size_usd REAL NOT NULL DEFAULT 0,
+  position_size_pct REAL NOT NULL DEFAULT 1,
+  reverse_chain_max INTEGER NOT NULL DEFAULT 10,
+  max_position_notional_usd REAL NOT NULL DEFAULT 0,
+  max_position_pct_equity REAL NOT NULL DEFAULT 0,
+  armed INTEGER NOT NULL DEFAULT 1,
+  stop_reason TEXT,
+  stop_requested INTEGER NOT NULL DEFAULT 0,
+  relay_only INTEGER NOT NULL DEFAULT 0
 )`);
 
 // Миграция: добавляем колонку llm_status, если её ещё нет (старые БД)
@@ -48,11 +65,12 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   tp1_price REAL NOT NULL DEFAULT 0, tp2_price REAL NOT NULL DEFAULT 0,
   pnl REAL, exit_reason TEXT, entry_time TEXT NOT NULL, exit_time TEXT,
   is_open INTEGER NOT NULL DEFAULT 1, ema_fast REAL, ema_slow REAL,
-  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'paper',
+  volume REAL, volume_ma REAL, mode TEXT NOT NULL DEFAULT 'live',
   status TEXT NOT NULL DEFAULT 'open', reject_reason TEXT,
   rsi REAL, macd REAL, macd_signal REAL, macd_hist REAL,
   bb_upper REAL, bb_middle REAL, bb_lower REAL, atr REAL,
-  preset TEXT, commission REAL
+  preset TEXT, commission REAL,
+  leg_pnl REAL, cycle_pnl REAL, chain_depth INTEGER, cycle_close_reason TEXT
 )`);
 
 // Мигрируем существующие БД: добавляем status/reject_reason и индикаторы/пресет, если их нет.
@@ -72,6 +90,10 @@ const tradeExtraCols: Array<[string, string]> = [
   ["preset", "TEXT"],
   ["commission", "REAL"],
   ["quote_volume", "REAL"],
+  ["leg_pnl", "REAL"],
+  ["cycle_pnl", "REAL"],
+  ["chain_depth", "INTEGER"],
+  ["cycle_close_reason", "TEXT"],
 ];
 for (const [col, ddl] of tradeExtraCols) {
   if (!tradeColNames.includes(col)) {
@@ -89,6 +111,16 @@ const botExtraCols: Array<[string, string]> = [
   ["htf2_timeframe", "TEXT"],
   ["htf2_ema_fast", "INTEGER"],
   ["htf2_ema_slow", "INTEGER"],
+  ["trade_mode", "TEXT NOT NULL DEFAULT 'manual'"],
+  ["position_size_usd", "REAL NOT NULL DEFAULT 0"],
+  ["position_size_pct", "REAL NOT NULL DEFAULT 1"],
+  ["armed", "INTEGER NOT NULL DEFAULT 1"],
+  ["stop_reason", "TEXT"],
+  ["stop_requested", "INTEGER NOT NULL DEFAULT 0"],
+  ["relay_only", "INTEGER NOT NULL DEFAULT 0"],
+  ["reverse_chain_max", "INTEGER NOT NULL DEFAULT 10"],
+  ["max_position_notional_usd", "REAL NOT NULL DEFAULT 0"],
+  ["max_position_pct_equity", "REAL NOT NULL DEFAULT 0"],
 ];
 for (const [col, ddl] of botExtraCols) {
   if (!botColNames.includes(col)) {
@@ -123,6 +155,36 @@ if (!ctlColNames.includes("active_open")) {
   console.log("  Added column trading_control.active_open");
 }
 
+// Очередь релей-сигналов testnet → live.
+await db.run(sql`CREATE TABLE IF NOT EXISTS signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'entry',
+  direction TEXT NOT NULL,
+  entry_price REAL NOT NULL,
+  sl_price REAL,
+  tp1_price REAL,
+  tp2_price REAL,
+  preset TEXT,
+  source TEXT,
+  payload TEXT,
+  created_at TEXT NOT NULL,
+  consumed_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT
+)`);
+// Мигрируем signals: status/note, если таблица уже была.
+const { rows: sigCols } = await db.run(sql`PRAGMA table_info(signals)`);
+const sigColNames: string[] = (sigCols as any[]).map((r: any) => String(r.name));
+if (!sigColNames.includes("status")) {
+  await db.run(sql`ALTER TABLE signals ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'`);
+  console.log("  Added column signals.status");
+}
+if (!sigColNames.includes("note")) {
+  await db.run(sql`ALTER TABLE signals ADD COLUMN note TEXT`);
+  console.log("  Added column signals.note");
+}
+
 await db.run(sql.raw(GRID_HISTORY_CREATE_SQL));
 
 // Миграции: добавляем недостающие колонки в уже созданных БД.
@@ -139,16 +201,16 @@ for (const migration of GRID_MIGRATIONS) {
 
 console.log("Tables created");
 
-const configs = fs.readdirSync(BOT_DIR).filter(f => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+const configs = fs.readdirSync(BOT_CONFIG_DIR).filter(f => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
 
 for (const file of configs) {
-  const raw = yaml.load(fs.readFileSync(path.join(BOT_DIR, file), "utf8")) as Record<string, unknown>;
+  const raw = yaml.load(fs.readFileSync(path.join(BOT_CONFIG_DIR, file), "utf8")) as Record<string, unknown>;
   const symbol = (raw.symbol as string).toUpperCase();
   const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
   if (existing) {
     // Обновляем mode и конфигурацию из yaml
     await db.update(botsTable).set({
-      mode:             (raw.mode as string) || "paper",
+      mode:             (raw.mode as string) || "live",
       timeframe:        raw.timeframe as string,
       leverage:         raw.leverage as number,
       risk_pct:         raw.risk_pct as number,
@@ -171,6 +233,12 @@ for (const file of configs) {
       auto_mode:        (raw.auto_mode as boolean) ?? true,
       paper_balance:    (raw.paper_balance as number) || 1000,
       log_file:         raw.log_file as string,
+      trade_mode:       (raw.trade_mode as string) || "manual",
+      position_size_usd: (raw.position_size_usd as number) || 0,
+      position_size_pct: (raw.position_size_pct as number) ?? 1,
+      reverse_chain_max: (raw.reverse_chain_max as number) ?? 10,
+      max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
+      max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
       updated_at:       new Date().toISOString(),
     }).where(eq(botsTable.symbol, symbol));
     console.log(`  ${symbol} updated from ${file}`);
@@ -178,7 +246,7 @@ for (const file of configs) {
   }
 
   await db.insert(botsTable).values({
-    symbol, mode: (raw.mode as string) || "paper",
+    symbol, mode: (raw.mode as string) || "live",
     timeframe: raw.timeframe as string, leverage: raw.leverage as number,
     risk_pct: raw.risk_pct as number, sl_pct: raw.sl_pct as number,
     tp1_pct: raw.tp1_pct as number, tp1_close_pct: raw.tp1_close_pct as number,
@@ -196,6 +264,14 @@ for (const file of configs) {
     auto_mode: (raw.auto_mode as boolean) ?? true,
     paper_balance: (raw.paper_balance as number) || 1000,
     log_file: raw.log_file as string, is_running: false,
+    trade_mode: (raw.trade_mode as string) || "manual",
+    position_size_usd: (raw.position_size_usd as number) || 0,
+    position_size_pct: (raw.position_size_pct as number) ?? 1,
+    reverse_chain_max: (raw.reverse_chain_max as number) ?? 10,
+    max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
+    max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
+    armed: BOT_ENV !== "live",
+    relay_only: BOT_ENV === "live",
     updated_at: new Date().toISOString(),
   });
   console.log(`  Added ${symbol} from ${file}`);

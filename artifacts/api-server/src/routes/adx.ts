@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { db, botsTable } from "@workspace/db";
 import { getKlines, computeAdx } from "../adx-lib";
+import { BOT_CONFIG_DIR } from "../botPaths";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,7 +53,7 @@ async function getSymbols(): Promise<string[]> {
     if (dbSymbols.length > 0) return dbSymbols;
   } catch { /* fall back to config files */ }
 
-  const configDir = path.resolve(__dirname, "../../../../bot");
+  const configDir = BOT_CONFIG_DIR;
   const symbols: string[] = [];
   let files: string[];
   try {

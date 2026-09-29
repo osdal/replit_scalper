@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+import { BOT_CONFIG_DIR } from "./botPaths";
 import {
   db,
   gridsTable,
@@ -602,7 +603,7 @@ async function getBotSymbols(): Promise<{ symbols: string[]; running: Set<string
     );
   }
 
-  const configDir = path.resolve(__dirname, "../../../bot");
+  const configDir = BOT_CONFIG_DIR;
   const symbols: string[] = [];
   try {
     const files = fs

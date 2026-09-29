@@ -181,7 +181,7 @@ router.patch("/:id", async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const updates: Record<string, unknown> = {};
-    const allowed = ["direction", "exit_price", "pnl", "exit_reason", "qty", "is_open", "exit_time", "status", "reject_reason", "commission", "entry_price", "preset"];
+    const allowed = ["direction", "exit_price", "pnl", "exit_reason", "qty", "is_open", "exit_time", "status", "reject_reason", "commission", "entry_price", "preset", "leg_pnl", "cycle_pnl", "chain_depth", "cycle_close_reason"];
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }

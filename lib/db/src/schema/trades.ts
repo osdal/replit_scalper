@@ -33,6 +33,13 @@ export const tradesTable = sqliteTable("trades", {
   bb_lower:     real("bb_lower"),
   atr:          real("atr"),
   preset:       text("preset"),
+  // Отчётность цикла: результат последней ноги, итог цикла и число ног.
+  leg_pnl:      real("leg_pnl"),
+  cycle_pnl:    real("cycle_pnl"),
+  chain_depth:  integer("chain_depth"),
+  // Причина завершения reverse-цикла: chain_tp | chain_backstop | chain_max |
+  // chain_failed | chain_market (для не-reverse пусто).
+  cycle_close_reason: text("cycle_close_reason"),
   commission:   real("commission"),
   quote_volume: real("quote_volume"),
 });

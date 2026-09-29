@@ -31,7 +31,7 @@ app.use(
     origin(origin, cb) {
       cb(null, isAllowedOrigin(origin));
     },
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "x-notify-token"],
   }),
 );

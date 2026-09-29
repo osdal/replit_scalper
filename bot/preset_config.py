@@ -10,6 +10,11 @@ Per-preset конфигурация для replit_scalper.
 
 from typing import Optional
 
+# Пресеты, отключённые глобально (не торгуют ни в testnet, ни в live).
+# rsi_bounce_long / inside_bar_rsi_long ранее были paper-forward; после отказа
+# от режима paper они отключены полностью.
+GLOBALLY_DISABLED_PRESETS = {"rsi_bounce_long", "inside_bar_rsi_long"}
+
 PRESET_CONFIG: dict[str, dict] = {
     # ── 1. EMA cross (основная стратегия) ──────────────────────────────────
     "ema_cross_long": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
@@ -18,7 +23,7 @@ PRESET_CONFIG: dict[str, dict] = {
     "sma_cross_long": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
     "sma_cross_short": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
     # ── 3. RSI bounce (отскок от перепроданности/перекупленности) ──────────
-    "rsi_bounce_long": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0, "mode": "paper"},
+    "rsi_bounce_long": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
     "rsi_bounce_short": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
     # ── 4. RSI divergence (дивергенция цены и RSI) ────────────────────────
     "rsi_divergence_long": {"tp": 1.5, "sl": 0.5, "max_per_preset": 0},
@@ -84,7 +89,7 @@ PRESET_CONFIG: dict[str, dict] = {
     # ── 25. Inside Bar + RSI>=70 (paper-forward) ───────────────────────────
     # БЕЗ tp/sl: main.py не пересчитывает SL/TP (нет ключа "tp"), уровни задаёт
     # сам сигнал (SL = низ консолидации, TP = 2xSL). Только LONG при RSI>=70.
-    "inside_bar_rsi_long": {"max_per_preset": 0, "mode": "paper"},
+    "inside_bar_rsi_long": {"max_per_preset": 0},
 }
 
 DEFAULT_PRESET_CONFIG = {
@@ -120,4 +125,5 @@ def get_enabled_presets(enabled_list: list[str]) -> list[str]:
             for suffix in ("_long", "_short"):
                 if p + suffix in PRESET_CONFIG:
                     result.append(p + suffix)
+    result = [p for p in result if p not in GLOBALLY_DISABLED_PRESETS]
     return result if result else ["ema_cross_long", "ema_cross_short"]

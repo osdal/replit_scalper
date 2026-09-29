@@ -4,15 +4,13 @@
  */
 import { Router } from "express";
 import { db, tradesTable, botsTable } from "@workspace/db";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import crypto from "crypto";
 import fs from "fs";
+import { getBinanceEnv } from "../grid-orders-lib";
+import { BOT_CONFIG_DIR } from "../botPaths";
 
 const router = Router();
-
-const API_KEY    = process.env.BINANCE_API_KEY || "";
-const API_SECRET = process.env.BINANCE_API_SECRET || "";
-const BASE_URL   = "https://fapi.binance.com";
 
 async function getSymbols(): Promise<string[]> {
   try {
@@ -21,7 +19,7 @@ async function getSymbols(): Promise<string[]> {
   } catch {
     // Fallback: read from config files
     try {
-      const configs = fs.readdirSync("bot").filter((f: string) => /^config_\w+\.yaml$/.test(f));
+      const configs = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
       return configs.map(f => f.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT").sort();
     } catch {
       return [];
@@ -29,18 +27,19 @@ async function getSymbols(): Promise<string[]> {
   }
 }
 
-function sign(params: Record<string, string | number>): string {
+function sign(params: Record<string, string | number>, apiSecret: string): string {
   const qs = Object.entries(params).map(([k, v]) => `${k}=${v}`).join("&");
-  return crypto.createHmac("sha256", API_SECRET).update(qs).digest("hex");
+  return crypto.createHmac("sha256", apiSecret).update(qs).digest("hex");
 }
 
 async function binanceGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
+  const { apiKey, apiSecret, baseUrl } = getBinanceEnv();
   const ts = Date.now();
   const p = { ...params, timestamp: ts };
-  const signature = sign(p);
+  const signature = sign(p, apiSecret);
   const qs = Object.entries(p).map(([k, v]) => `${k}=${v}`).join("&");
-  const url = `${BASE_URL}${path}?${qs}&signature=${signature}`;
-  const resp = await fetch(url, { headers: { "X-MBX-APIKEY": API_KEY } });
+  const url = `${baseUrl}${path}?${qs}&signature=${signature}`;
+  const resp = await fetch(url, { headers: { "X-MBX-APIKEY": apiKey } });
   if (!resp.ok) throw new Error(`Binance API ${path}: ${resp.status} ${await resp.text()}`);
   return resp.json();
 }
@@ -48,7 +47,9 @@ async function binanceGet(path: string, params: Record<string, string | number> 
 // POST /binance-sync
 router.post("/", async (_req, res) => {
   try {
-    if (!API_KEY || !API_SECRET) {
+    const { apiKey, apiSecret } = getBinanceEnv();
+    if (!apiKey || !apiSecret) {
+      return res.status(500).json({ error: "BINANCE_API_KEY/SECRET not configured" });
     }
 
     const symbols = await getSymbols();

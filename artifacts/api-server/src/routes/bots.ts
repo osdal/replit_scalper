@@ -1,30 +1,26 @@
 import { Router } from "express";
 import { db, botsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { spawn, exec, execSync, type ChildProcess } from "child_process";
+import { eq, getTableColumns } from "drizzle-orm";
+import { spawn, exec, execFile, execSync, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import fs from "fs";
 import yaml from "js-yaml";
 import { fileURLToPath } from "url";
+import {
+  BOT_DIR,
+  BOT_CONFIG_DIR,
+  BOT_LOG_DIR,
+  BOT_ENV,
+  configPath,
+  statePath,
+  lockPrefix,
+} from "../botPaths";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Resolve BOT_DIR - bot is at project root level
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
-let BOT_DIR: string;
-if (process.env.BOT_DIR) {
-  const envBotDir = process.env.BOT_DIR;
-  if (envBotDir.match(/^[A-Za-z]:/) || path.isAbsolute(envBotDir)) {
-    BOT_DIR = envBotDir;
-  } else {
-    BOT_DIR = path.join(PROJECT_ROOT, envBotDir);
-  }
-} else {
-  BOT_DIR = path.join(PROJECT_ROOT, "bot");
-}
 
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
@@ -38,7 +34,7 @@ const botProcesses: Map<string, ChildProcess> = new Map();
  */
 function updateYamlConfig(symbol: string, params: Record<string, unknown>): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("python", ["update_config_cli.py", symbol, BOT_DIR], { cwd: BOT_DIR });
+    const proc = spawn("python", ["update_config_cli.py", symbol, BOT_CONFIG_DIR], { cwd: BOT_DIR, windowsHide: true });
 
     let output = "";
     let error = "";
@@ -67,12 +63,13 @@ function updateYamlConfig(symbol: string, params: Record<string, unknown>): Prom
 
 // Найти PID процесса бота по имени конфига (Windows + Linux)
 async function findBotPid(symbol: string): Promise<number | null> {
-  const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
+  const cfgPath = configPath(symbol);
   try {
     if (process.platform === "win32") {
       // Windows 11+ doesn't have wmic, use Get-CimInstance
       const { stdout } = await execAsync(
-        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
+        { windowsHide: true },
       );
       // ConvertTo-Json returns an array when >1 process, an object when exactly 1,
       // or empty/null when none. Normalize to an array before iterating.
@@ -80,21 +77,21 @@ async function findBotPid(symbol: string): Promise<number | null> {
       const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
       for (const proc of processes as Array<Record<string, unknown>>) {
         const cmd = proc.CommandLine as string | undefined;
-        if (cmd && cmd.includes(configFile) && cmd.includes("main.py")) {
+        if (cmd && cmd.includes(cfgPath) && cmd.includes("main.py")) {
           const pid = parseInt(String(proc.ProcessId));
           if (!isNaN(pid) && pid > 0) return pid;
         }
       }
     } else {
       // Linux/Mac fallback
-      const { stdout } = await execAsync(`pgrep -f "main.*${configFile}"`);
+      const { stdout } = await execFileAsync("pgrep", ["-f", `main.*${cfgPath}`], { windowsHide: true });
       const pid = parseInt(stdout.trim());
       if (!isNaN(pid)) return pid;
     }
   } catch {
     try {
       // Fallback: check all python processes with main.py
-      const { stdout } = await execAsync(`pgrep -f "main.*${configFile}"`);
+      const { stdout } = await execFileAsync("pgrep", ["-f", `main.*${cfgPath}`], { windowsHide: true });
       const pid = parseInt(stdout.trim());
       if (!isNaN(pid)) return pid;
     } catch {}
@@ -103,38 +100,109 @@ async function findBotPid(symbol: string): Promise<number | null> {
 }
 
 /**
- * За один вызов PowerShell получает PID всех python-процессов, запускающих
- * наших ботов (main.py config_*.yaml). Значительно быстрее, чем 24 отдельных
- * вызова findBotPid(), каждый из которых спавнит powershell.exe.
+ * Возвращает Map<symbol, pid> для всех запущенных ботов текущего окружения.
+ * `null` означает, что список процессов получить НЕ удалось (в отличие от
+ * пустой map = «ботов нет»). Это важно для reconcile: при сбое опроса мы не
+ * должны ложно помечать живых ботов остановленными.
  */
-async function findAllBotPids(): Promise<Map<string, number>> {
+async function tryFindAllBotPids(): Promise<Map<string, number> | null> {
   const pidBySymbol = new Map<string, number>();
+  const consider = (cmd: string, pid: number) => {
+    if (!cmd.includes("main.py")) return;
+    if (!cmd.includes(BOT_CONFIG_DIR)) return;
+    const m = cmd.match(/config_([a-z0-9]+)\.yaml/);
+    if (!m) return;
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    pidBySymbol.set(m[1].toUpperCase() + "USDT", pid);
+  };
   try {
-    if (process.platform !== "win32") return pidBySymbol;
-    const { stdout } = await execAsync(
-      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`
-    );
-    let raw: unknown;
-    try { raw = JSON.parse(stdout.trim() || "null"); } catch { raw = null; }
-    const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
-    for (const proc of processes as Array<Record<string, unknown>>) {
-      const cmd = (proc.CommandLine as string) || "";
-      if (!cmd.includes("main.py")) continue;
-      const m = cmd.match(/config_([a-z0-9]+)\.yaml/);
-      if (!m) continue;
-      const symbol = (m[1].toUpperCase() + "USDT");
-      const pid = parseInt(String(proc.ProcessId));
-      if (!isNaN(pid) && pid > 0) pidBySymbol.set(symbol, pid);
+    if (process.platform === "win32") {
+      const { stdout } = await execAsync(
+        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
+        { windowsHide: true },
+      );
+      // Пустой stdout = процессов нет (валидная пустая map). Неразобранный
+      // непустой stdout = сбой опроса: возвращаем null (unknown), чтобы
+      // reconcile не пометил живых ботов остановленными.
+      const text = stdout.trim();
+      let raw: unknown = null;
+      if (text) {
+        try { raw = JSON.parse(text); } catch { return null; }
+      }
+      const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      for (const proc of processes as Array<Record<string, unknown>>) {
+        consider((proc.CommandLine as string) || "", parseInt(String(proc.ProcessId)));
+      }
+    } else {
+      const { stdout } = await execAsync("ps -eo pid=,args=", { windowsHide: true });
+      for (const line of stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const pid = parseInt(trimmed.split(/\s+/)[0]);
+        consider(trimmed, pid);
+      }
     }
-  } catch { /* ignore */ }
-  return pidBySymbol;
+    return pidBySymbol;
+  } catch {
+    return null;
+  }
+}
+
+async function findAllBotPids(): Promise<Map<string, number>> {
+  return (await tryFindAllBotPids()) ?? new Map<string, number>();
+}
+
+/**
+ * Периодически сверяет is_running в БД с реально живыми процессами ботов.
+ * Если процесс исчез (упал/самоостановился, а событие exit было потеряно —
+ * например, при рестарте API), бот помечается остановленным и снимается
+ * stop_requested, чтобы дашборд снова дал нажать Start. Источник правды —
+ * список процессов: при неудачном опросе (`null`) ничего не меняем, чтобы не
+ * пометить живых ботов остановленными ложно.
+ *
+ * ВАЖНО: наличие процесса важнее свежести heartbeat — при временной пропаже
+ * данных (WS/REST) бот остаётся жив и не шлёт heartbeat, но останавливать его
+ * в дашборде нельзя.
+ */
+export async function reconcileBotRunningStates(): Promise<string[]> {
+  const stopped: string[] = [];
+  const alive = await tryFindAllBotPids();
+  if (alive === null) return stopped;
+  try {
+    const bots = await db.select().from(botsTable);
+    for (const bot of bots) {
+      if (!bot.is_running) {
+        // Уже остановлен: снимаем залипший stop_requested, чтобы UI не показывал STOPPING.
+        if (bot.stop_requested) {
+          await db.update(botsTable)
+            .set({ stop_requested: false, updated_at: new Date().toISOString() })
+            .where(eq(botsTable.symbol, bot.symbol));
+        }
+        continue;
+      }
+      if (alive.has(bot.symbol)) continue;
+      await db.update(botsTable)
+        .set({
+          is_running: false,
+          stop_requested: false,
+          stop_reason: bot.stop_reason || "process_exited",
+          updated_at: new Date().toISOString(),
+        })
+        .where(eq(botsTable.symbol, bot.symbol));
+      stopped.push(bot.symbol);
+      console.log(`[reconcile] ${bot.symbol}: no live process — marked stopped`);
+    }
+  } catch (e) {
+    console.warn(`[reconcile] failed: ${String(e)}`);
+  }
+  return stopped;
 }
 
 // Убить процесс по PID
 async function killPid(pid: number): Promise<void> {
   try {
     if (process.platform === "win32") {
-      await execAsync(`taskkill /PID ${pid} /F`);
+      await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
     } else {
       process.kill(pid, "SIGKILL");
     }
@@ -179,8 +247,17 @@ router.put("/:symbol/config", async (req, res) => {
     delete configUpdates.llm_status;
     delete configUpdates.symbol;
 
+    // В БД пишем только реальные колонки: конфиг может содержать поля, которых
+    // в таблице нет (они уходят в YAML через updateYamlConfig). Без фильтра
+    // drizzle сгенерировал бы UPDATE с несуществующей колонкой.
+    const tableCols = getTableColumns(botsTable) as Record<string, unknown>;
+    const dbUpdates: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(req.body)) {
+      if (k in tableCols) dbUpdates[k] = v;
+    }
+
     const [updated] = await db.update(botsTable)
-      .set({ ...req.body, updated_at: new Date().toISOString() })
+      .set({ ...dbUpdates, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol)).returning();
     if (!updated) return res.status(404).json({ error: "Bot not found" });
 
@@ -226,7 +303,7 @@ router.post("/refresh", async (_req, res) => {
       const proc = botProcesses.get(symbol);
       if (proc?.killed) botProcesses.delete(symbol);
     }
-    const configs = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+    const configs = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
     for (const file of configs) {
       const symbol = (file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT");
       const pid = await findBotPid(symbol);
@@ -255,21 +332,27 @@ export type StartBotResult = {
  * Используется роутом POST /bots/:symbol/start и авто-рестартом на старте
  * (index.ts -> autoRestartBots).
  */
-export async function startBotProcess(
-  symbol: string,
-  configFile: string,
-): Promise<StartBotResult> {
-  // Проверяем не запущен ли уже (через Map или через поиск PID)
+export async function startBotProcess(symbol: string): Promise<StartBotResult> {
+  // Проверяем не запущен ли уже (через Map или через поиск PID).
+  // ВАЖНО: exitCode !== null означает, что процесс уже завершился, даже если
+  // событие exit не дошло до нас (например, при рестарте API). Такой «зомби»
+  // в botProcesses не должен блокировать ручной Start.
   const existingProc = botProcesses.get(symbol);
-  if (existingProc && !existingProc.killed) {
+  if (existingProc && !existingProc.killed && existingProc.exitCode === null) {
     return { ok: false, message: "Bot already running (dashboard)" };
   }
-  if (existingProc?.killed) {
+  if (existingProc) {
     botProcesses.delete(symbol);
   }
   const existingPid = await findBotPid(symbol);
   if (existingPid) {
-    return { ok: false, message: `Bot already running (PID ${existingPid}). Stop it first.` };
+    // Процесс уже жив, но API по какой-то причине считает бота остановленным.
+    // Не отказываем во «Start»: синхронизируем БД и считаем запуск успешным,
+    // чтобы кнопка в дашборде приводила к согласованному состоянию.
+    await db.update(botsTable)
+      .set({ is_running: true, stop_reason: null, stop_requested: false, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol));
+    return { ok: true, message: `Bot ${symbol} already running (PID ${existingPid}) — adopted`, pid: existingPid };
   }
 
   // Find Python executable. Priority:
@@ -288,7 +371,7 @@ export async function startBotProcess(
   // install without pandas.
   const hasDeps = (cand: string): boolean => {
     try {
-      execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe' });
+      execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe', windowsHide: true });
       return true;
     } catch {
       return false;
@@ -311,7 +394,7 @@ export async function startBotProcess(
   }
 
   const botTag = `[BOT ${symbol}]`;
-  const debugLogPath = path.join(BOT_DIR, "logs", `api_${symbol.toLowerCase()}.log`);
+  const debugLogPath = path.join(BOT_LOG_DIR, `api_${symbol.toLowerCase()}.log`);
   const debugWrite = (msg: string) => {
     console.log(msg);
     try {
@@ -321,16 +404,15 @@ export async function startBotProcess(
 
   // stdio ребёнка направляем в файл: если api-server умрёт, закрытый pipe
   // не сломает отвязанный процесс (нет EPIPE/BrokenPipe).
-  const logsDir = path.join(BOT_DIR, "logs");
-  fs.mkdirSync(logsDir, { recursive: true });
+  fs.mkdirSync(BOT_LOG_DIR, { recursive: true });
   const outFd = fs.openSync(
-    path.join(logsDir, `api_${symbol.toLowerCase()}_stdout.log`),
+    path.join(BOT_LOG_DIR, `api_${symbol.toLowerCase()}_stdout.log`),
     "a",
   );
 
   let proc: ChildProcess;
   try {
-    proc = spawn(pythonCmd, ["main.py", configFile], {
+    proc = spawn(pythonCmd, ["main.py", configPath(symbol)], {
       cwd: BOT_DIR,
       detached: true,
       stdio: ["ignore", outFd, outFd],
@@ -384,7 +466,7 @@ export async function startBotProcess(
   });
 
   await db.update(botsTable)
-    .set({ is_running: true, updated_at: new Date().toISOString() })
+    .set({ is_running: true, stop_reason: null, stop_requested: false, updated_at: new Date().toISOString() })
     .where(eq(botsTable.symbol, symbol));
 
   return { ok: true, message: `Bot ${symbol} started`, pid: proc.pid };
@@ -396,8 +478,7 @@ router.post("/:symbol/start", async (req, res) => {
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
-    const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
-    const result = await startBotProcess(symbol, configFile);
+    const result = await startBotProcess(symbol);
     if (!result.ok) {
       if (result.error) return res.status(500).json({ error: result.error });
       return res.json({ success: false, message: result.message });
@@ -406,8 +487,30 @@ router.post("/:symbol/start", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/stop-all", async (_req, res) => {
+// Arm/disarm: разрешение боту открывать позиции (используется в live).
+router.post("/:symbol/arm", async (req, res) => {
   try {
+    const symbol = req.params.symbol.toUpperCase();
+    const [updated] = await db.update(botsTable)
+      .set({ armed: true, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol)).returning();
+    if (!updated) return res.status(404).json({ error: "Bot not found" });
+    res.json({ success: true, symbol, armed: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+router.post("/:symbol/disarm", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const [updated] = await db.update(botsTable)
+      .set({ armed: false, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol)).returning();
+    if (!updated) return res.status(404).json({ error: "Bot not found" });
+    res.json({ success: true, symbol, armed: false });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+router.post("/stop-all", async (_req, res) => {  try {
     const stoppedBots: string[] = [];
 
     // 1. Kill bots we spawned and track (dashboard-managed).
@@ -428,7 +531,7 @@ router.post("/stop-all", async (_req, res) => {
       const existed = botProcesses.get(symbol);
       try {
         if (process.platform === "win32") {
-          await execAsync(`taskkill /PID ${pid} /F`);
+          await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
         } else {
           process.kill(pid, "SIGKILL");
         }
@@ -437,7 +540,7 @@ router.post("/stop-all", async (_req, res) => {
     }));
 
     // 3. Clear lock files (after stopping bots).
-    const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith("bot.lock."));
+    const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith(lockPrefix()));
     for (const lockFile of lockFiles) {
       try { fs.unlinkSync(path.join(BOT_DIR, lockFile)); } catch { /* ignore */ }
     }
@@ -446,16 +549,42 @@ router.post("/stop-all", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// Мягкая остановка: бот перестаёт открывать новые позиции, доводит текущую по
+// своей логике (TP/SL/reverse) и сам выходит, когда станет флэт.
 router.post("/:symbol/stop", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
+    const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
 
-    // Сначала пробуем через Map (запущен через дашборд)
+    const proc = botProcesses.get(symbol);
+    const pid = proc && !proc.killed ? proc.pid : await findBotPid(symbol);
+    if (!pid) {
+      await db.update(botsTable)
+        .set({ is_running: false, stop_requested: false, position: null, updated_at: new Date().toISOString() })
+        .where(eq(botsTable.symbol, symbol));
+      return res.json({ success: false, message: "Bot not running" });
+    }
+
+    await db.update(botsTable)
+      .set({ stop_requested: true, updated_at: new Date().toISOString() })
+      .where(eq(botsTable.symbol, symbol));
+    res.json({
+      success: true,
+      message: `Graceful stop requested for ${symbol} — бот доведёт позицию и выйдет`,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Жёсткое убийство процесса (экстренная кнопка Kill). Позиция/ордера на бирже
+// остаются как есть — закрывать их нужно через kill-switch / вручную.
+router.post("/:symbol/kill", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+
     const proc = botProcesses.get(symbol);
     if (proc) {
       if (!proc.killed) {
-        // Windows: use kill() without signal (TerminateProcess)
-        // Linux/Mac: SIGTERM then SIGKILL
         if (process.platform === "win32") {
           proc.kill();
         } else {
@@ -473,7 +602,6 @@ router.post("/:symbol/stop", async (req, res) => {
       botProcesses.delete(symbol);
     }
 
-    // Потом ищем процесс запущенный вручную
     const pid = await findBotPid(symbol);
     if (pid) {
       await killPid(pid);
@@ -484,18 +612,17 @@ router.post("/:symbol/stop", async (req, res) => {
     }
 
     // State file is intentionally kept: a later Start restores the saved SL/TP
-    // from state_<symbol>.json instead of recalculating from config, which could
-    // immediately breach the SL and force an unwanted market close.
-    const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
+    // from state_<symbol>.json instead of recalculating from config.
+    const stateFile = statePath(symbol);
     if (fs.existsSync(stateFile)) {
-      console.log(`[STOP] Keeping state file for restore: ${stateFile}`);
+      console.log(`[KILL] Keeping state file for restore: ${stateFile}`);
     }
 
     await db.update(botsTable)
-      .set({ is_running: false, position: null, updated_at: new Date().toISOString() })
+      .set({ is_running: false, position: null, stop_requested: false, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol));
 
-    res.json({ success: true, message: `Bot ${symbol} stopped` });
+    res.json({ success: true, message: `Bot ${symbol} killed` });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -517,26 +644,17 @@ router.delete("/:symbol", async (req, res) => {
 });
 
 export async function reloadConfigsFromYaml(): Promise<void> {
-  // Resolve bot directory - it's at project root level (../../../bot from artifacts/api-server/src/routes)
-  const projectRoot = path.resolve(__dirname, "..", "..", "..", "..");
-  const possibleBotDirs = [
-    path.join(projectRoot, "bot"),
-    path.join(process.cwd(), "bot"),
-  ];
-  
-  let resolvedBotDir = possibleBotDirs.find(p => fs.existsSync(p) && fs.readdirSync(p).some(f => /^config_\w+\.yaml$/.test(f)));
-  if (!resolvedBotDir) {
-    throw new Error(`Bot directory not found. Tried: ${possibleBotDirs.join(", ")}`);
+  if (!fs.existsSync(BOT_CONFIG_DIR)) {
+    throw new Error(`Bot config directory not found: ${BOT_CONFIG_DIR}`);
   }
-  
-  const configs = fs.readdirSync(resolvedBotDir).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
+  const configs = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
   
   for (const file of configs) {
-    const raw = yaml.load(fs.readFileSync(path.join(resolvedBotDir, file), "utf8")) as Record<string, unknown>;
+    const raw = yaml.load(fs.readFileSync(path.join(BOT_CONFIG_DIR, file), "utf8")) as Record<string, unknown>;
     const symbol = (raw.symbol as string).toUpperCase();
     const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     const values = {
-      mode:             (raw.mode as string) || "paper",
+      mode:             (raw.mode as string) || "live",
       timeframe:        raw.timeframe as string,
       leverage:         raw.leverage as number,
       risk_pct:         raw.risk_pct as number,
@@ -559,12 +677,18 @@ export async function reloadConfigsFromYaml(): Promise<void> {
       auto_mode:        (raw.auto_mode as boolean) ?? true,
       paper_balance:    (raw.paper_balance as number) || 1000,
       log_file:         raw.log_file as string,
+      trade_mode:       (raw.trade_mode as string) || "manual",
+      position_size_usd: (raw.position_size_usd as number) || 0,
+      position_size_pct: (raw.position_size_pct as number) ?? 1,
+      reverse_chain_max: (raw.reverse_chain_max as number) ?? 10,
+      max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
+      max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
       updated_at:       new Date().toISOString(),
     };
     if (existing) {
       await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
     } else {
-      await db.insert(botsTable).values({ symbol, is_running: false, position: null, ...values });
+      await db.insert(botsTable).values({ symbol, is_running: false, position: null, armed: BOT_ENV !== "live", relay_only: BOT_ENV === "live", ...values });
     }
   }
 }
@@ -588,12 +712,11 @@ export async function autoRestartBots(symbols: string[]): Promise<void> {
 
   const MAX_ATTEMPTS = 3;
   for (const symbol of symbols) {
-    const configFile = `config_${symbol.replace("USDT", "").toLowerCase()}.yaml`;
     let started = false;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !started; attempt++) {
       try {
-        console.log(`[auto-restart] ${symbol}: attempt ${attempt}/${MAX_ATTEMPTS} (${configFile})`);
-        const result = await startBotProcess(symbol, configFile);
+        console.log(`[auto-restart] ${symbol}: attempt ${attempt}/${MAX_ATTEMPTS}`);
+        const result = await startBotProcess(symbol);
         if (result.ok) {
           started = true;
           console.log(`[auto-restart] ${symbol}: started (pid=${result.pid})`);
@@ -639,15 +762,15 @@ export async function stopAllBots(): Promise<void> {
         proc.kill("SIGKILL");
       }
     }
-    const stateFile = path.join(BOT_DIR, `state_${symbol.toLowerCase()}.json`);
+    const stateFile = statePath(symbol);
     try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
   }
-  const configFiles = fs.readdirSync(BOT_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
+  const configFiles = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
   for (const file of configFiles) {
     const symbol = file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT";
     const pid = await findBotPid(symbol);
     if (pid) {
-      try { if (process.platform === "win32") { await execAsync(`taskkill /PID ${pid} /F`); } else { process.kill(pid, "SIGKILL"); } } catch {}
+      try { if (process.platform === "win32") { await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true }); } else { process.kill(pid, "SIGKILL"); } } catch {}
     }
   }
   await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
