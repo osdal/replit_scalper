@@ -184,18 +184,25 @@ router.post("/close-all", async (_req, res) => {
 const PEAK_FILE = path.resolve(BOT_DIR, "..", "data", "live_drawdown_peak.json");
 let lastWorstCloseMs = 0;
 
-function loadPeak(): number {
+// Состояние просадки: peak (максимум баланса) + armed (защёлка срабатывания).
+// armed=true  → при достижении порога разрешено закрыть худшую позицию ОДИН раз;
+// armed=false → пока просадка держится ≥ порога, повторно НЕ закрываем (иначе
+//               черн: API закрыл позицию, бот тут же открыл новую, снова просадка…).
+type DdState = { peak: number; armed: boolean };
+function loadDdState(): DdState {
   try {
     const raw = JSON.parse(fs.readFileSync(PEAK_FILE, "utf8"));
-    return Number(raw?.peak) || 0;
-  } catch { return 0; }
+    return { peak: Number(raw?.peak) || 0, armed: raw?.armed !== false };
+  } catch {
+    return { peak: 0, armed: true };
+  }
 }
-function savePeak(peak: number): void {
+function saveDdState(state: DdState): void {
   try {
     fs.mkdirSync(path.dirname(PEAK_FILE), { recursive: true });
-    fs.writeFileSync(PEAK_FILE, JSON.stringify({ peak }));
+    fs.writeFileSync(PEAK_FILE, JSON.stringify(state));
   } catch (e) {
-    console.error("[live] peak save failed:", String(e));
+    console.error("[live] drawdown state save failed:", String(e));
   }
 }
 
@@ -241,20 +248,32 @@ export async function checkMaxDrawdown(): Promise<void> {
     const equity = await liveEquity();
     if (!(equity > 0)) return;
     const fixedDeposit = Number(process.env.LIVE_DEPOSIT_USD || "0") || 0;
+    const state = loadDdState();
     let reference: number;
     if (fixedDeposit > 0) {
       reference = fixedDeposit;
     } else {
-      const peak = loadPeak();
-      reference = Math.max(peak, equity);
-      if (reference > peak) savePeak(reference);
+      reference = Math.max(state.peak, equity);
+      if (reference > state.peak) {
+        state.peak = reference;
+        state.armed = true; // новый максимум — снова разрешаем срабатывание
+        saveDdState(state);
+      }
     }
     if (!(reference > 0)) return;
     const ddPct = ((reference - equity) / reference) * 100;
-    if (ddPct < threshold) return;
+    if (ddPct < threshold) {
+      // Восстановились выше порога — взводим защёлку для следующего захода.
+      if (!state.armed) { state.armed = true; saveDdState(state); }
+      return;
+    }
+    // Защёлка: на этом заходе уже закрывали — повторно НЕ закрываем.
+    if (!state.armed) return;
     const now = Date.now();
     if (now - lastWorstCloseMs < 300_000) return; // не чаще раза в 5 мин
     lastWorstCloseMs = now;
+    state.armed = false;
+    saveDdState(state);
     console.error(
       `[live] MAX DRAWDOWN ${ddPct.toFixed(2)}% >= ${threshold}% ` +
       `(equity=${equity.toFixed(2)} reference=${reference.toFixed(2)}) — closing worst position`,
@@ -272,12 +291,13 @@ router.get("/drawdown", async (_req, res) => {
     await syncBinanceTime();
     const equity = await liveEquity();
     const fixedDeposit = Number(process.env.LIVE_DEPOSIT_USD || "0") || 0;
-    const peak = loadPeak();
-    const reference = fixedDeposit > 0 ? fixedDeposit : Math.max(peak, equity);
+    const state = loadDdState();
+    const reference = fixedDeposit > 0 ? fixedDeposit : Math.max(state.peak, equity);
     const ddPct = reference > 0 ? ((reference - equity) / reference) * 100 : 0;
     res.json({
-      bot_env: BOT_ENV, equity, reference, peak, fixed_deposit: fixedDeposit,
-      drawdown_pct: ddPct, threshold_pct: threshold, enabled: threshold > 0,
+      bot_env: BOT_ENV, equity, reference, peak: state.peak, armed: state.armed,
+      fixed_deposit: fixedDeposit, drawdown_pct: ddPct, threshold_pct: threshold,
+      enabled: threshold > 0,
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });

@@ -57,6 +57,14 @@ async def main() -> None:
             print(json.dumps({"env": BOT_ENV, "closed": 0, "reason": "no open positions"}))
             return
 
+    # Не закрываем прибыльные позиции: если худшая не в минусе — ничего не делаем.
+    # (Иначе при dd>=порога закрывались бы и плюсовые позиции — лишний черн/комиссии.)
+    if worst["upnl"] >= 0:
+        await client.close_connection()
+        print(json.dumps({"env": BOT_ENV, "closed": 0, "reason": "no losing position",
+                          "worst_symbol": worst["symbol"], "worst_upnl": worst["upnl"]}))
+        return
+
     amt = worst["amt"]
     sym = worst["symbol"]
     side = "SELL" if amt > 0 else "BUY"
