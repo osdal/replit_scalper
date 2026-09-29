@@ -178,46 +178,30 @@ router.post("/close-all", async (_req, res) => {
 });
 
 // ── Лимит просадки: закрытие самой убыточной позиции ─────────────────────────
-// Референс = LIVE_DEPOSIT_USD (если задан) либо максимум equity (high-water mark,
-// хранится в data/live_drawdown_peak.json). Если просадка от референса достигла
-// LIVE_MAX_DRAWDOWN_PCT %, закрываем одну самую убыточную открытую позицию.
-const PEAK_FILE = path.resolve(BOT_DIR, "..", "data", "live_drawdown_peak.json");
+// Референс — ТЕКУЩИЙ депозит = wallet balance (меняется вместе с балансом после
+// сделок). Просадка = открытый (нереализованный) убыток от текущего депозита:
+//   dd% = (-totalUnrealizedProfit / totalWalletBalance) * 100
+// Если dd% >= LIVE_MAX_DRAWDOWN_PCT — закрываем одну самую убыточную позицию.
+// Никакого «пика»/первоначального депозита: база всегда текущий баланс, поэтому
+// после закрытия сделки база сама обновляется на новый баланс.
 let lastWorstCloseMs = 0;
 
-// Состояние просадки: peak (максимум баланса) + armed (защёлка срабатывания).
-// armed=true  → при достижении порога разрешено закрыть худшую позицию ОДИН раз;
-// armed=false → пока просадка держится ≥ порога, повторно НЕ закрываем (иначе
-//               черн: API закрыл позицию, бот тут же открыл новую, снова просадка…).
-type DdState = { peak: number; armed: boolean };
-function loadDdState(): DdState {
-  try {
-    const raw = JSON.parse(fs.readFileSync(PEAK_FILE, "utf8"));
-    return { peak: Number(raw?.peak) || 0, armed: raw?.armed !== false };
-  } catch {
-    return { peak: 0, armed: true };
-  }
-}
-function saveDdState(state: DdState): void {
-  try {
-    fs.mkdirSync(path.dirname(PEAK_FILE), { recursive: true });
-    fs.writeFileSync(PEAK_FILE, JSON.stringify(state));
-  } catch (e) {
-    console.error("[live] drawdown state save failed:", String(e));
-  }
-}
-
-async function liveEquity(): Promise<number> {
+type LiveAccount = { wallet: number; upnl: number; equity: number };
+async function liveAccount(): Promise<LiveAccount> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const raw = await binanceRequest("GET", "/fapi/v2/account", {});
-      return Number(raw?.totalMarginBalance ?? raw?.totalWalletBalance ?? 0) || 0;
+      const wallet = Number(raw?.totalWalletBalance ?? 0) || 0;
+      const upnl = Number(raw?.totalUnrealizedProfit ?? 0) || 0;
+      const equity = Number(raw?.totalMarginBalance ?? wallet + upnl) || 0;
+      return { wallet, upnl, equity };
     } catch (e) {
       lastErr = e;
       await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
     }
   }
-  throw lastErr ?? new Error("equity fetch failed");
+  throw lastErr ?? new Error("account fetch failed");
 }
 
 async function closeWorstPosition(): Promise<{ ok: boolean; output: string }> {
@@ -245,38 +229,18 @@ export async function checkMaxDrawdown(): Promise<void> {
   if (BOT_ENV !== "live" || !Number.isFinite(threshold) || threshold <= 0) return;
   try {
     await syncBinanceTime();
-    const equity = await liveEquity();
-    if (!(equity > 0)) return;
-    const fixedDeposit = Number(process.env.LIVE_DEPOSIT_USD || "0") || 0;
-    const state = loadDdState();
-    let reference: number;
-    if (fixedDeposit > 0) {
-      reference = fixedDeposit;
-    } else {
-      reference = Math.max(state.peak, equity);
-      if (reference > state.peak) {
-        state.peak = reference;
-        state.armed = true; // новый максимум — снова разрешаем срабатывание
-        saveDdState(state);
-      }
-    }
-    if (!(reference > 0)) return;
-    const ddPct = ((reference - equity) / reference) * 100;
-    if (ddPct < threshold) {
-      // Восстановились выше порога — взводим защёлку для следующего захода.
-      if (!state.armed) { state.armed = true; saveDdState(state); }
-      return;
-    }
-    // Защёлка: на этом заходе уже закрывали — повторно НЕ закрываем.
-    if (!state.armed) return;
+    const acct = await liveAccount();
+    if (!(acct.wallet > 0)) return;
+    // Просадка = открытый убыток от ТЕКУЩЕГО депозита (wallet). База обновляется
+    // автоматически вместе с балансом после закрытия сделок.
+    const ddPct = (-acct.upnl / acct.wallet) * 100;
+    if (ddPct < threshold) return;
     const now = Date.now();
-    if (now - lastWorstCloseMs < 300_000) return; // не чаще раза в 5 мин
+    if (now - lastWorstCloseMs < 60_000) return; // не чаще раза в минуту
     lastWorstCloseMs = now;
-    state.armed = false;
-    saveDdState(state);
     console.error(
       `[live] MAX DRAWDOWN ${ddPct.toFixed(2)}% >= ${threshold}% ` +
-      `(equity=${equity.toFixed(2)} reference=${reference.toFixed(2)}) — closing worst position`,
+      `(wallet=${acct.wallet.toFixed(2)} upnl=${acct.upnl.toFixed(2)}) — closing worst position`,
     );
     const res = await closeWorstPosition();
     console.error(`[live] drawdown close-worst ${res.ok ? "OK" : "FAILED"}: ${res.output.slice(0, 400)}`);
@@ -289,14 +253,11 @@ router.get("/drawdown", async (_req, res) => {
   const threshold = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "10");
   try {
     await syncBinanceTime();
-    const equity = await liveEquity();
-    const fixedDeposit = Number(process.env.LIVE_DEPOSIT_USD || "0") || 0;
-    const state = loadDdState();
-    const reference = fixedDeposit > 0 ? fixedDeposit : Math.max(state.peak, equity);
-    const ddPct = reference > 0 ? ((reference - equity) / reference) * 100 : 0;
+    const acct = await liveAccount();
+    const ddPct = acct.wallet > 0 ? (-acct.upnl / acct.wallet) * 100 : 0;
     res.json({
-      bot_env: BOT_ENV, equity, reference, peak: state.peak, armed: state.armed,
-      fixed_deposit: fixedDeposit, drawdown_pct: ddPct, threshold_pct: threshold,
+      bot_env: BOT_ENV, wallet: acct.wallet, upnl: acct.upnl, equity: acct.equity,
+      reference: acct.wallet, drawdown_pct: ddPct, threshold_pct: threshold,
       enabled: threshold > 0,
     });
   } catch (e) {
