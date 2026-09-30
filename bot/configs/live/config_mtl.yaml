@@ -105,3 +105,5 @@ commission_pct: 0.05
 loss_streak_skip_enabled: false
 trade_mode: manual
 position_size_usd: 0
+
+max_position_notional_usd: 120

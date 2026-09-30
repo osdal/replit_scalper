@@ -1250,3 +1250,8 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - **Никакого суммирования между позициями и никакого пика**: база — всегда текущий депозит.
 - Пример: баланс $43 → порог 5% = $2.15 убытка по одной позиции; баланс стал $44 → порог = $2.20.
 - `GET /api/live/drawdown` отдаёт `wallet`, `drawdown_pct` (= максимальный `loss%` по позициям), `worst_symbol`, и `positions[]` со `loss_pct` по каждой позиции.
+
+### 18.12 Ограничение нотионала live-позиций (`max_position_notional_usd: 120`)
+- Во всех live-конфигах задан `max_position_notional_usd: 120` — жёсткий потолок нотионала позиции/ноги цепочки (в дополнение к `max_position_pct_equity` и `availableBalance×leverage×0.95`).
+- Зачем: при сбое связи (DNS/offline: `getaddrinfo failed`, `fetch failed`) ни бот (виртуальный SL), ни API‑лимит просадки не могут достать до Binance, и позиция защищена только биржевым backstop. Потолок нотионала ограничивает возможную потерю в таком случае (~2% × cap ≈ $2.4).
+- Ёмкость цепочки при cap $120 (base ~$10): ~2 шага — base $10 → step0 ~$28 → step1 ~$120; step2 ~$187 уже режется (clamp). Для 3 шагов нужен cap ~$200.
