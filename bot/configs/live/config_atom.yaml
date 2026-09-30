@@ -93,7 +93,7 @@ mode: live
 paper_balance: 1000.0
 position_size_pct: 0.5
 position_size_usd: 0
-max_position_notional_usd: 120
+max_position_notional_usd: 200
 risk_pct: 3.0
 rsi_high: 70
 rsi_low: 30
