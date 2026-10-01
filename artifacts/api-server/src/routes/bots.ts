@@ -712,6 +712,20 @@ export async function autoRestartBots(symbols: string[]): Promise<void> {
 
   const MAX_ATTEMPTS = 3;
   for (const symbol of symbols) {
+    // Не поднимаем бота, у которого взведена мягкая остановка: иначе рестарт
+    // API молча отменяет Stop и бот снова начинает торговать.
+    try {
+      const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+      if (bot?.stop_requested) {
+        console.log(`[auto-restart] ${symbol}: stop_requested=1 — пропуск (мягкая остановка)`);
+        await db.update(botsTable)
+          .set({ stop_requested: false, updated_at: new Date().toISOString() })
+          .where(eq(botsTable.symbol, symbol));
+        continue;
+      }
+    } catch (e) {
+      console.warn(`[auto-restart] ${symbol}: stop_requested check failed — ${String(e)}`);
+    }
     let started = false;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !started; attempt++) {
       try {

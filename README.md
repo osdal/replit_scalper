@@ -1260,3 +1260,10 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - Во всех live-конфигах `max_position_notional_usd: 200` (было 120).
 - Ёмкость цепочки: ~3 шага (base ~$10 → step0 ~$28 → step1 ~$120 → step2 ~$200; step3 ~$398 режется).
 - Потеря при сбое связи ограничена ~`2% × $200 ≈ $4` (вместо ~$8 без cap).
+
+### 18.14 Отключён notional cap; мягкая остановка доводит цепочку; прототип loss-cap backstop
+- Во всех live-конфигах `max_position_notional_usd: 0` (cap отключён). Причина: жёсткий $200 не давал реверс-ноге набрать объём для выхода в безубыток → цикл закрывался в минус (`chain TP leaves cycle negative ... capped=True`). Остаются потолки `available margin × leverage × 0.95` и биржевой bracket.
+- Мягкая остановка (Stop): блокируются только **новые независимые входы** (свои `bot/main.py` + relay `_relay_entry`); текущая reverse-цепочка **доводится штатно** (на SL открывается новая нога), бот выходит при флэте. Убраны оба блока форс-флэта (`REVERSE_SKIP`/`REVERSE_CHAIN_STOP` по `_stop_requested`).
+- API: `resetStaleRunningBots` помечает мёртвых ботов с `stop_requested=1` как остановленных и **не** поднимает их (`autoRestartBots` пропускает) — рестарт API больше не отменяет Stop (`artifacts/api-server/src/index.ts`, `routes/bots.ts`).
+- Бот: перед отменой фоновых задач ждём завершения `tick_task` (`SHUTDOWN_FINALIZE_GRACE_SEC`, 20с), чтобы не терять close-PATCH и не плодить фантомные `is_open=1` (`bot/main.py`).
+- Прототип loss-cap backstop (`REVERSE_LOSSCAP_ENABLED/PCT/REF_DEPOSIT_USD`): на каждом реверсе считается цена, при которой убыток ЦИКЛА = `pct%` реф-депозита, триггер клэмпится так, чтобы не оказаться раньше виртуального SL; логи `[LOSSCAP]` с `worst%`/`attainable`. `ENABLED=false` — только логи; `true` — ставит `STOP_MARKET closePosition` по расчётному триггеру (`bot/order_manager.py:cycle_loss_cap`, `bot/main.py`).

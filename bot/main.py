@@ -1900,8 +1900,38 @@ async def _run_live_or_paper(
                             tracker.position.sl_price
                             if tracker.position is not None else 0.0
                         ) or rev_entry
+                        # --- Прототип loss-cap: цена, при которой убыток ЦИКЛА =
+                        # REVERSE_LOSSCAP_PCT% реф-депозита; триггер клэмпится так,
+                        # чтобы не оказаться раньше виртуального SL. Логируем всегда,
+                        # стоп ставим по exact_trigger только при ENABLED=true. ---
+                        _lc_pct = float(os.getenv("REVERSE_LOSSCAP_PCT") or "5")
+                        _lc_ref = float(os.getenv("REVERSE_LOSSCAP_REF_DEPOSIT_USD") or "0")
+                        _lc_on = (
+                            (os.getenv("REVERSE_LOSSCAP_ENABLED") or "false").strip().lower()
+                            == "true"
+                        )
+                        _lc = await order_mgr.cycle_loss_cap(
+                            new_dir=new_dir, net_qty=rev_qty, entry=rev_entry,
+                            net_realized=prior_realized, virtual_sl=_rev_sl,
+                            pct=_lc_pct,
+                            ref_deposit=(_lc_ref if _lc_ref > 0 else None),
+                        )
+                        _lc_exact = None
+                        if _lc:
+                            _lc_msg = (
+                                f"[LOSSCAP] step={chain_step + 1} {new_dir} "
+                                f"ref={_lc['ref']:.2f} target={_lc_pct:.1f}% "
+                                f"P_cap={_lc['p_cap']:.6f} vsl={_rev_sl:.6f} "
+                                f"trigger={_lc['trigger']:.6f} clamped={_lc['clamped']} "
+                                f"worst={_lc['worst_pct']:.1f}% "
+                                f"attainable={'yes' if _lc['attainable'] else 'NO'}"
+                            )
+                            log.info(_lc_msg)
+                            events.info(_lc_msg)
+                            if _lc_on:
+                                _lc_exact = _lc["trigger"]
                         order_mgr.backstop_algo_id = await order_mgr._place_exchange_backstop(
-                            new_dir, _rev_sl, qty=rev_qty
+                            new_dir, _rev_sl, qty=rev_qty, exact_trigger=_lc_exact
                         )
                         if tracker.position is not None:
                             tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
@@ -3092,6 +3122,12 @@ async def _run_live_or_paper(
             entry_px = float(payload.get("entry_price") or 0)
             if direction not in ("LONG", "SHORT") or entry_px <= 0:
                 return False, "invalid"
+            # Мягкая остановка: live-боты работают в relay-only, и это
+            # ЕДИНСТВЕННЫЙ путь входа — гейт `if _stop_requested` в
+            # обработчике своих сигналов для relay-only недостижим.
+            if _stop_requested:
+                log.info("[STOP] graceful stop requested — relay entry skipped")
+                return False, "graceful_stop"
             # Защита от «просроченных» сигналов.
             created = payload.get("created_at")
             if created:
@@ -3651,7 +3687,19 @@ async def _run_live_or_paper(
             logger=log, poll_seconds=60, shutdown_event=shutdown_event,
         )
     
-    # Останавливаем фоновые задачи
+    # Останавливаем фоновые задачи.
+    # ВАЖНО: не отменяем tick_task мгновенно — он может быть в середине
+    # финализации сделки (tick_sl_tp_check → process_hit → _report_close_with_id).
+    # Мгновенный cancel() теряет close-PATCH, и строка trades навсегда остаётся
+    # is_open=1 («фантомная открытая сделка»). shutdown_event уже взведён, и
+    # tick_task выйдет сам на ближайшей проверке (~1с); даём ему дописать
+    # закрытие, затем отменяем всё остальное.
+    _finalize_grace_sec = float(os.getenv("SHUTDOWN_FINALIZE_GRACE_SEC") or "20")
+    try:
+        await asyncio.wait_for(tick_task, timeout=_finalize_grace_sec)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
     _cancel_tasks = [check_task, flat_reconcile_task, sim_task, watchdog_task, time_profit_task, tick_task, heartbeat_task, graceful_task]
     if relay_task is not None:
         _cancel_tasks.append(relay_task)

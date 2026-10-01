@@ -98,6 +98,22 @@ async function resetStaleRunningBots(): Promise<string[]> {
         }
       } catch {}
       if (!isAlive) {
+        if (bot.stop_requested) {
+          // Пока бот доводил мягкую остановку, процесс умер (чаще всего —
+          // вместе с api-server). Считаем остановку выполненной: НЕ поднимаем
+          // бота обратно и снимаем флаг, иначе остановка молча отменяется и бот
+          // снова начинает торговать.
+          await db.update(botsTable)
+            .set({
+              is_running: false,
+              stop_requested: false,
+              stop_reason: bot.stop_reason || "graceful_stop_process_exited",
+              updated_at: new Date().toISOString(),
+            })
+            .where(eq(botsTable.symbol, bot.symbol));
+          logger.info({ symbol: bot.symbol }, "Graceful stop completed after process exit — not auto-restarting");
+          continue;
+        }
         await db.update(botsTable)
           .set({ is_running: false, updated_at: new Date().toISOString() })
           .where(eq(botsTable.symbol, bot.symbol));

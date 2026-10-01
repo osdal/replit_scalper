@@ -557,12 +557,14 @@ class OrderManager:
     # размером позиции (closePosition=true), поэтому qty в ордер не передаётся.
 
     async def _place_exchange_backstop(
-        self, direction: str, sl_price: float, qty: float = 0.0
+        self, direction: str, sl_price: float, qty: float = 0.0,
+        exact_trigger: Optional[float] = None,
     ) -> Optional[int]:
         """Ставит широкий биржевой STOP_MARKET (closePosition=true) как safety-net.
 
         trigger = LONG: sl_price * (1 - pct/100), SHORT: sl_price * (1 + pct/100),
         где pct = cfg.exchange_sl_backstop_pct, округлённый по tickSize символа.
+        Если задан exact_trigger > 0 — ставится ровно по нему (без ±pct).
         Возвращает algoId или None. Никогда не бросает исключение.
         """
         if not getattr(self.cfg, "exchange_sl_backstop_enabled", True):
@@ -580,12 +582,13 @@ class OrderManager:
             if self.backstop_algo_id:
                 await self._cancel_exchange_backstop(self.backstop_algo_id)
             pct = float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            use_exact = exact_trigger is not None and exact_trigger > 0
             if direction == "LONG":
-                trigger_raw = sl_price * (1 - pct / 100)
+                trigger_raw = float(exact_trigger) if use_exact else sl_price * (1 - pct / 100)
                 side = SIDE_SELL
                 key = "long"
             else:
-                trigger_raw = sl_price * (1 + pct / 100)
+                trigger_raw = float(exact_trigger) if use_exact else sl_price * (1 + pct / 100)
                 side = SIDE_BUY
                 key = "short"
             trigger_price = await self._adjust_price(trigger_raw, mode="live")
@@ -620,7 +623,7 @@ class OrderManager:
             self.backstop_algo_id = algo_id
             self.log.info(
                 f"[BACKSTOP] Exchange stop placed | {direction} side={side} "
-                f"trigger={trigger_price} sl={sl_price} pct={pct}% "
+                f"trigger={trigger_price} sl={sl_price} pct={pct}% exact={use_exact} "
                 f"qty={qty} clientAlgoId={client_algo_id} algoId={algo_id}"
             )
             return algo_id
@@ -714,6 +717,88 @@ class OrderManager:
         taker = float(getattr(self.cfg, "taker_fee_pct", 0.05) or 0.0) / 100.0
         p = float(getattr(self.cfg, "reverse_profit_pct", 0.1) or 0.0) / 100.0
         return taker, taker, p
+
+    async def cycle_loss_cap(
+        self, *, new_dir: str, net_qty: float, entry: float,
+        net_realized: float, virtual_sl: float, pct: float,
+        ref_deposit: Optional[float] = None,
+    ) -> Optional[dict]:
+        """Прототип: цена, при которой убыток ЦИКЛА = pct% реф-депозита.
+
+        Считает PnL всего цикла (реализованный net_realized + нереализованный
+        новой нетто-ноги минус оценочные комиссии входа/выхода) и находит цену,
+        где он равен -pct% от реф-депозита. Триггер клэмпится так, чтобы НИКОГДА
+        не оказаться раньше виртуального SL (иначе биржевой стоп порвал бы реверс).
+
+        Возвращает dict либо None:
+          ref         — использованный реф-депозит (USD)
+          p_cap       — «сырая» цена убытка pct% цикла
+          trigger     — фактический триггер для STOP_MARKET (клэмпнутый)
+          clamped     — True, если p_cap пришлось отодвинуть шире виртуального SL
+          worst_pct   — фактический worst-case убыток (%) при trigger
+          attainable  — достижим ли target pct% (worst_pct <= pct)
+        """
+        try:
+            f_in, f_out, _p = self._reverse_fee_params()
+            q = float(net_qty) if new_dir == "LONG" else -float(net_qty)
+            if not entry or entry <= 0 or abs(q) <= 0:
+                return None
+            ref = float(ref_deposit) if (ref_deposit and ref_deposit > 0) else 0.0
+            if ref <= 0:
+                ref = await self._get_equity()
+            if ref <= 0:
+                try:
+                    ref = await self.get_balance("live")
+                except Exception:
+                    ref = 0.0
+            if ref <= 0:
+                return None
+
+            x = abs(float(pct)) / 100.0
+            aq = abs(q)
+            fee_in = f_in * aq * entry
+            # cycle_pnl(P) = net_realized + q*(P-entry) - fee_in - f_out*aq*P
+            denom = q - f_out * aq
+            if abs(denom) < 1e-12:
+                return None
+            p_cap_raw = (-x * ref - float(net_realized) + q * entry + fee_in) / denom
+
+            sl = float(virtual_sl) if (virtual_sl and virtual_sl > 0) else 0.0
+            pct_bs = float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            if sl > 0 and new_dir == "LONG":
+                gap = sl * (1 - pct_bs / 100.0)
+                if p_cap_raw < sl:
+                    trigger, clamped = max(p_cap_raw, gap), False
+                else:
+                    trigger, clamped = gap, True
+            elif sl > 0:
+                gap = sl * (1 + pct_bs / 100.0)
+                if p_cap_raw > sl:
+                    trigger, clamped = min(p_cap_raw, gap), False
+                else:
+                    trigger, clamped = gap, True
+            else:
+                trigger, clamped = p_cap_raw, False
+
+            def _cycle_at(P: float) -> float:
+                return float(net_realized) + q * (P - entry) - fee_in - f_out * aq * P
+
+            worst = _cycle_at(trigger)
+            worst_pct = (-worst) / ref * 100.0
+            return {
+                "ref": ref,
+                "p_cap": p_cap_raw,
+                "trigger": trigger,
+                "clamped": clamped,
+                "worst_pct": worst_pct,
+                "attainable": worst_pct <= abs(float(pct)) + 1e-6,
+            }
+        except Exception as e:
+            try:
+                self.log.debug(f"[LOSSCAP] compute failed: {e}")
+            except Exception:
+                pass
+            return None
 
     def _reverse_sizing(
         self, P: float, N: float, net_realized: float, U_eff: float, new_dir: str,
