@@ -149,7 +149,9 @@ async def get_current_price(
             return rest_price
     except Exception as e:
         if logger:
-            logger.warning(f"[PRICE] REST ticker failed for {symbol}: {e}")
+            logger.warning(
+                f"[PRICE] REST ticker failed for {symbol}: {type(e).__name__}: {e!r}"
+            )
     # Фолбэк — последняя известная цена (никогда не роняем тик).
     return price if price > 0 else 0.0
 
@@ -307,7 +309,8 @@ async def start_kline_websocket(
         except Exception as e:
             if logger:
                 logger.warning(
-                    f"[WS] socket error: {e}; reconnecting in {backoff:.0f}s"
+                    f"[WS] socket error: {type(e).__name__}: {e!r}; "
+                    f"reconnecting in {backoff:.0f}s"
                 )
         if shutdown_event and shutdown_event.is_set():
             break

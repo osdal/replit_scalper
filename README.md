@@ -1267,3 +1267,17 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - API: `resetStaleRunningBots` помечает мёртвых ботов с `stop_requested=1` как остановленных и **не** поднимает их (`autoRestartBots` пропускает) — рестарт API больше не отменяет Stop (`artifacts/api-server/src/index.ts`, `routes/bots.ts`).
 - Бот: перед отменой фоновых задач ждём завершения `tick_task` (`SHUTDOWN_FINALIZE_GRACE_SEC`, 20с), чтобы не терять close-PATCH и не плодить фантомные `is_open=1` (`bot/main.py`).
 - Прототип loss-cap backstop (`REVERSE_LOSSCAP_ENABLED/PCT/REF_DEPOSIT_USD`): на каждом реверсе считается цена, при которой убыток ЦИКЛА = `pct%` реф-депозита, триггер клэмпится так, чтобы не оказаться раньше виртуального SL; логи `[LOSSCAP]` с `worst%`/`attainable`. `ENABLED=false` — только логи; `true` — ставит `STOP_MARKET closePosition` по расчётному триггеру (`bot/order_manager.py:cycle_loss_cap`, `bot/main.py`).
+
+### 18.15 Периодический авто-рестарт ботов + диагностика сети + ускорение старта API
+- **Периодический авто-рестарт** (`routes/bots.ts`, `index.ts`). Раньше боты поднимались только при старте API: упавший бот оставался выключенным до ручного Start. Появилось множество `desiredRunning`:
+  - `Start` и стартовый `autoRestartBots` добавляют символ в `desiredRunning`;
+  - `Stop` (мягкая остановка), `Kill`, `stop-all`, `DELETE` — **убирают** (осознанная остановка не отменяется);
+  - `restartDesiredBots()` раз в 30с поднимает только символы из `desiredRunning`, у которых умер процесс и которые `armed` и без `stop_requested`;
+  - троттлинг против цикла рестартов: кулдаун `AUTO_RESTART_DEAD_COOLDOWN_MS` (90с) и лимит `AUTO_RESTART_MAX_ATTEMPTS` (5) в окне `AUTO_RESTART_WINDOW_MS` (30 мин);
+  - уважает `AUTO_RESTART_BOTS` (в `.env.live` он `false` → на live авто-рестарт выключен по конфигурации).
+- **Диагностика сетевых сбоев** (`bot/order_manager.py`, `bot/market_data.py`): сообщения вида `[LIVE] Could not fetch position info:`, `[PRICE] REST ticker failed …`, `[WS] socket error …` печатали пустую строку (у части исключений `str()` пуст), из-за чего сбои связи было невозможно диагностировать. Теперь логируется `type(e).__name__: e!r`.
+- **Ускорение старта/рестарта API** (устранение O(n) вызовов PowerShell):
+  - `findBotPid` больше не запускает `Get-CimInstance Win32_Process` на каждый вызов — перебор процессов кэшируется на 3с (`getAllBotPidsCached`);
+  - `resetStaleRunningBots` делает **один** перебор процессов вместо перебора на каждого бота (было ≈4с × 40 ≈ 3 минуты простоя, из-за чего `app.listen` не открывался);
+  - интерпретатор python резолвится один раз и кэшируется в `cachedPythonCmd` (`hasDeps` = `execSync` с импортом `pandas`+`binance` больше не выполняется на каждый старт бота);
+  - если перебор процессов не удался (`tryFindAllBotPids` вернул `null`), stale-ресет пропускается, чтобы не пометить живых ботов остановленными.

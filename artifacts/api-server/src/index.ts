@@ -31,7 +31,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates } from "./routes/bots";
+import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates, restartDesiredBots, tryFindAllBotPids } from "./routes/bots";
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
 import { configPath, assertEnvMatchesExchange } from "./botPaths";
@@ -69,34 +69,20 @@ try {
  * вернуть" от "бот и так стоял".
  */
 async function resetStaleRunningBots(): Promise<string[]> {
-  const staleSymbols: string[] = [];
+const staleSymbols: string[] = [];
   try {
+    // ОДИН перебор процессов на весь проход. Раньше PowerShell запускался
+    // ВНУТРИ цикла — по одному разу на каждого бота, т.е. O(n) вызовов
+    // Get-CimInstance (≈4с на бота → минуты простоя на старте API).
+    const aliveMap = await tryFindAllBotPids();
+    if (aliveMap === null) {
+      logger.warn("Could not enumerate bot processes — skipping stale reset");
+      return staleSymbols;
+    }
     const bots = await db.select().from(botsTable);
     for (const bot of bots) {
       if (!bot.is_running) continue;
-      const cfgPath = configPath(bot.symbol);
-      let isAlive = false;
-      try {
-        if (process.platform === "win32") {
-          const { stdout } = await execAsync(
-            `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
-            { windowsHide: true },
-          );
-          try {
-            const processes = JSON.parse(stdout);
-            const procList = Array.isArray(processes) ? processes : [processes];
-            isAlive = procList.some((p: any) => p.CommandLine?.includes(cfgPath));
-          } catch {
-            isAlive = false;
-          }
-        } else {
-          const { stdout } = await execAsync(
-            `ps aux | grep "python.*main.py.*${cfgPath}" | grep -v grep`,
-            { windowsHide: true },
-          );
-          isAlive = stdout.includes(cfgPath);
-        }
-      } catch {}
+      const isAlive = aliveMap.has(bot.symbol.toUpperCase());
       if (!isAlive) {
         if (bot.stop_requested) {
           // Пока бот доводил мягкую остановку, процесс умер (чаще всего —
@@ -169,6 +155,9 @@ resetStaleRunningBots()
       // показывал актуальный статус и давал нажать Start после падения/самостопа,
       // даже если событие exit процесса было потеряно.
       setInterval(() => { void reconcileBotRunningStates(); }, 30_000);
+      // Периодический авто-рестарт ботов, которых оператор держал запущенными
+      // (desiredRunning) и чей процесс умер — лечит падения по сети/самостопу.
+      setInterval(() => { void restartDesiredBots(); }, 30_000);
     });
   });
 

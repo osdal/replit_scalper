@@ -25,6 +25,12 @@ const __dirname = path.dirname(__filename);
 const router = Router();
 const botProcesses: Map<string, ChildProcess> = new Map();
 
+// Символы, которые ОПЕРАТОР хочет держать запущенными (Start / стартовый
+// авто-рестарт) — в отличие от ручного Stop/Kill. Периодический авто-рестарт
+// (restartDesiredBots) поднимает только их: падение по сети/самостопу лечится
+// автоматически, а осознанная остановка не отменяется.
+const desiredRunning = new Set<string>();
+
 /**
  * Обновляет config_<symbol>.yaml через отдельный Python-процесс.
  * Node.js не может импортировать .py файлы как модули — update_yaml_config()
@@ -61,42 +67,27 @@ function updateYamlConfig(symbol: string, params: Record<string, unknown>): Prom
   });
 }
 
+// Кэш перебора процессов: один PowerShell на пачку вызовов.
+// Без него каждый findBotPid — отдельный O(все процессы) вызов PowerShell,
+// из-за чего старт/авто-рестарт 40 ботов длился минуты.
+let botPidCache: { at: number; map: Map<string, number> } | null = null;
+
+// Резолвнутый интерпретатор python с зависимостями бота (кэш на процесс API).
+let cachedPythonCmd: string | null = null;
+
+async function getAllBotPidsCached(ttlMs = 3000): Promise<Map<string, number> | null> {
+  const now = Date.now();
+  if (botPidCache && now - botPidCache.at < ttlMs) return botPidCache.map;
+  const map = await tryFindAllBotPids();
+  if (map !== null) botPidCache = { at: now, map };
+  return map;
+}
+
 // Найти PID процесса бота по имени конфига (Windows + Linux)
 async function findBotPid(symbol: string): Promise<number | null> {
-  const cfgPath = configPath(symbol);
-  try {
-    if (process.platform === "win32") {
-      // Windows 11+ doesn't have wmic, use Get-CimInstance
-      const { stdout } = await execAsync(
-        `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\\"Name='python.exe'\\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
-        { windowsHide: true },
-      );
-      // ConvertTo-Json returns an array when >1 process, an object when exactly 1,
-      // or empty/null when none. Normalize to an array before iterating.
-      let raw: unknown = JSON.parse(stdout.trim() || "null");
-      const processes = Array.isArray(raw) ? raw : raw ? [raw] : [];
-      for (const proc of processes as Array<Record<string, unknown>>) {
-        const cmd = proc.CommandLine as string | undefined;
-        if (cmd && cmd.includes(cfgPath) && cmd.includes("main.py")) {
-          const pid = parseInt(String(proc.ProcessId));
-          if (!isNaN(pid) && pid > 0) return pid;
-        }
-      }
-    } else {
-      // Linux/Mac fallback
-      const { stdout } = await execFileAsync("pgrep", ["-f", `main.*${cfgPath}`], { windowsHide: true });
-      const pid = parseInt(stdout.trim());
-      if (!isNaN(pid)) return pid;
-    }
-  } catch {
-    try {
-      // Fallback: check all python processes with main.py
-      const { stdout } = await execFileAsync("pgrep", ["-f", `main.*${cfgPath}`], { windowsHide: true });
-      const pid = parseInt(stdout.trim());
-      if (!isNaN(pid)) return pid;
-    } catch {}
-  }
-  return null;
+  const m = await getAllBotPidsCached();
+  if (m === null) return null;
+  return m.get(symbol.toUpperCase()) ?? null;
 }
 
 /**
@@ -105,7 +96,7 @@ async function findBotPid(symbol: string): Promise<number | null> {
  * пустой map = «ботов нет»). Это важно для reconcile: при сбое опроса мы не
  * должны ложно помечать живых ботов остановленными.
  */
-async function tryFindAllBotPids(): Promise<Map<string, number> | null> {
+export async function tryFindAllBotPids(): Promise<Map<string, number> | null> {
   const pidBySymbol = new Map<string, number>();
   const consider = (cmd: string, pid: number) => {
     if (!cmd.includes("main.py")) return;
@@ -196,6 +187,60 @@ export async function reconcileBotRunningStates(): Promise<string[]> {
     console.warn(`[reconcile] failed: ${String(e)}`);
   }
   return stopped;
+}
+
+function autoRestartEnabled(): boolean {
+  return String(process.env.AUTO_RESTART_BOTS ?? "true").toLowerCase() !== "false";
+}
+
+// Когда и сколько раз авто-поднимали символ (анти-цикл для вечно падающих).
+const autoRestartHistory = new Map<string, number[]>();
+
+/**
+ * Периодический авто-рестарт: поднимает только символы из desiredRunning
+ * (их оператор запускал и не останавливал), если процесс умер. Троттлинг на
+ * символ (интервал + лимит попыток в окне), чтобы не было цикла рестартов.
+ * Уважает AUTO_RESTART_BOTS (в live он false).
+ */
+export async function restartDesiredBots(): Promise<string[]> {
+  const restarted: string[] = [];
+  if (!autoRestartEnabled() || desiredRunning.size === 0) return restarted;
+  const alive = await tryFindAllBotPids();
+  if (alive === null) return restarted; // не смогли опросить процессы — не рискуем
+  const now = Date.now();
+  const cooldown = Number(process.env.AUTO_RESTART_DEAD_COOLDOWN_MS ?? 90_000);
+  const windowMs = Number(process.env.AUTO_RESTART_WINDOW_MS ?? 1_800_000);
+  const maxAttempts = Number(process.env.AUTO_RESTART_MAX_ATTEMPTS ?? 5);
+  for (const symbol of Array.from(desiredRunning)) {
+    try {
+      if (alive.has(symbol)) continue;
+      const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+      if (!bot) { desiredRunning.delete(symbol); continue; }
+      if (!bot.armed || bot.stop_requested) continue;
+      const hist = (autoRestartHistory.get(symbol) ?? []).filter(t => now - t < windowMs);
+      if (hist.length && now - hist[hist.length - 1] < cooldown) {
+        autoRestartHistory.set(symbol, hist);
+        continue;
+      }
+      if (hist.length >= maxAttempts) {
+        autoRestartHistory.set(symbol, hist);
+        console.warn(`[auto-restart] ${symbol}: throttled (${hist.length} attempts in window)`);
+        continue;
+      }
+      hist.push(now);
+      autoRestartHistory.set(symbol, hist);
+      const r = await startBotProcess(symbol);
+      if (r.ok) {
+        restarted.push(symbol);
+        console.log(`[auto-restart] ${symbol}: dead → restarted (pid=${r.pid})`);
+      } else {
+        console.warn(`[auto-restart] ${symbol}: restart failed — ${r.message}`);
+      }
+    } catch (e) {
+      console.warn(`[auto-restart] ${symbol}: error ${String(e)}`);
+    }
+  }
+  return restarted;
 }
 
 // Убить процесс по PID
@@ -355,43 +400,47 @@ export async function startBotProcess(symbol: string): Promise<StartBotResult> {
     return { ok: true, message: `Bot ${symbol} already running (PID ${existingPid}) — adopted`, pid: existingPid };
   }
 
-  // Find Python executable. Priority:
-  //   1. process.env.BOT_PYTHON (explicit path from .env)
-  //   2. 'python'/'python.exe' from PATH, but only if it has the bot deps
-  let pythonCmd = process.env.BOT_PYTHON || process.env.PYTHON || "";
-  if (!pythonCmd) {
-    if (process.platform === 'win32') {
-      pythonCmd = 'python.exe';
-    } else {
-      pythonCmd = 'python3';
+  // Find Python executable (результат кэшируется: проверка hasDeps — это
+  // execSync с импортом pandas+binance, ~1с, и без кэша платили её на КАЖДЫЙ
+  // старт бота, из-за чего массовый авто-рестарт занимал минуты).
+  if (!cachedPythonCmd) {
+    let pythonCmd = process.env.BOT_PYTHON || process.env.PYTHON || "";
+    if (!pythonCmd) {
+      if (process.platform === 'win32') {
+        pythonCmd = 'python.exe';
+      } else {
+        pythonCmd = 'python3';
+      }
     }
+    // Verify the chosen python actually has the bot dependencies. If not, search
+    // for one that does, because the system default may point to a pip-user/env
+    // install without pandas.
+    const hasDeps = (cand: string): boolean => {
+      try {
+        execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe', windowsHide: true });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!hasDeps(pythonCmd)) {
+      // Try common explicit paths for the Python that has the deps installed.
+      const candidates = [
+        process.env.BOT_PYTHON,
+        'C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe',
+        'C:/Python311/python.exe',
+        'python',
+        'python3',
+      ].filter(Boolean) as string[];
+      const found = candidates.find((c) => hasDeps(c));
+      if (!found) {
+        return { ok: false, error: "Python with bot dependencies (pandas, python-binance) not found. Check BOT_PYTHON in .env." };
+      }
+      pythonCmd = found;
+    }
+    cachedPythonCmd = pythonCmd;
   }
-  // Verify the chosen python actually has the bot dependencies. If not, search
-  // for one that does, because the system default may point to a pip-user/env
-  // install without pandas.
-  const hasDeps = (cand: string): boolean => {
-    try {
-      execSync(`"${cand}" -c "import pandas, binance"`, { stdio: 'pipe', windowsHide: true });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (!hasDeps(pythonCmd)) {
-    // Try common explicit paths for the Python that has the deps installed.
-    const candidates = [
-      process.env.BOT_PYTHON,
-      'C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe',
-      'C:/Python311/python.exe',
-      'python',
-      'python3',
-    ].filter(Boolean) as string[];
-    const found = candidates.find((c) => hasDeps(c));
-    if (!found) {
-      return { ok: false, error: "Python with bot dependencies (pandas, python-binance) not found. Check BOT_PYTHON in .env." };
-    }
-    pythonCmd = found;
-  }
+  const pythonCmd = cachedPythonCmd;
 
   const botTag = `[BOT ${symbol}]`;
   const debugLogPath = path.join(BOT_LOG_DIR, `api_${symbol.toLowerCase()}.log`);
@@ -468,6 +517,7 @@ export async function startBotProcess(symbol: string): Promise<StartBotResult> {
   await db.update(botsTable)
     .set({ is_running: true, stop_reason: null, stop_requested: false, updated_at: new Date().toISOString() })
     .where(eq(botsTable.symbol, symbol));
+  desiredRunning.add(symbol);
 
   return { ok: true, message: `Bot ${symbol} started`, pid: proc.pid };
 }
@@ -521,6 +571,7 @@ router.post("/stop-all", async (_req, res) => {  try {
       }
     }
     botProcesses.clear();
+    desiredRunning.clear();
 
     // 2. Kill any stray bot processes (not tracked) by their config file,
     //    but ONLY python bot processes — never a global taskkill of all python
@@ -559,6 +610,7 @@ router.post("/:symbol/stop", async (req, res) => {
 
     const proc = botProcesses.get(symbol);
     const pid = proc && !proc.killed ? proc.pid : await findBotPid(symbol);
+    desiredRunning.delete(symbol);
     if (!pid) {
       await db.update(botsTable)
         .set({ is_running: false, stop_requested: false, position: null, updated_at: new Date().toISOString() })
@@ -618,6 +670,7 @@ router.post("/:symbol/kill", async (req, res) => {
       console.log(`[KILL] Keeping state file for restore: ${stateFile}`);
     }
 
+    desiredRunning.delete(symbol);
     await db.update(botsTable)
       .set({ is_running: false, position: null, stop_requested: false, updated_at: new Date().toISOString() })
       .where(eq(botsTable.symbol, symbol));
@@ -637,6 +690,7 @@ router.delete("/:symbol", async (req, res) => {
     const proc = botProcesses.get(symbol);
     if (proc && !proc.killed) { proc.kill(); }
     botProcesses.delete(symbol);
+    desiredRunning.delete(symbol);
     
     await db.delete(botsTable).where(eq(botsTable.symbol, symbol));
     res.json({ success: true, message: `Bot ${symbol} deleted` });

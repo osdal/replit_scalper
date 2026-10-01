@@ -354,7 +354,9 @@ class OrderManager:
             if is_ban_error(e):
                 await wait_for_ban(e, log=self.log)
             else:
-                self.log.warning(f"[LIVE] Could not fetch position info: {e}")
+                self.log.warning(
+                    f"[LIVE] Could not fetch position info: {type(e).__name__}: {e!r}"
+                )
         except Exception as e:
             self.log.warning(f"[LIVE] Could not fetch position info: {e}")
         if cache["value"] is not None and cache["symbol"] == self.cfg.symbol:
