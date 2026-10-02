@@ -1,6 +1,3 @@
-import { db } from "@workspace/db";
-import { botsTable } from "@workspace/db/schema";
-import { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } from "@workspace/db";
 import { sql, eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
@@ -14,6 +11,15 @@ const __dirname = path.dirname(__filename);
 const BOT_ENV = (process.env.BOT_ENV || "testnet").trim().toLowerCase() || "testnet";
 config({ path: path.resolve(__dirname, `../../../.env.${BOT_ENV}`) });
 config({ path: path.resolve(__dirname, "../../../.env"), override: false });
+
+// @workspace/db подключается динамическим импортом СТРОГО ПОСЛЕ загрузки
+// env-файлов: сам модуль читает только корневой .env (без override) и,
+// получив DATABASE_PATH до вызова config() выше, открыл бы НЕ ТУ БД —
+// для live это означало бы миграцию и правки карточек в testnet-базе.
+const { db } = await import("@workspace/db");
+const { botsTable } = await import("@workspace/db/schema");
+const { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } =
+  await import("@workspace/db");
 
 // Use absolute paths from .env for reliability
 const projectRoot = path.resolve(__dirname, "../../../");

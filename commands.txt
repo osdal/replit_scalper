@@ -365,3 +365,92 @@ python .\export_minute_data_single.py --start 2026-07-28 --end 2026-08-28 --symb
 
 # Своё имя файла
 python .\export_minute_data_single.py --start 2026-07-28 --end 2026-08-28 --out data\minutes_all.csv
+
+docker-compose down
+
+
+=================================================================
+  ПЕРЕЕЗД НА ORACLE CLOUD
+=================================================================
+  Полная инструкция:  ORACLE_MIGRATION.md
+  Подготовительные скрипты: deploy/oci/
+
+  Краткий порядок:
+    1. git add . && git commit && git push        (Docker-работы пока не запушены)
+    2. Остановить ботов на Windows: stop-all на 5001 и 5000, docker-compose down
+    3. В консоли Oracle: Ubuntu 24.04, shape A1.Flex 2 OCPU / 12 GB,
+       boot volume 100 GB, сгенерировать SSH-ключ и СКАЧАТЬ private key
+    4. Назначить RESERVED public IP (ephemeral меняется при остановке,
+       а ключи Binance в .env.live под IP-whitelist)
+    5. ssh на VM -> git clone -> sudo bash deploy/oci/bootstrap-ubuntu.sh
+    6. scp .env, .env.live, data/ (БД), при необходимости logs/ и bot/state_*.json
+    7. Добавить Reserved IP в whitelist ключа на binance.com
+    8. В VCN открыть ТОЛЬКО порт 22; UI смотреть через SSH-туннель
+    9. ./stack.sh
+   10. systemctl enable trading-bot.service + cron keepalive.sh
+
+  Ловушки Free Tier:
+    - с 15.06.2026 A1 = 2 OCPU / 12 ГБ (не 4/24)
+    - idle-reclamation: при CPU/сеть/памяти < 20% за 7 дней инстанс остановят
+    - A1 часто недоступна ("out of capacity")
+    - Home region выбирается навсегда
+
+
+=================================================================
+  ДВА СТЕКА: TESTNET и LIVE (разные порты, разные команды)
+=================================================================
+
+                        API      дашборд   БД                 конфиги
+  testnet (BOT_ENV=testnet)  5000    5173     data/bot.db       bot/configs/testnet
+  live    (BOT_ENV=live)     5001    5176     data/bot_live.db  bot/configs/live
+
+  Ключи: testnet -> .env (BINANCE_TESTNET=true)
+         live    -> .env.live (BINANCE_TESTNET=false, реальные ключи)
+
+  --- ЛОКАЛЬНО (PowerShell, без Docker) ---
+  testnet:  .\start-all.ps1     -> API 5000, дашборд http://localhost:5173
+  live:     .\start_live.ps1    -> API 5001, дашборд http://localhost:5176
+  Оба стека держатся одновременно — порты не пересекаются.
+
+  --- DOCKER ---
+  ПОСЛЕ ПЕРЕЗАГРУЗКИ КОМПЬЮТЕРА (одна команда, всё делает сама):
+    .\start_docker.ps1
+      поднимает Docker Desktop -> docker-compose up -d -> ждёт оба API ->
+      делает Arm + Start для live-ботов (список в -LiveSymbols, по умолчанию 1000PEPEUSDT)
+    Варианты:
+      .\start_docker.ps1 -LiveSymbols 1000PEPEUSDT,ETHUSDT   # другой набор live-ботов
+      .\start_docker.ps1 -NoLiveBots                          # только стеки, ботов не трогать
+      .\start_docker.ps1 -NoBrowser
+
+  Ручками:
+  Оба стека:            docker-compose up -d
+  Только testnet:       docker-compose up -d api-testnet dashboard-testnet
+  Только live:          docker-compose up -d api-live dashboard-live
+  Пересборка:           docker-compose build && docker-compose up -d
+  Логи live API:        docker-compose logs -f api-live
+  Логи testnet API:     docker-compose logs -f api-testnet
+  Остановить:           docker-compose down
+  Сколько ботов:        docker exec replit_scalper-api-live ps -eo args --no-headers | findstr /c:main.py | Measure-Object
+
+  --- Запуск ботов ---
+  Бот запускается кнопкой Start в своём дашборде: api-сервер сам спавнит
+  python-процесс внутри своего контейнера. В live сначала нажми Arm,
+  иначе REQUIRE_ARM=true не даст открывать позиции.
+  Автозапуск: testnet — ДА (AUTO_RESTART_BOTS по умолчанию true).
+              live — НЕТ (в .env.live AUTO_RESTART_BOTS=false), намеренно:
+              реальные деньги не должны поехать торговать без явного Start.
+              Состояние desiredRunning живёт в памяти процесса, поэтому
+              после перезапуска API live-ботов надо поднять заново.
+  Через API:
+    curl -X POST http://localhost:5001/api/bots/1000PEPEUSDT/arm
+    curl -X POST http://localhost:5001/api/bots/1000PEPEUSDT/start
+    curl -X POST http://localhost:5000/api/bots/1000PEPEUSDT/start     (testnet)
+
+  --- Релей testnet -> live ---
+  testnet публикует сигналы в live-API: SIGNAL_RELAY_URL=http://api-live:5001/api
+  (в Docker — имя контейнера api-live; локально — http://localhost:5001/api)
+  Live-боты с relay_only=1 только потребляют эти сигналы.
+
+  --- Сброс позиций/состояния (осторожно: сбрасывает карточки всех ботов) ---
+  curl -X POST http://localhost:5001/api/trading/close-and-reset   (live)
+  curl -X POST http://localhost:5000/api/trading/close-and-reset   (testnet)

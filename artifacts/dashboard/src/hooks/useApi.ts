@@ -27,7 +27,7 @@ export async function fetchTrades(symbol?: string, limit = 50) {
   const url = new URL(`${API}/trades`);
   if (symbol) url.searchParams.set("symbol", symbol);
   url.searchParams.set("limit", String(limit));
-  return apiFetch(url);
+  return apiFetch(url.toString());
 }
 
 export async function fetchStats() {
@@ -45,6 +45,10 @@ export async function stopBot(symbol: string) {
 // Жёсткое убийство процесса (экстренная остановка). Позиции на бирже остаются.
 export async function killBot(symbol: string) {
   return apiFetch(`${API}/bots/${symbol}/kill`, { method: "POST" });
+}
+
+export async function deleteBot(symbol: string) {
+  return apiFetch(`${API}/bots/${symbol}`, { method: "DELETE" });
 }
 
 export async function updateConfig(symbol: string, config: Record<string, unknown>) {

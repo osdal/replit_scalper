@@ -3094,8 +3094,16 @@ async def _run_live_or_paper(
                     continue
             if not tracker.has_open_position():
                 log.info("[STOP] graceful stop: position flat — exiting")
+                # Фиксируем причину: без неё карточка в дашборде после выхода
+                # показывает просто «STOPPED», и оператор не видит, что это была
+                # именно мягкая остановка по кнопке Stop (а не падение/автостоп).
+                try:
+                    await reporter.report_stop_reason("graceful_stop")
+                except Exception:
+                    pass
                 shutdown_event.set()
                 break
+
             if _graceful_max_sec > 0 and (time.time() - _stop_requested_since) > _graceful_max_sec:
                 log.warning(
                     f"[STOP] graceful stop timeout ({int(_graceful_max_sec)}s) — "

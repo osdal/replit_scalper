@@ -1,0 +1,123 @@
+# ============================================================
+#  Два независимых стека: TESTNET и LIVE.
+#
+#    стек      API     dashboard   БД                конфиги ботов
+#    testnet   :5000   :5173       ./data/bot.db     bot/configs/testnet
+#    live      :5001   :5176       ./data/bot_live.db  bot/configs/live
+#
+#  Каждый стек самодостаточен: боты запускаются кнопкой Start в своём
+#  дашборде, api-сервер спавнит python-процесс ВНУТРИ своего контейнера.
+#  Поэтому DASHBOARD_API_URL из .env / .env.live (localhost:500X) работает
+#  без правок — бот и API живут в одном контейнере.
+#
+#  Запуск:
+#    docker-compose up -d                 # оба стека
+#    docker-compose up -d api-testnet dashboard-testnet     # только testnet
+#    docker-compose up -d api-live dashboard-live           # только live
+#    docker-compose logs -f api-live
+#    docker-compose down                  # остановить оба
+#
+#  restart: unless-stopped — контейнеры поднимаются сами после ребута хоста
+#  и после «простоя» инстанса в Oracle Cloud (бесплатный A1 могут остановить).
+# ============================================================
+
+x-api-base: &api-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: dev
+  image: replit_scalper-api
+  working_dir: /app
+  restart: unless-stopped
+  volumes:
+    # Только данные и код бота + исходники api-сервера (чтобы правки API
+    # применялись перезапуском контейнера, без docker-compose build).
+    # node_modules НЕ монтируются: они живут в образе (Linux), иначе
+    # контейнер переустановил бы их в общий каталог на хосте.
+    - ./bot:/app/bot
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - ./artifacts/api-server/src:/app/artifacts/api-server/src
+  # init-db идемпотентный (CREATE TABLE IF NOT EXISTS) и создаёт БД + карточки
+  # ботов из bot/configs/<BOT_ENV>/, если их ещё нет.
+  command: sh -c "pnpm run init-db && pnpm --filter @workspace/api-server run dev"
+
+x-dashboard-base: &dashboard-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: dev
+  image: replit_scalper-dashboard
+  working_dir: /app
+  restart: unless-stopped
+  volumes:
+    # Только исходники для hot-reload + env-файлы vite. node_modules — в образе.
+    - ./artifacts/dashboard/src:/app/artifacts/dashboard/src
+    - ./artifacts/dashboard/index.html:/app/artifacts/dashboard/index.html
+    - ./artifacts/dashboard/.env:/app/artifacts/dashboard/.env:ro
+    - ./artifacts/dashboard/.env.live:/app/artifacts/dashboard/.env.live:ro
+
+services:
+  # ------------------------------ TESTNET ------------------------------
+  api-testnet:
+    <<: *api-base
+    container_name: replit_scalper-api-testnet
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./bot:/app/bot
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./.env:/app/.env:ro
+    environment:
+      - BOT_ENV=testnet
+      - PORT=5000
+      - BOT_DIR=./bot
+      - DATABASE_PATH=./data/bot.db
+      - BINANCE_TESTNET=true
+      # Боты спавнятся внутри этого контейнера -> localhost:5000 = свой API.
+      - DASHBOARD_API_URL=http://localhost:5000/api
+      # Релей сигналов testnet -> live уходит на соседний контейнер.
+      - SIGNAL_RELAY_URL=http://api-live:5000/api
+
+  dashboard-testnet:
+    <<: *dashboard-base
+    container_name: replit_scalper-dashboard-testnet
+    ports:
+      - "5173:5173"
+    # vite --mode development читает artifacts/dashboard/.env:
+    #   VITE_API_URL=http://localhost:5000/api  (тема обычная, не красная)
+    command: pnpm --filter @workspace/dashboard run dev
+    depends_on:
+      - api-testnet
+
+  # -------------------------------- LIVE -------------------------------
+  api-live:
+    <<: *api-base
+    container_name: replit_scalper-api-live
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./bot:/app/bot
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./.env.live:/app/.env.live:ro
+    environment:
+      # env.ts читает .env.live (BINANCE_TESTNET=false, реальные ключи,
+      # PORT=5001, DATABASE_PATH=./data/bot_live.db) с override и падает,
+      # если файла нет или ключи пустые.
+      - BOT_ENV=live
+
+  dashboard-live:
+    <<: *dashboard-base
+    container_name: replit_scalper-dashboard-live
+    ports:
+      - "5176:5176"
+    # vite --mode live читает artifacts/dashboard/.env.live:
+    #   VITE_API_URL=http://localhost:5001/api, VITE_THEME=live
+    #   -> красный интерфейс и вкладка LIVE.
+    command: pnpm --filter @workspace/dashboard exec vite --host 0.0.0.0 --port 5176 --mode live
+    depends_on:
+      - api-live

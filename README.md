@@ -1188,7 +1188,74 @@ api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` мен�
 - **live**: боты `bot/configs/live/config_<sym>.yaml`, БД `data/bot_live.db`, API :5001, дашборд :5176 (`start_live.ps1`).
 - Старые `bot/config_*.yaml` удалены — конфиги только в `bot/configs/<env>/`.
 - Relay: testnet публикует сигналы в live-API (`SIGNAL_RELAY_URL`); live-боты с `relay_only=1` только потребляют.
-- **Важно**: для testnet задан `DASHBOARD_API_URL=http://localhost:5000/api`. Без него `bot/main.py` по умолчанию ходит на `:5001` (live) и читает чужие флаги `relay_only` — из-за этого торговали только символы с `relay_only=0` в live-БД.
+- **Важно**: для testnet задан `DASHBOARD_API_URL=http://localhost:5000/api`. Без него `bot/main.py` по умолчанию ходил на `:5001` (live) и читал чужие флаги `relay_only` — из-за этого торговали только символы с `relay_only=0` в live-БД.
+
+### 18.16 Переезд на Oracle Cloud Free Tier (02.10.2026)
+
+Полная инструкция — в **[ORACLE_MIGRATION.md](ORACLE_MIGRATION.md)**. Кратко:
+
+- **Free tier урезан** (с 15.06.2026): A1 — это **2 OCPU / 12 ГБ**, не 4/24. Больше
+  лимита Oracle отключает. Home region выбирается навсегда.
+- **Idle-reclamation**: за 7 дней при CPU/сеть/памяти < 20% инстанс могут остановить.
+  Нужен `deploy/oci/keepalive.sh` в cron раз в 10 минут.
+- **Reserved public IP** обязателен: ephemeral IP меняется при остановке, а ключи
+  Binance в `.env.live` под IP-whitelist.
+- **Наружу открывать только SSH** (22). Дашборды и API — через SSH-туннель:
+  `ssh -L 5176:localhost:5176 -L 5173:localhost:5173 -L 5001:localhost:5001 -L 5000:localhost:5000 ubuntu@<IP>`.
+- Вспомогательное: `deploy/oci/bootstrap-ubuntu.sh` (Docker, swap, log rotation),
+  `deploy/oci/trading-bot.service` (автостарт стеков и live-ботов после ребута),
+  `stack.sh` (Linux-лаунчер, аналог `start_docker.ps1`).
+
+### 18.1a Запуск стеков (02.10.2026)
+
+Оба стека независимы: своя БД, свои конфиги, свои логи/стейт/локи (`BOT_ENV` в именах
+файлов), свои порты. Держатся одновременно.
+
+| стек | API | дашборд | БД | конфиги | ключи |
+|---|---|---|---|---|---|
+| testnet | :5000 | :5173 (обычная тема) | `data/bot.db` | `bot/configs/testnet/` | `.env` (`BINANCE_TESTNET=true`) |
+| live | :5001 | :5176 (красная тема, вкладка LIVE) | `data/bot_live.db` | `bot/configs/live/` | `.env.live` (`BINANCE_TESTNET=false`) |
+
+Локально (PowerShell):
+```powershell
+.\start-all.ps1     # testnet: API 5000 + дашборд 5173
+.\start_live.ps1    # live:    API 5001 + дашборд 5176 (--mode live)
+```
+
+Docker:
+```bash
+docker-compose up -d                                        # оба стека
+docker-compose up -d api-testnet dashboard-testnet          # только testnet
+docker-compose up -d api-live dashboard-live                # только live
+docker-compose build && docker-compose up -d                # после правок кода
+docker-compose logs -f api-live
+docker-compose down
+```
+
+После перезагрузки компьютера — одна команда:
+```powershell
+.\start_docker.ps1                     # Docker Desktop -> контейнеры -> Arm+Start live-ботов
+.\start_docker.ps1 -LiveSymbols BTCUSDT,ETHUSDT
+.\start_docker.ps1 -NoLiveBots         # только стеки, ботов не трогать
+```
+
+Особенности:
+- Testnet-боты поднимаются автоматически (`AUTO_RESTART_BOTS` по умолчанию `true`).
+  Live — нет: в `.env.live` `AUTO_RESTART_BOTS=false`, это намеренно (реальные деньги
+  не должны поехать торговать без явного Start), а `desiredRunning` живёт в памяти
+  процесса и после перезапуска API пуст. Поэтому live-ботов поднимает
+  `start_docker.ps1` либо кнопка Start в live-дашборде.
+- Каждый api-сервер спавнит ботов **внутри себя** (кнопка Start в дашборде), поэтому
+  `DASHBOARD_API_URL` из `.env`/`.env.live` (`localhost:500X`) работает и в Docker.
+  В live `REQUIRE_ARM=true` — сначала Arm, потом Start.
+- В Docker `node_modules` живут в образе, наружу монтируются только `bot/`, `data/`,
+  `logs/`, `.env*` и `artifacts/dashboard/src`. Иначе контейнер переустанавливал бы
+  Linux-зависимости в общий каталог на хосте и ломал бы локальный pnpm.
+- Релей testnet → live в Docker идёт по имени контейнера:
+  `SIGNAL_RELAY_URL=http://api-live:5001/api`.
+- В образе есть `procps`: api-сервер перечисляет PID ботов через `ps`, а бот так же
+  проверяет владельца lock-файла.
+
 
 ### 18.2 Сайзинг (приоритет)
 `position_size_usd` → `position_size_pct` (live, % свободной маржи `availableBalance`) → `LIVE_DEFAULT_MARGIN_USD` → `margin_pct` → `fixed_notional_usd` → `fixed_qty` → `fixed_risk_usd` (testnet) → `risk_pct`.

@@ -560,42 +560,56 @@ router.post("/:symbol/disarm", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-router.post("/stop-all", async (_req, res) => {  try {
-    const stoppedBots: string[] = [];
+/**
+ * Останавливает ВСЕ боты текущего окружения: и запущенные нами (botProcesses),
+ * и « stray»-процессы, найденные по командной строке. Кроссплатформенно:
+ * taskkill на Windows, process.kill(SIGKILL) на Linux (в Docker ps-путей нет).
+ *
+ * Также чистит desiredRunning — иначе restartDesiredBots (раз в 30 с) поднимет
+ * только что остановленных ботов обратно, и «Stop All» будет выглядеть как
+ * мгновенный рестарт. Возвращает список остановленных символов.
+ */
+export async function stopAllBotProcesses(): Promise<string[]> {
+  const stoppedBots: string[] = [];
 
-    // 1. Kill bots we spawned and track (dashboard-managed).
-    for (const [symbol, proc] of botProcesses) {
-      if (!proc.killed) {
-        proc.kill();
-        stoppedBots.push(symbol);
+  // 1. Kill bots we spawned and track (dashboard-managed).
+  for (const [symbol, proc] of botProcesses) {
+    if (!proc.killed) {
+      proc.kill();
+      stoppedBots.push(symbol);
+    }
+  }
+  botProcesses.clear();
+  desiredRunning.clear();
+
+  // 2. Kill any stray bot processes (not tracked) by their config file,
+  //    but ONLY python bot processes — never a global taskkill of all python
+  //    (that can kill the API/dashboard dev chain on Windows).
+  //    Один вызов PowerShell забирает PID всех ботов, дальше убиваем параллельно.
+  const strayPids = await findAllBotPids();
+  await Promise.all(Array.from(strayPids.entries()).map(async ([symbol, pid]) => {
+    const existed = botProcesses.get(symbol);
+    try {
+      if (process.platform === "win32") {
+        await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
+      } else {
+        process.kill(pid, "SIGKILL");
       }
-    }
-    botProcesses.clear();
-    desiredRunning.clear();
+      if (!existed && !stoppedBots.includes(symbol)) stoppedBots.push(symbol);
+    } catch { /* already gone */ }
+  }));
 
-    // 2. Kill any stray bot processes (not tracked) by their config file,
-    //    but ONLY python bot processes — never a global taskkill of all python
-    //    (that can kill the API/dashboard dev chain on Windows).
-    //    Один вызов PowerShell забирает PID всех ботов, дальше убиваем параллельно.
-    const strayPids = await findAllBotPids();
-    await Promise.all(Array.from(strayPids.entries()).map(async ([symbol, pid]) => {
-      const existed = botProcesses.get(symbol);
-      try {
-        if (process.platform === "win32") {
-          await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
-        } else {
-          process.kill(pid, "SIGKILL");
-        }
-        if (!existed && !stoppedBots.includes(symbol)) stoppedBots.push(symbol);
-      } catch { /* already gone */ }
-    }));
+  // 3. Clear lock files (after stopping bots).
+  const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith(lockPrefix()));
+  for (const lockFile of lockFiles) {
+    try { fs.unlinkSync(path.join(BOT_DIR, lockFile)); } catch { /* ignore */ }
+  }
 
-    // 3. Clear lock files (after stopping bots).
-    const lockFiles = fs.readdirSync(BOT_DIR).filter(f => f.startsWith(lockPrefix()));
-    for (const lockFile of lockFiles) {
-      try { fs.unlinkSync(path.join(BOT_DIR, lockFile)); } catch { /* ignore */ }
-    }
+  return stoppedBots;
+}
 
+router.post("/stop-all", async (_req, res) => {  try {
+    const stoppedBots = await stopAllBotProcesses();
     res.json({ success: true, message: `Stopped ${stoppedBots.length} bots`, bots: stoppedBots });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

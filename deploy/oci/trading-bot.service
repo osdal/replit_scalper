@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# ============================================================
+#  Автостарт стека после ребута инстанса.
+#
+#  Install:
+#    sudo cp deploy/oci/trading-bot.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable trading-bot.service
+#
+#  Почему не только restart: unless-stopped в compose поднимает КОНТЕЙНЕРЫ,
+#  но live-боты не стартуют сами (AUTO_RESTART_BOTS=false в .env.live — так
+#  задумано, чтобы реальные деньги не поехали без явного Start). Этот unit
+#  после старта Docker поднимает контейнеры и делает Arm+Start live-ботов.
+#
+#  Список live-ботов задаётся в /etc/default/trading-bot (переменная
+#  LIVE_SYMBOLS), чтобы не править unit при каждом изменении.
+# ============================================================
+
+[Unit]
+Description=Trading bot stacks (testnet 5000/5173 + live 5001/5176)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/trading-bot
+EnvironmentFile=-/etc/default/trading-bot
+# Ждём сеть и Docker, затем поднимаем стеки и live-ботов.
+# startLimitBurst пауза между попытками, если docker ещё не готов.
+ExecStart=/bin/bash -c 'for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 5; done; /opt/trading-bot/stack.sh'
+ExecStop=/bin/bash -c 'cd /opt/trading-bot && (docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true)'
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

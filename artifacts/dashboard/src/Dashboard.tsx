@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -59,6 +59,8 @@ interface Bot {
 const STOP_REASON_LABELS: Record<string, string> = {
   watchdog_no_candles: "самостоп: нет свечей",
   process_exited: "процесс завершился",
+  graceful_stop: "мягкая остановка (Stop)",
+  graceful_stop_timeout: "мягкая остановка: таймаут",
 };
 
 interface LLMProviderStatus {
@@ -277,9 +279,9 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete }: 
             <Badge
               variant="destructive"
               className="text-xs"
-              title="Мягкая остановка: бот доводит позицию и выходит"
+              title="Мягкая остановка: новые входы запрещены. Текущая позиция доводится по логике бота (TP/SL/reverse-цепочка), поэтому после Stop количество позиций может ещё меняться. Бот выйдет, когда станет флэт."
             >
-              ⏳ STOPPING
+              ⏳ STOPPING · ждёт флэт
             </Badge>
           )}
           {!bot.is_running && bot.stop_reason && (
@@ -787,6 +789,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [notice, setNotice] = useState<string | null>(null);
   const [optJobId, setOptJobId] = useState<string | null>(null);
   const [optJob, setOptJob] = useState<any | null>(null);
   const [optSymbol, setOptSymbol] = useState("BTCUSDT");
@@ -892,13 +895,19 @@ export default function Dashboard() {
     if (toggling) return;
     setToggling(bot.symbol);
     try {
-      if (bot.is_running) {
-        await stopBot(bot.symbol);
+      // API отвечает 200 даже когда не смог: {success:false, message:...}
+      // (например, бот уже не найден по PID). Без проверки Stop выглядел бы
+      // как «ничего не произошло» — показываем причину.
+      const res = bot.is_running ? await stopBot(bot.symbol) : await startBot(bot.symbol);
+      if (res && res.success === false) {
+        setNotice(`${bot.symbol}: ${res.message ?? "действие не выполнено"}`);
       } else {
-        await startBot(bot.symbol);
+        setNotice(null);
       }
       await new Promise(r => setTimeout(r, 1000));
       await load();
+    } catch (e) {
+      setNotice(`${bot.symbol}: ${String(e)}`);
     } finally {
       setToggling(null);
     }
@@ -948,7 +957,7 @@ export default function Dashboard() {
   const handleDeleteBot = async (symbol: string) => {
     if (!confirm("Delete " + symbol + " permanently?")) return;
     try {
-      await fetch(API + "/bots/" + symbol, { method: "DELETE" });
+      await deleteBot(symbol);
       const freshBots = await fetchBots();
       setBots(freshBots);
     } catch {}
@@ -1087,10 +1096,16 @@ export default function Dashboard() {
                <span className="ml-2 rounded bg-red-600 px-2 py-0.5 align-middle text-sm">LIVE REAL MONEY</span>
              )}
            </h1>
-           <p className="text-zinc-400 text-sm mt-0.5">
-             Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
-             <span className={`ml-2 inline-block w-2 h-2 rounded-full ${apiUp ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={apiUp ? "API connected" : "API disconnected"} />
-           </p>
+            <p className="text-zinc-400 text-sm mt-0.5">
+              Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
+              <span className={`ml-2 inline-block w-2 h-2 rounded-full ${apiUp ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={apiUp ? "API connected" : "API disconnected"} />
+            </p>
+            {notice && (
+              <p className="mt-1 rounded border border-red-800 bg-red-950/60 px-2 py-1 text-sm text-red-300">
+                {notice}
+              </p>
+            )}
+
          </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
@@ -1103,16 +1118,18 @@ export default function Dashboard() {
 <Button variant="destructive" size="sm" onClick={async () => {
              if (!confirm(
                "Stop ALL running bots and reload their configs from YAML?\n\n" +
-               "This will SIGKILL every bot process and delete their local " +
-               "position state files. Open positions remain protected by " +
-               "exchange orders (SL/TP), but won't be tracked by the bot " +
-               "again until you manually restart each one."
+               "This will SIGKILL every bot process of this environment. Local " +
+               "position state files are KEPT, so a later Start restores the " +
+               "position with its SL/TP and reverse-chain. Open positions stay " +
+               "protected by exchange orders (SL/TP), but won't be tracked by " +
+               "the bot until you restart it."
              )) return;
              const r = await refreshBots();
              alert(r.message || "All bots stopped, configs reloaded");
              await load();
-          }} className="">
-            <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
+         }} className="">
+           <RefreshCw className="w-4 h-4 mr-2" />Stop All & Reload Configs
+
           </Button>
           <Button variant="outline" size="sm" onClick={handleCloseAllReset} className="border-yellow-700 text-yellow-300 hover:bg-yellow-900">
             <Square className="w-4 h-4 mr-2" />Close All & Reset

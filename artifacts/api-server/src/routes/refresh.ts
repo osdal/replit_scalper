@@ -1,113 +1,43 @@
 import { Router } from "express";
-import fs from "fs";
-import path from "path";
-import yaml from "js-yaml";
 import { db, botsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { spawn, exec, type ChildProcess } from "child_process";
-import { promisify } from "util";
-import { fileURLToPath } from "url";
-import { dirname } from "path";
-import { BOT_CONFIG_DIR, configPath, statePath } from "../botPaths";
+import { stopAllBotProcesses, reloadConfigsFromYaml } from "./bots";
 
-const execAsync = promisify(exec);
 const router = Router();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
-async function findBotPid(symbol: string): Promise<number | null> {
-  const cfgPath = configPath(symbol);
-  try {
-    const { stdout } = await execAsync(
-      `powershell -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='python.exe'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json"`,
-      { windowsHide: true },
-    );
-    try {
-      const processes = JSON.parse(stdout);
-      const procList = Array.isArray(processes) ? processes : [processes];
-      for (const p of procList) {
-        if (p.CommandLine?.includes(cfgPath)) {
-          const pid = parseInt(p.ProcessId);
-          if (!isNaN(pid) && pid > 0) return pid;
-        }
-      }
-    } catch {
-      return null;
-    }
-  } catch {}
-  return null;
-}
-
-async function stopAllBots(): Promise<void> {
-  const configFiles = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f));
-  for (const file of configFiles) {
-    const symbol = file.replace("config_", "").replace(".yaml", "").toUpperCase() + "USDT";
-    const pid = await findBotPid(symbol);
-    if (pid) {
-      try {
-        if (process.platform === "win32") {
-          await execAsync(`taskkill /PID ${pid} /F`, { windowsHide: true });
-        }
-      } catch (e) {}
-    }
-    const stateFile = statePath(symbol);
-    try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
-  }
-  await db.update(botsTable).set({ is_running: false, position: null, updated_at: new Date().toISOString() });
-}
-
-async function reloadConfigsFromYaml(): Promise<void> {
-  const configs = fs.readdirSync(BOT_CONFIG_DIR).filter((f: string) => /^config_\w+\.yaml$/.test(f) && f !== "config.yaml");
-  for (const file of configs) {
-    const raw = yaml.load(fs.readFileSync(path.join(BOT_CONFIG_DIR, file), "utf8")) as Record<string, unknown>;
-    const symbol = (raw.symbol as string).toUpperCase();
-    const [existing] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
-    const values = {
-      mode: (raw.mode as string) || "paper",
-      timeframe: raw.timeframe as string,
-      leverage: raw.leverage as number,
-      risk_pct: raw.risk_pct as number,
-      sl_pct: raw.sl_pct as number,
-      tp1_pct: raw.tp1_pct as number,
-      tp1_close_pct: raw.tp1_close_pct as number,
-      tp2_pct: raw.tp2_pct as number,
-      ema_fast: raw.ema_fast as number,
-      ema_slow: raw.ema_slow as number,
-      volume_ma_period: raw.volume_ma_period as number,
-      volume_multiplier: raw.volume_multiplier as number,
-      htf_enabled: (raw.htf_enabled as boolean) || false,
-      htf_timeframe: (raw.htf_timeframe as string) || null,
-      htf_ema_fast: (raw.htf_ema_fast as number) || null,
-      htf_ema_slow: (raw.htf_ema_slow as number) || null,
-      htf2_enabled: (raw.htf2_enabled as boolean) || false,
-      htf2_timeframe: (raw.htf2_timeframe as string) || null,
-      htf2_ema_fast: (raw.htf2_ema_fast as number) || null,
-      htf2_ema_slow: (raw.htf2_ema_slow as number) || null,
-      auto_mode: (raw.auto_mode as boolean) ?? true,
-      paper_balance: (raw.paper_balance as number) || 1000,
-      log_file: raw.log_file as string,
-      is_running: false,
-      position: null,
-      updated_at: new Date().toISOString(),
-    };
-    if (existing) {
-      await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
-    } else {
-      await db.insert(botsTable).values({ symbol, ...values });
-    }
-  }
-  await db.update(botsTable).set({ is_running: false, position: null });
-}
-
+// POST /api/refresh — «Stop All & Reload Configs».
+// Раньше здесь была своя копия логики остановки с findBotPid на PowerShell
+// (Get-CimInstance). В Linux/Docker она всегда возвращала null: процессы ботов
+// НЕ убивались, но БД переводилась в is_running=false, а следующий heartbeat
+// снова ставил true — в дашборде выглядело как «остановились и мгновенно
+// запустились снова». Плюс молча удалялись state-файлы (на live это оставляло
+// реальные позиции без трекинга).
+// Теперь используем общие кроссплатформенные хелперы из ./bots:
+//   - stopAllBotProcesses() реально убивает процессы и чистит desiredRunning
+//     (иначе restartDesiredBots поднял бы их обратно за 30 секунд);
+//   - reloadConfigsFromYaml() обновляет конфиги, не трогая is_running/position;
+//   - state-файлы НЕ удаляются: последующий Start восстановит из них позицию,
+//     SL/TP и TP-цепочку (как это делает /bots/:symbol/kill).
 router.post("/", async (_req, res) => {
   try {
-    await stopAllBots();
+    const stopped = await stopAllBotProcesses();
     await reloadConfigsFromYaml();
-    res.json({ success: true, message: "All bots stopped, configs reloaded from YAML. Ready to restart with new parameters." });
+    // Честно отражаем состояние в БД. position здесь НЕ обнуляем: если бот
+    // был убит с открытой позицией, она всё ещё есть на бирже, и скрывать её
+    // в UI опаснее, чем показать.
+    await db.update(botsTable).set({
+      is_running: false,
+      updated_at: new Date().toISOString(),
+    });
+    res.json({
+      success: true,
+      message: `Остановлено ботов: ${stopped.length}. Конфиги перезагружены из YAML. Готово к запуску с новыми параметрами.`,
+      bots: stopped,
+    });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
+
 
 router.post("/cancel-orders/:symbol", async (req, res) => {
   try {
