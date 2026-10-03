@@ -847,13 +847,23 @@ export default function Dashboard() {
       // загруженной странице иначе показывает меньше сделок, чем вкладка
       // Статистика (она агрегирует всю таблицу).
       const tradeSymbol = selectedSymbol === "all" ? undefined : selectedSymbol;
-      const [b, t, s] = await Promise.all([fetchBots(), fetchTrades(tradeSymbol, 1000), fetchStats()]);
-      setBots(Array.isArray(b) ? b : []);
-      const allTrades = Array.isArray(t?.trades) ? t.trades : [];
-      // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
-      // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
-      setTrades(allTrades.filter((tr: Trade) => !String(tr.reject_reason || "").startsWith("skip:")));
-      setStats(Array.isArray(s) ? s : []);
+      // Запросы независимы: раньше стоял Promise.all, и падение ЛЮБОГО из
+      // трёх (например /trades при пустой БД) оставляло setBots невызванным —
+      // дашборд показывал ноль карточек, хотя /api/bots отвечал нормально.
+      const [b, t, s] = await Promise.allSettled([
+        fetchBots(),
+        fetchTrades(tradeSymbol, 1000),
+        fetchStats(),
+      ]);
+      if (b.status === "fulfilled" && Array.isArray(b.value)) setBots(b.value);
+      else if (b.status === "rejected") setBots([]);
+      if (t.status === "fulfilled") {
+        const allTrades = Array.isArray(t.value?.trades) ? t.value.trades : [];
+        // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
+        // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
+        setTrades(allTrades.filter((tr: Trade) => !String(tr.reject_reason || "").startsWith("skip:")));
+      }
+      if (s.status === "fulfilled") setStats(Array.isArray(s.value) ? s.value : []);
       setLastRefresh(new Date());
     } catch {
       // API not available yet
