@@ -10,6 +10,13 @@
 #  Поэтому DASHBOARD_API_URL из .env / .env.live (localhost:500X) работает
 #  без правок — бот и API живут в одном контейнере.
 #
+#  ВАЖНО про образы: api-testnet и api-live используют ОДИН образ
+#  replit_scalper-api, а dashboard-* — один replit_scalper-dashboard.
+#  Build не может быть у обоих сразу: параллельная сборка падает с
+#  "image ... already exists". Поэтому build указан только у первого сервиса
+#  в паре, второй просто переиспользует тот же тег.
+#  Сборка выполняется один раз: docker compose build (или docker compose up -d --build).
+#
 #  Запуск:
 #    docker-compose up -d                 # оба стека
 #    docker-compose up -d api-testnet dashboard-testnet     # только testnet
@@ -22,10 +29,6 @@
 # ============================================================
 
 x-api-base: &api-base
-  build:
-    context: .
-    dockerfile: Dockerfile
-    target: dev
   image: replit_scalper-api
   working_dir: /app
   restart: unless-stopped
@@ -43,10 +46,6 @@ x-api-base: &api-base
   command: sh -c "pnpm run init-db && pnpm --filter @workspace/api-server run dev"
 
 x-dashboard-base: &dashboard-base
-  build:
-    context: .
-    dockerfile: Dockerfile
-    target: dev
   image: replit_scalper-dashboard
   working_dir: /app
   restart: unless-stopped
@@ -62,6 +61,10 @@ services:
   api-testnet:
     <<: *api-base
     container_name: replit_scalper-api-testnet
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
     ports:
       - "5000:5000"
     volumes:
@@ -84,6 +87,10 @@ services:
   dashboard-testnet:
     <<: *dashboard-base
     container_name: replit_scalper-dashboard-testnet
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
     ports:
       - "5173:5173"
     # vite --mode development читает artifacts/dashboard/.env:

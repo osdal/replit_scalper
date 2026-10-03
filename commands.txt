@@ -372,28 +372,36 @@ docker-compose down
 =================================================================
   ПЕРЕЕЗД НА ORACLE CLOUD
 =================================================================
-  Полная инструкция:  ORACLE_MIGRATION.md
+  Полная инструкция:  ORACLE_MIGRATION.md   (обновлена 03.10.2026)
   Подготовительные скрипты: deploy/oci/
+
+  Статус: инстанс создан (A1 2/12, Ubuntu 24.04, IP 92.5.180.72, eu-frankfurt-1),
+  Docker и стеки на нём работают, но контейнеры остановлены.
+  НЕ ЗАПУЩЕНО (и не запускать, пока не сделано):
+    1) Reserved public IP — сейчас адрес ephemeral, после остановки инстанса сменится
+    2) whitelist ключа Binance — добавьте 92.5.180.72 (иначе -2014)
 
   Краткий порядок:
     1. git add . && git commit && git push        (Docker-работы пока не запушены)
     2. Остановить ботов на Windows: stop-all на 5001 и 5000, docker-compose down
     3. В консоли Oracle: Ubuntu 24.04, shape A1.Flex 2 OCPU / 12 GB,
-       boot volume 100 GB, сгенерировать SSH-ключ и СКАЧАТЬ private key
-    4. Назначить RESERVED public IP (ephemeral меняется при остановке,
-       а ключи Binance в .env.live под IP-whitelist)
-    5. ssh на VM -> git clone -> sudo bash deploy/oci/bootstrap-ubuntu.sh
-    6. scp .env, .env.live, data/ (БД), при необходимости logs/ и bot/state_*.json
+       boot volume 100 GB VPU 50, VCN+IGW+public subnet создаются ОТДЕЛЬНЫМИ
+       страницами Networking, Public IPv4 = Yes, свой SSH-ключ (Paste public key)
+    4. Назначить RESERVED public IP
+    5. ssh на VM -> sudo bash deploy/oci/bootstrap-ubuntu.sh
+    6. scp .env, .env.live, data/ и bot/state_live_*.json (свежие!)
     7. Добавить Reserved IP в whitelist ключа на binance.com
-    8. В VCN открыть ТОЛЬКО порт 22; UI смотреть через SSH-туннель
-    9. ./stack.sh
-   10. systemctl enable trading-bot.service + cron keepalive.sh
+    8. cd /opt/trading-bot && sudo docker compose build && ./stack.sh
+    9. systemctl enable trading-bot.service + cron keepalive.sh
+   10. Доступ к UI — SSH-туннель (порты наружу не открывать)
 
   Ловушки Free Tier:
     - с 15.06.2026 A1 = 2 OCPU / 12 ГБ (не 4/24)
     - idle-reclamation: при CPU/сеть/памяти < 20% за 7 дней инстанс остановят
     - A1 часто недоступна ("out of capacity")
     - Home region выбирается навсегда
+    - мастер создания инстанса НЕ умеет делать public-подсеть -> VCN/IGW/subnet
+      создавать отдельными страницами Networking
 
 
 =================================================================
