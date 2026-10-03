@@ -1,14 +1,12 @@
 const ENV_API = import.meta.env.VITE_API_URL as string | undefined;
-let API = ENV_API || "http://localhost:5000/api";
 
-// Ручной host-override только если API не задан явно (иначе live-инстанс с
-// VITE_API_URL=http://localhost:5001/api перезаписался бы обратно на :5000).
-if (!ENV_API && typeof window !== "undefined") {
-  const host = window.location.hostname;
-  if (host && host !== "localhost" && host !== "127.0.0.1") {
-    API = `http://${host}:5000/api`;
-  }
-}
+// По умолчанию ходим на ОТНОСИТЕЛЬНЫЙ /api: запрос уходит на тот же vite-сервер,
+// который отдаёт дашборд, и проксируется в нужный API (см. vite.config.ts).
+// Раньше дефолтом был абсолютный http://localhost:5000/api — из-за этого
+// дашборд, открытый через SSH-туннель на нестандартном порту, показывал данные
+// ЧУЖОГО стека: тот, что слушал этот порт локально. Относительный путь
+// делает дашборд независимым от того, на каком порту он открыт.
+let API = ENV_API || "/api";
 
 async function apiFetch(url: string, options?: RequestInit) {
   const r = await fetch(url, options);

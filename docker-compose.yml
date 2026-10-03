@@ -50,9 +50,13 @@ x-dashboard-base: &dashboard-base
   working_dir: /app
   restart: unless-stopped
   volumes:
-    # Только исходники для hot-reload + env-файлы vite. node_modules — в образе.
+    # Только исходники для hot-reload + конфиг vite и env-файлы.
+    # node_modules — в образе. vite.config.ts нужен здесь, потому что в нём
+    # задаётся адрес API для прокси /api.
     - ./artifacts/dashboard/src:/app/artifacts/dashboard/src
     - ./artifacts/dashboard/index.html:/app/artifacts/dashboard/index.html
+    - ./artifacts/dashboard/vite.config.ts:/app/artifacts/dashboard/vite.config.ts
+    - ./artifacts/dashboard/tsconfig.json:/app/artifacts/dashboard/tsconfig.json
     - ./artifacts/dashboard/.env:/app/artifacts/dashboard/.env:ro
     - ./artifacts/dashboard/.env.live:/app/artifacts/dashboard/.env.live:ro
 
@@ -93,6 +97,10 @@ services:
       target: dev
     ports:
       - "5173:5173"
+    # Клиент ходит на /api, vite проксирует в API-контейнер (внутри контейнера
+    # localhost — это сам дашборд, поэтому тут имя сервиса).
+    environment:
+      - DASHBOARD_API_TARGET=http://api-testnet:5000
     # vite --mode development читает artifacts/dashboard/.env:
     #   VITE_API_URL=http://localhost:5000/api  (тема обычная, не красная)
     command: pnpm --filter @workspace/dashboard run dev
@@ -126,5 +134,7 @@ services:
     #   VITE_API_URL=http://localhost:5001/api, VITE_THEME=live
     #   -> красный интерфейс и вкладка LIVE.
     command: pnpm --filter @workspace/dashboard exec vite --host 0.0.0.0 --port 5176 --mode live
+    environment:
+      - DASHBOARD_API_TARGET=http://api-live:5001
     depends_on:
       - api-live
