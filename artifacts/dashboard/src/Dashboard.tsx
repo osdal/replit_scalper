@@ -856,14 +856,22 @@ export default function Dashboard() {
         fetchStats(),
       ]);
       if (b.status === "fulfilled" && Array.isArray(b.value)) setBots(b.value);
-      else if (b.status === "rejected") setBots([]);
+      else if (b.status === "rejected") {
+        console.error("[dashboard] не удалось загрузить /bots", b.reason);
+        setBots([]);
+      }
       if (t.status === "fulfilled") {
         const allTrades = Array.isArray(t.value?.trades) ? t.value.trades : [];
         // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
         // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
         setTrades(allTrades.filter((tr: Trade) => !String(tr.reject_reason || "").startsWith("skip:")));
+      } else {
+        // Раньше это молча проглатывалось, и вкладка Trades выглядела пустой
+        // при живом API — теперь причина видна в консоли браузера.
+        console.error("[dashboard] не удалось загрузить /trades", t.reason);
       }
       if (s.status === "fulfilled") setStats(Array.isArray(s.value) ? s.value : []);
+      else console.error("[dashboard] не удалось загрузить /trades/stats", s.reason);
       setLastRefresh(new Date());
     } catch {
       // API not available yet

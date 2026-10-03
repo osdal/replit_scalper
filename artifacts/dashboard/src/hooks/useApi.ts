@@ -22,10 +22,14 @@ export async function fetchBots() {
 }
 
 export async function fetchTrades(symbol?: string, limit = 50) {
-  const url = new URL(`${API}/trades`);
-  if (symbol) url.searchParams.set("symbol", symbol);
-  url.searchParams.set("limit", String(limit));
-  return apiFetch(url.toString());
+  // Собираем query через URLSearchParams, а не через `new URL(...)`: API теперь
+  // относительный ("/api"), а `new URL` без базового URL бросает TypeError.
+  // Раньше ошибка глушилась в Promise.allSettled, и вкладка Trades оставалась
+  // пустой при вполне рабочем API.
+  const qs = new URLSearchParams();
+  if (symbol) qs.set("symbol", symbol);
+  qs.set("limit", String(limit));
+  return apiFetch(`${API}/trades?${qs.toString()}`);
 }
 
 export async function fetchStats() {
