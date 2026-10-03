@@ -373,7 +373,29 @@ docker-compose down
   ПЕРЕЕЗД НА ORACLE CLOUD
 =================================================================
   Полная инструкция:  ORACLE_MIGRATION.md   (обновлена 03.10.2026)
+  Быстрый старт (в README, раздел 1a)
   Подготовительные скрипты: deploy/oci/
+
+  ПОСЛЕ ПЕРЕЗАГРУЗКИ КОМПЬЮТЕРА — ОТКРЫТЬ ДАШБОРД ORACLE:
+    cd C:\DATA\bots\replit_scalper
+    ssh oracle-bot                      <- оставить окно открытым (это туннель)
+    в браузере:
+      LIVE    (реальные деньги): http://localhost:5176
+      TESTNET (Oracle):          http://localhost:15173
+      LIVE API:                  http://localhost:5001/api
+      TESTNET API:               http://localhost:15000/api
+    Проброс портов уже настроен в ~/.ssh/config (алиас oracle-bot).
+    Docker Desktop для этого НЕ нужен — работает только ssh.
+
+  Если дашборд не открывается:
+    ssh oracle-bot "sudo docker compose -f /opt/trading-bot/docker-compose.yml ps"
+    контейнеры не запущены -> ssh oracle-bot "cd /opt/trading-bot && sudo docker compose up -d"
+    туннель не поднимается  -> порт 5001 занят на Windows, закройте лишние ssh
+    ботов нет               -> боты не автостартуют (AUTO_RESTART_BOTS=false),
+                               поднять: ssh oracle-bot "cd /opt/trading-bot && ./stack.sh"
+
+  ВАЖНО: порт 5001 на Windows должен быть свободен (он проброшен на Oracle).
+  Локальный testnet-стек (:5173) не мешает — его порты пробрасываются со сдвигом.
 
   Статус: инстанс создан (A1 2/12, Ubuntu 24.04, IP 92.5.180.72, eu-frankfurt-1),
   Docker и стеки на нём работают, но контейнеры остановлены.
