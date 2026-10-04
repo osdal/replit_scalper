@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, armBot } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -896,6 +896,7 @@ export default function Dashboard() {
   const [sizePctAll, setSizePctAll] = useState("");
   const [applyingSize, setApplyingSize] = useState(false);
   const [restartAfterApply, setRestartAfterApply] = useState(true);
+  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
     healthz().then(setApiUp);
@@ -972,7 +973,7 @@ export default function Dashboard() {
    * этом не перезапускается, поэтому открытые позиции переживают перезапуск:
    * боты восстанавливают их из state-файлов.
    */
-  const restartAllBots = async (symbols: string[]) => {
+  const restartAllBots = async (symbols: string[], armFirst = false) => {
     setNotice("Перезапуск: останавливаю ботов...");
     await stopAllBots();
 
@@ -990,6 +991,12 @@ export default function Dashboard() {
     for (let i = 0; i < symbols.length; i++) {
       const symbol = symbols[i];
       try {
+        // В live REQUIRE_ARM=true: без арминга бот стартует, но не откроет
+        // позиции. Ошибка арминга не считается фатальной — бот может быть
+        // армирован уже.
+        if (armFirst) {
+          try { await armBot(symbol); } catch { /* уже armed */ }
+        }
         await startBot(symbol);
         started++;
       } catch {
@@ -998,6 +1005,38 @@ export default function Dashboard() {
       if (i % 5 === 4) setNotice(`Перезапуск: запущено ${i + 1}/${symbols.length}...`);
     }
     return { started, failed };
+  };
+
+  /** Перезапуск всех ботов без изменения настроек (кнопка в шапке). */
+  const handleRestartAll = async () => {
+    const symbols = bots.map(b => b.symbol);
+    if (symbols.length === 0) {
+      setNotice("Нет ботов для перезапуска.");
+      return;
+    }
+    const openCount = bots.filter(b => b.position).length;
+    if (!confirm(
+      `Перезапустить ${symbols.length} ботов?${IS_LIVE ? " (LIVE, реальные деньги)" : ""}\n\n` +
+      `Открытых позиций: ${openCount}. Они сохранятся — биржевые SL/TP остаются, ` +
+      "а боты восстановят позиции из state-файлов. Примерно минута позициями " +
+      "не управляет никто." +
+      (IS_LIVE ? "\n\nПеред стартом будет выполнен Arm." : "")
+    )) return;
+    setRestarting(true);
+    setNotice(null);
+    try {
+      const { started, failed } = await restartAllBots(symbols, IS_LIVE);
+      setRestarting(false);
+      setNotice(
+        failed.length
+          ? `Перезапуск: запущено ${started}/${symbols.length}. Ошибка: ${failed.join(", ")}`
+          : `Перезапуск завершён: ${started}/${symbols.length} ботов работают.`
+      );
+      await load();
+    } catch (e) {
+      setRestarting(false);
+      setNotice(`Ошибка перезапуска: ${String(e)}`);
+    }
   };
 
   /**
@@ -1237,6 +1276,17 @@ export default function Dashboard() {
 
          </div>
         <div className="flex gap-2 items-start">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRestartAll}
+            disabled={restarting || applyingSize}
+            title="Перезапустить процессы ботов, чтобы они подхватили новый код или конфиги. Позиции не закрываются — боты восстановят их из state-файлов."
+            className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
+            {restarting ? 'Restarting...' : 'Restart bots'}
+          </Button>
           {!IS_LIVE && (
             <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
               <label className="text-xs text-zinc-400 whitespace-nowrap" title="Маржа = % от депозита, позиция = маржа × плечо. Применяется только к НОВЫМ позициям: уже открытая позиция и её reverse-цепочка доторговываются на прежнем размере. Значение подхватят только перезапущенные боты.">
