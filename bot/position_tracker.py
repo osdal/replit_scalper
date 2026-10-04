@@ -250,6 +250,15 @@ class PositionTracker:
             )
             self._trade_id = data.get("trade_id")
             self._entry_fill_ms = self.position.entry_fill_ms
+            # Глубина цепочки для отчёта в БД (_last_chain_depth) живёт только
+            # в памяти: после перезапуска бота он снова равен 1, и закрытая
+            # позиция записывалась с chain_depth=1 даже при реальных 3-4
+            # разворотах (случай ATOMUSDT 04.10). Поэтому восстанавливаем
+            # глубину из persist'нутого reverse_chain_step самой позиции.
+            self._last_chain_depth = max(
+                int(self._last_chain_depth or 1),
+                int(self.position.reverse_chain_step or 0) + 1,
+            )
             self.log.info(
                 f"[STATE] Restored from file | {self.position.direction} "
                 f"entry={self.position.entry_price} "
