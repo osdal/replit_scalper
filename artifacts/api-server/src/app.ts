@@ -10,12 +10,20 @@ const app: Express = express();
 app.use(
   pinoHttp({
     logger,
+    // По умолчанию pino-http пишет только «request completed» без метода и URL
+    // (quietReqLogger=true), из-за чего по логу невозможно понять, кто инициировал
+    // торговую операцию — например, закрыл ли позицию kill-switch, рестарт или
+    // внешний скрипт. Включаем req и добавляем ip/user-agent: по ним запрос
+    // атрибутируется однозначно.
+    quietReqLogger: false,
     serializers: {
       req(req) {
         return {
           id: req.id,
           method: req.method,
           url: req.url?.split("?")[0],
+          ip: req.remoteAddress,
+          ua: req.headers?.["user-agent"],
         };
       },
       res(res) {
