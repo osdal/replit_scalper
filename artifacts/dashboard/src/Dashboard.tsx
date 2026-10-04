@@ -890,6 +890,12 @@ export default function Dashboard() {
   const [syncing, setSyncing] = useState(false);
   const [apiUp, setApiUp] = useState(true);
 
+  // Массовое задание размера позиции (только testnet): в live размер задаётся
+  // каждому боту отдельно в LivePanel, чтобы нельзя было случайно изменить
+  // объём сразу на всех ботах с реальными деньгами.
+  const [sizePctAll, setSizePctAll] = useState("");
+  const [applyingSize, setApplyingSize] = useState(false);
+
   useEffect(() => {
     healthz().then(setApiUp);
     const id = setInterval(() => healthz().then(setApiUp), 5000);
@@ -955,6 +961,60 @@ export default function Dashboard() {
     } catch (e) {
       alert(`Save failed: ${e}`);
     }
+  };
+
+  /**
+   * Задать размер позиции (position_size_pct) сразу ВСЕМ ботам окружения.
+   * Только для testnet: в live размер меняется по одному боту (LivePanel),
+   * чтобы одним кликом не изменить объём сразу на реальных деньгах.
+   *
+   * Важно: боты читают конфиг при старте, поэтому уже запущенные боты новый
+   * размер подхватят только после перезапуска. БД и config_*.yaml при этом
+   * обновляются сразу.
+   */
+  const handleApplySizeToAll = async () => {
+    const raw = sizePctAll.trim().replace(",", ".");
+    const pct = Number(raw);
+    if (!raw || !Number.isFinite(pct) || pct <= 0 || pct > 100) {
+      setNotice("Укажите корректный процент (например 0.4 или 1.5).");
+      return;
+    }
+    const targets = bots.map(b => b.symbol);
+    if (targets.length === 0) {
+      setNotice("Нет ботов для обновления.");
+      return;
+    }
+    if (!confirm(
+      `Задать размер позиции ${pct}% свободного депозита сразу ${targets.length} ботам?\n\n` +
+      "Изменение запишется в БД и в config_*.yaml. Уже запущенные боты " +
+      "подхватят его только после перезапуска."
+    )) return;
+
+    setApplyingSize(true);
+    setNotice(null);
+    const failed: string[] = [];
+    // Небольшими параллельными волнами: каждый вызов поднимает python-процесс
+    // для записи YAML, поэтому 40 запросов разом устроят мини-DDoS.
+    const CONCURRENCY = 4;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (symbol) => {
+        try {
+          await updateConfig(symbol, { position_size_pct: pct });
+        } catch {
+          failed.push(symbol);
+        }
+      }));
+      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
+    }
+    setApplyingSize(false);
+    setNotice(
+      failed.length
+        ? `Готово. Обновлено ${targets.length - failed.length} из ${targets.length}. Ошибка: ${failed.join(", ")}`
+        : `Готово: размер позиции ${pct}% задан всем ${targets.length} ботам.`
+    );
+    setSizePctAll("");
+    await load();
   };
 
   const handleCloseAllReset = async () => {
@@ -1125,7 +1185,33 @@ export default function Dashboard() {
             )}
 
          </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-start">
+          {!IS_LIVE && (
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Размер позиции в % свободного депозита для всех ботов сразу. Уже запущенные боты применят его после перезапуска.">
+                Позиция, % · всем ботам
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                placeholder="0.4"
+                value={sizePctAll}
+                onChange={e => setSizePctAll(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") void handleApplySizeToAll(); }}
+                className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleApplySizeToAll}
+                disabled={applyingSize}
+                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              >
+                {applyingSize ? "Applying..." : "Apply"}
+              </Button>
+            </div>
+          )}
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing...' : 'Sync Binance'}
