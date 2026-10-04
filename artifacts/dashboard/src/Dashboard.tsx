@@ -895,6 +895,7 @@ export default function Dashboard() {
   // объём сразу на всех ботах с реальными деньгами.
   const [sizePctAll, setSizePctAll] = useState("");
   const [applyingSize, setApplyingSize] = useState(false);
+  const [restartAfterApply, setRestartAfterApply] = useState(true);
 
   useEffect(() => {
     healthz().then(setApiUp);
@@ -964,13 +965,49 @@ export default function Dashboard() {
   };
 
   /**
+   * Перезапуск всех ботов окружения средствами самого API: stop-all, затем
+   * ожидание фактической остановки и Start каждому. Раньше это делал внешний
+   * скрипт restart_bots.sh через SSH — но дашборд и боты живут на одной VM,
+   * так что достаточно обратиться к API напрямую. Контейнер api-server при
+   * этом не перезапускается, поэтому открытые позиции переживают перезапуск:
+   * боты восстанавливают их из state-файлов.
+   */
+  const restartAllBots = async (symbols: string[]) => {
+    setNotice("Перезапуск: останавливаю ботов...");
+    await stopAllBots();
+
+    // Сигнал остановки не значит, что процесс уже мёртв: ждём, пока API
+    // перестанет видеть их запущенными.
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const fresh = await fetchBots();
+      if (!Array.isArray(fresh) || !fresh.some((b: Bot) => b.is_running)) break;
+      if (i === 19) setNotice("Не все боты остановились — всё равно запускаю заново.");
+    }
+
+    let started = 0;
+    const failed: string[] = [];
+    for (let i = 0; i < symbols.length; i++) {
+      const symbol = symbols[i];
+      try {
+        await startBot(symbol);
+        started++;
+      } catch {
+        failed.push(symbol);
+      }
+      if (i % 5 === 4) setNotice(`Перезапуск: запущено ${i + 1}/${symbols.length}...`);
+    }
+    return { started, failed };
+  };
+
+  /**
    * Задать размер позиции (position_size_pct) сразу ВСЕМ ботам окружения.
    * Только для testnet: в live размер меняется по одному боту (LivePanel),
    * чтобы одним кликом не изменить объём сразу на реальных деньгах.
    *
    * Важно: боты читают конфиг при старте, поэтому уже запущенные боты новый
-   * размер подхватят только после перезапуска. БД и config_*.yaml при этом
-   * обновляются сразу.
+   * размер подхватят только после перезапуска. Поэтому рядом с Apply есть
+   * переключатель «перезапустить после применения».
    */
   const handleApplySizeToAll = async () => {
     const raw = sizePctAll.trim().replace(",", ".");
@@ -984,12 +1021,16 @@ export default function Dashboard() {
       setNotice("Нет ботов для обновления.");
       return;
     }
+    const doRestart = restartAfterApply;
     if (!confirm(
       `Задать размер позиции ${pct}% депозита сразу ${targets.length} ботам?\n\n` +
       "Маржа = депозит × " + pct + "%, позиция = маржа × плечо.\n\n" +
       "Изменение запишется в БД и в config_*.yaml. Уже открытые позиции и их " +
       "reverse-цепочки продолжат дорабатываться на прежнем размере — новый " +
-      "применится только к следующим входам и только после перезапуска ботов."
+      "применится только к следующим входам." +
+      (doRestart
+        ? `\n\nБоты будут перезапущены, чтобы подхватить новое значение (${targets.length} шт., около минуты).`
+        : "\n\nБоты НЕ будут перезапущены: значение подхватится при следующем старте.")
     )) return;
 
     setApplyingSize(true);
@@ -1009,13 +1050,21 @@ export default function Dashboard() {
       }));
       setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
     }
+
+    let restartInfo = "";
+    if (doRestart) {
+      const { started, failed: failedStart } = await restartAllBots(targets);
+      restartInfo = ` Перезапущено: ${started}/${targets.length}.`;
+      failed.push(...failedStart);
+    }
+
     setApplyingSize(false);
-    setNotice(
-      failed.length
-        ? `Готово. Обновлено ${targets.length - failed.length} из ${targets.length}. Ошибка: ${failed.join(", ")}`
-        : `Готово: размер позиции ${pct}% задан всем ${targets.length} ботам.`
-    );
     setSizePctAll("");
+    setNotice(
+      (failed.length
+        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
+        : `Готово: размер позиции ${pct}% задан всем ${targets.length} ботам.`) + restartInfo
+    );
     await load();
   };
 
@@ -1210,8 +1259,21 @@ export default function Dashboard() {
                 disabled={applyingSize}
                 className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
               >
-                {applyingSize ? "Applying..." : "Apply"}
+                {applyingSize ? "Working..." : "Apply"}
               </Button>
+              <label
+                className="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap cursor-pointer"
+                title="После применения перезапустить ботов, чтобы они подхватили новое значение. Открытые позиции сохранятся: боты восстановят их из state-файлов."
+              >
+                <input
+                  type="checkbox"
+                  checked={restartAfterApply}
+                  onChange={e => setRestartAfterApply(e.target.checked)}
+                  disabled={applyingSize}
+                  className="accent-zinc-400"
+                />
+                перезапустить
+              </label>
             </div>
           )}
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
