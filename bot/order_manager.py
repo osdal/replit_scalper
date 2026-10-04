@@ -1574,13 +1574,22 @@ class OrderManager:
         sl_distance = abs(signal.entry_price - effective_sl_price)
         sl_distance_pct = (sl_distance / signal.entry_price * 100) if signal.entry_price > 0 else 0.0
 
-        # position_size_pct: МАРЖА = % от СВОБОДНОГО депозита (availableBalance),
-        # только live. Приоритет ниже position_size_usd: явный USD-размер перебивает
-        # процент. Открытые позиции не учитываются — availableBalance уже без
-        # занятой под них маржи.
+        # position_size_pct: МАРЖА = % от СВОБОДНОГО депозита, позиция = маржа ×
+        # плечо. Приоритет ниже position_size_usd: явный USD-размер перебивает
+        # процент. Открытые позиции не учитываются — для live берётся
+        # availableBalance (он уже без маржи под открытые позиции), для testnet
+        # это paper_balance.
+        #
+        # Раньше ветка была ограничена BOT_ENV == "live", из-за чего в testnet
+        # поле молча игнорировалось: массовое задание размера из дашборда
+        # записывало значение, а боты продолжали считать размер по
+        # fixed_risk_usd / risk_pct. Убираем гейт — семантика теперь одинаковая
+        # в обоих окружениях. Размер действует только на НОВЫЕ позиции:
+        # открытая позиция и её reverse-цепочка размер не меняют, он зафиксирован
+        # при входе (см. sizing ниже).
         pct_margin = 0.0
         pct_free_balance = 0.0
-        if not is_recovery and self.cfg.position_size_usd <= 0 and BOT_ENV == "live":
+        if not is_recovery and self.cfg.position_size_usd <= 0:
             try:
                 pct = float(getattr(self.cfg, "position_size_pct", 0.0) or 0.0)
             except (TypeError, ValueError):

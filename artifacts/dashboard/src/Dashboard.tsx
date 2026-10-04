@@ -985,9 +985,11 @@ export default function Dashboard() {
       return;
     }
     if (!confirm(
-      `Задать размер позиции ${pct}% свободного депозита сразу ${targets.length} ботам?\n\n` +
-      "Изменение запишется в БД и в config_*.yaml. Уже запущенные боты " +
-      "подхватят его только после перезапуска."
+      `Задать размер позиции ${pct}% депозита сразу ${targets.length} ботам?\n\n` +
+      "Маржа = депозит × " + pct + "%, позиция = маржа × плечо.\n\n" +
+      "Изменение запишется в БД и в config_*.yaml. Уже открытые позиции и их " +
+      "reverse-цепочки продолжат дорабатываться на прежнем размере — новый " +
+      "применится только к следующим входам и только после перезапуска ботов."
     )) return;
 
     setApplyingSize(true);
@@ -1188,7 +1190,7 @@ export default function Dashboard() {
         <div className="flex gap-2 items-start">
           {!IS_LIVE && (
             <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
-              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Размер позиции в % свободного депозита для всех ботов сразу. Уже запущенные боты применят его после перезапуска.">
+              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Маржа = % от депозита, позиция = маржа × плечо. Применяется только к НОВЫМ позициям: уже открытая позиция и её reverse-цепочка доторговываются на прежнем размере. Значение подхватят только перезапущенные боты.">
                 Позиция, % · всем ботам
               </label>
               <input
