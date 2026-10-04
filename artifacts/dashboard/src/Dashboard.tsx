@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, armBot } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -973,8 +973,19 @@ export default function Dashboard() {
    * этом не перезапускается, поэтому открытые позиции переживают перезапуск:
    * боты восстанавливают их из state-файлов.
    */
-  const restartAllBots = async (symbols: string[], armFirst = false) => {
-    setNotice("Перезапуск: останавливаю ботов...");
+  const restartAllBots = async () => {
+    // Перезапускаем ТОЛЬКО реально запущенных ботов и НЕ трогаем arm.
+    // Раньше сюда передавался список всех карточек, и кнопка в live поднимала
+    // 35 намеренно остановленных ботов на реальные деньги, а перед стартом ещё
+    // и армила каждого. Arm живёт в БД и переживает перезапуск сам.
+    const before = await fetchBots();
+    const symbols = Array.isArray(before) ? before.filter((b: Bot) => b.is_running).map((b: Bot) => b.symbol) : [];
+    if (symbols.length === 0) {
+      setNotice("Нет запущенных ботов — перезапускать нечего.");
+      return { started: 0, failed: [] as string[] };
+    }
+
+    setNotice(`Перезапуск: останавливаю ${symbols.length} ботов...`);
     await stopAllBots();
 
     // Сигнал остановки не значит, что процесс уже мёртв: ждём, пока API
@@ -991,12 +1002,6 @@ export default function Dashboard() {
     for (let i = 0; i < symbols.length; i++) {
       const symbol = symbols[i];
       try {
-        // В live REQUIRE_ARM=true: без арминга бот стартует, но не откроет
-        // позиции. Ошибка арминга не считается фатальной — бот может быть
-        // армирован уже.
-        if (armFirst) {
-          try { await armBot(symbol); } catch { /* уже armed */ }
-        }
         await startBot(symbol);
         started++;
       } catch {
@@ -1007,30 +1012,30 @@ export default function Dashboard() {
     return { started, failed };
   };
 
-  /** Перезапуск всех ботов без изменения настроек (кнопка в шапке). */
+  /** Перезапуск всех ЗАПУЩЕННЫХ ботов без изменения настроек (кнопка в шапке). */
   const handleRestartAll = async () => {
-    const symbols = bots.map(b => b.symbol);
-    if (symbols.length === 0) {
-      setNotice("Нет ботов для перезапуска.");
+    const running = bots.filter(b => b.is_running);
+    if (running.length === 0) {
+      setNotice("Нет запущенных ботов — перезапускать нечего.");
       return;
     }
     const openCount = bots.filter(b => b.position).length;
     if (!confirm(
-      `Перезапустить ${symbols.length} ботов?${IS_LIVE ? " (LIVE, реальные деньги)" : ""}\n\n` +
+      `Перезапустить ${running.length} запущенных ботов?${IS_LIVE ? " (LIVE, реальные деньги)" : ""}\n\n` +
+      `Остановленные боты запущены не будут. Настройки, включая Arm, не меняются.\n\n` +
       `Открытых позиций: ${openCount}. Они сохранятся — биржевые SL/TP остаются, ` +
-      "а боты восстановят позиции из state-файлов. Примерно минута позициями " +
-      "не управляет никто." +
-      (IS_LIVE ? "\n\nПеред стартом будет выполнен Arm." : "")
+      "а боты восстановят позиции из state-файлов. Примерно минуту позициями " +
+      "не управляет никто."
     )) return;
     setRestarting(true);
     setNotice(null);
     try {
-      const { started, failed } = await restartAllBots(symbols, IS_LIVE);
+      const { started, failed } = await restartAllBots();
       setRestarting(false);
       setNotice(
         failed.length
-          ? `Перезапуск: запущено ${started}/${symbols.length}. Ошибка: ${failed.join(", ")}`
-          : `Перезапуск завершён: ${started}/${symbols.length} ботов работают.`
+          ? `Перезапуск: запущено ${started}/${running.length}. Ошибка: ${failed.join(", ")}`
+          : `Перезапуск завершён: ${started}/${running.length} ботов работают.`
       );
       await load();
     } catch (e) {
@@ -1068,7 +1073,7 @@ export default function Dashboard() {
       "reverse-цепочки продолжат дорабатываться на прежнем размере — новый " +
       "применится только к следующим входам." +
       (doRestart
-        ? `\n\nБоты будут перезапущены, чтобы подхватить новое значение (${targets.length} шт., около минуты).`
+        ? `\n\nЗапущенные боты будут перезапущены, чтобы подхватить новое значение; остановленные останутся остановленными (${targets.length} всего, перезапустятся только работающие).`
         : "\n\nБоты НЕ будут перезапущены: значение подхватится при следующем старте.")
     )) return;
 
@@ -1092,8 +1097,11 @@ export default function Dashboard() {
 
     let restartInfo = "";
     if (doRestart) {
-      const { started, failed: failedStart } = await restartAllBots(targets);
-      restartInfo = ` Перезапущено: ${started}/${targets.length}.`;
+      // restartAllBots сам перезапускает только запущенных, поэтому
+      // «размер применён всем, перезапущены те, кто работал» — иначе Apply
+      // в testnet поднял бы и намеренно остановленных ботов.
+      const { started, failed: failedStart } = await restartAllBots();
+      restartInfo = ` Перезапущено: ${started}.`;
       failed.push(...failedStart);
     }
 
