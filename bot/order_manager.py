@@ -186,6 +186,11 @@ class OrderManager:
         # AlgoId живого биржевого backstop-стопа (STOP_MARKET, closePosition=true).
         # None = защиты на бирже нет. Персистится через Position.backstop_algo_id.
         self.backstop_algo_id: Optional[int] = None
+        # Фактическая цена последнего выставленного биржевого TP-лимита
+        # (0 = ордера нет / TP не выставлялся). Нужна реконсилятору, чтобы
+        # отличить выход по TP от необъяснимого stale_close, если уровни
+        # разошлись. Персистится через Position.exchange_tp_price.
+        self.exchange_tp_price: float = 0.0
         # Read-only кэши дорогих вызовов (balance / position info).
         self._balance_cache = {"value": None, "free": None, "ts": 0.0, "mode": None}
         self._position_cache = {"value": None, "ts": 0.0, "symbol": None}
@@ -673,6 +678,11 @@ class OrderManager:
             timeInForce=TIME_IN_FORCE_GTC,
             reduceOnly=True,
         )
+        # Запоминаем ФАКТИЧЕСКУЮ цену биржевого TP-ордера (после _adjust_price).
+        # Она может отличаться от внутреннего TP1 трекера, и тогда реконсилятор
+        # не смог бы опознать выход по TP: выход по этому уровню закрывался бы
+        # как stale_close. Трекер кладёт это поле в состояние позиции.
+        self.exchange_tp_price = price
         self.log.info(f"[LIVE] TP limit placed | side={side} price={price} qty={qty}")
         _audit("tp_limit", symbol=self.cfg.symbol, side=side, price=price, qty=qty)
 

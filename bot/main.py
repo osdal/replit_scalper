@@ -870,9 +870,22 @@ async def _classify_stale_close_reason(
             return "REVERSE_BE"
         return "REVERSE_MARKET"
 
+    # TP1 проверяем ПЕРВЫМ: в конфигах tp1_pct == tp2_pct и tp1_close_pct=100,
+    # т.е. позицию закрывает именно TP1, а уровни TP1/TP2 совпадают. При обратном
+    # порядке любой выход по TP помечался бы как TP2.
+    if _matches(tp1_price):
+        return "TP1"
     if _matches(tp2_price):
         return "TP2"
-    if _matches(tp1_price):
+
+    # Сверяемся с ФАКТИЧЕСКОЙ ценой биржевого TP-лимита (Position.
+    # exchange_tp_price). Уровни в трекере пересчитываются от фактического входа,
+    # а ордер на бирже ставится от цены сигнала, поэтому TP на бирже может быть на
+    # несколько тиков ближе к входу, чем внутренний TP1. Исполнился ордер — значит
+    # это TP-выход, даже если сверка по внутреннему уровню не прошла. Покрывает и
+    # старые позиции, открытые до фикса.
+    ex_tp1 = float(getattr(pos, "exchange_tp_price", 0.0) or 0.0) if pos is not None else 0.0
+    if ex_tp1 > 0 and _matches(ex_tp1):
         return "TP1"
     return "stale_close"
 
@@ -2758,45 +2771,54 @@ async def _run_live_or_paper(
             if _stop_requested:
                 log.info("[STOP] graceful stop requested — new entries disabled")
                 return
+
+            # Per-preset TP/SL overrides считаются ДО open_position.
+            # Раньше они применялись после входа, от цены фактического филла, а
+            # биржевые ордера к этому моменту уже стояли на уровнях, посчитанных от
+            # цены сигнала. Из-за этого TP на бирже и TP1 в трекере расходились
+            # (на NEARUSDT 4.868 против 4.8753): биржа закрывала позицию раньше,
+            # внутренний TP1 бота не срабатывал, и выход попадал в БД как
+            # stale_close вместо TP1. Теперь уровни считаются один раз и
+            # используются и для биржевых ордеров, и для трекера.
+            is_recovery = recovery_target is not None
+            if not is_recovery:
+                preset_cfg = get_preset_config(signal.preset)
+                if preset_cfg.get("tp"):
+                    tp_pct = preset_cfg["tp"]
+                    sl_pct = preset_cfg.get("sl", cfg.sl_pct)
+                    atr_abs = getattr(signal, "atr", 0) or 0
+                    if signal.direction == "LONG":
+                        mult = getattr(cfg, "atr_tp_multiplier_long", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+                    else:
+                        mult = getattr(cfg, "atr_tp_multiplier_short", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
+                    dynamic_sl, dynamic_tp = _calc_atr_sl_tp(signal.entry_price, atr_abs, sl_pct, tp_pct,
+                                                             tp_multiplier=mult)
+                    # TP2 (раннер) дальше TP1, если задан atr_tp2_multiplier
+                    tp2_mult = getattr(cfg, "atr_tp2_multiplier", 0.0) or 0.0
+                    dynamic_tp2 = tp2_mult * dynamic_sl if tp2_mult > 0 and dynamic_sl > 0 else dynamic_tp
+                    sl_dist = signal.entry_price * dynamic_sl / 100
+                    tp_dist = signal.entry_price * dynamic_tp / 100
+                    tp2_dist = signal.entry_price * dynamic_tp2 / 100
+                    if signal.direction == "LONG":
+                        signal.sl_price = round(signal.entry_price - sl_dist, 8)
+                        signal.tp1_price = round(signal.entry_price + tp_dist, 8)
+                        signal.tp2_price = round(signal.entry_price + tp2_dist, 8)
+                    else:
+                        signal.sl_price = round(signal.entry_price + sl_dist, 8)
+                        signal.tp1_price = round(signal.entry_price - tp_dist, 8)
+                        signal.tp2_price = round(signal.entry_price - tp2_dist, 8)
+                    signal_data["sl_price"] = signal.sl_price
+                    signal_data["tp1_price"] = signal.tp1_price
+                    signal_data["tp2_price"] = signal.tp2_price
+
             result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
             if result is not None:
                 entry_price, qty = result[0], result[1]
                 signal_data["qty"] = qty
                 signal.entry_price = entry_price
-                is_recovery = recovery_target is not None
                 if is_recovery and len(result) > 2:
                     signal.tp1_price = result[2]
                     signal.tp2_price = result[2]  # no TP2 for recovery
-                # Apply per-preset TP/SL overrides (recovery keeps its own levels)
-                if not is_recovery:
-                    preset_cfg = get_preset_config(signal.preset)
-                    if preset_cfg.get("tp"):
-                        tp_pct = preset_cfg["tp"]
-                        sl_pct = preset_cfg.get("sl", cfg.sl_pct)
-                        atr_abs = getattr(signal, "atr", 0) or 0
-                        if signal.direction == "LONG":
-                            mult = getattr(cfg, "atr_tp_multiplier_long", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
-                        else:
-                            mult = getattr(cfg, "atr_tp_multiplier_short", None) or getattr(cfg, "atr_tp_multiplier", 2.0)
-                        dynamic_sl, dynamic_tp = _calc_atr_sl_tp(entry_price, atr_abs, sl_pct, tp_pct,
-                                                                 tp_multiplier=mult)
-                        # TP2 (раннер) дальше TP1, если задан atr_tp2_multiplier
-                        tp2_mult = getattr(cfg, "atr_tp2_multiplier", 0.0) or 0.0
-                        dynamic_tp2 = tp2_mult * dynamic_sl if tp2_mult > 0 and dynamic_sl > 0 else dynamic_tp
-                        sl_dist = entry_price * dynamic_sl / 100
-                        tp_dist = entry_price * dynamic_tp / 100
-                        tp2_dist = entry_price * dynamic_tp2 / 100
-                        if signal.direction == "LONG":
-                            signal.sl_price = round(entry_price - sl_dist, 8)
-                            signal.tp1_price = round(entry_price + tp_dist, 8)
-                            signal.tp2_price = round(entry_price + tp2_dist, 8)
-                        else:
-                            signal.sl_price = round(entry_price + sl_dist, 8)
-                            signal.tp1_price = round(entry_price - tp_dist, 8)
-                            signal.tp2_price = round(entry_price - tp2_dist, 8)
-                        signal_data["sl_price"] = signal.sl_price
-                        signal_data["tp1_price"] = signal.tp1_price
-                        signal_data["tp2_price"] = signal.tp2_price
                 await tracker.open_async(
                     signal, qty=qty,
                     is_recovery=is_recovery,
@@ -2808,6 +2830,9 @@ async def _run_live_or_paper(
                 # чтобы рестарт не оставил orphan/дубль.
                 if tracker.position is not None:
                     tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                    # Фактическая цена биржевого TP-лимита: нужна реконсилятору,
+                    # чтобы выход по исполненному ордеру не помечался как stale_close.
+                    tracker.position.exchange_tp_price = order_mgr.exchange_tp_price
                     tracker._save_state()
                 # Релей testnet→live: публикуем вход + уровни стопа/тейков
                 # (только если задан SIGNAL_RELAY_URL; live не публикует).

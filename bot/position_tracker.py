@@ -111,6 +111,11 @@ class Position:
     intrabar_return: float = 0.0     # движение внутри свечи входа (только бэктест)
     voting_bases: list = field(default_factory=list)  # согласовавшие стратегии (только бэктест)
     backstop_algo_id: Optional[int] = None  # algoId биржевого safety-net STOP_MARKET (closePosition)
+    # Фактическая цена биржевого TP-лимита. Может отличаться от tp1_price
+    # (уровни пересчитываются по цене входа, ордер ставится по округлённой цене),
+    # и реконсилятор сверяется с ним, чтобы не помечать нормальный TP-выход
+    # как stale_close. 0 = TP-ордера на бирже нет.
+    exchange_tp_price: float = 0.0
     entry_fill_ms: Optional[int] = None     # фактическое время входа (мс, UTC) с биржи — начало окна цикла
     reverse_chain_step: int = 0             # шаг reverse-цепочки в цикле: 0=исходная нога, 1/2=после reverse
 
@@ -179,6 +184,7 @@ class PositionTracker:
             "mode":            p.mode,
             "reject_reason":   p.reject_reason,
             "backstop_algo_id": p.backstop_algo_id,
+            "exchange_tp_price": p.exchange_tp_price,
             "entry_fill_ms":   p.entry_fill_ms,
             "is_reverse":      p.is_reverse,
             "reverse_chain_step": p.reverse_chain_step,
@@ -237,6 +243,7 @@ class PositionTracker:
                 mode=data.get("mode"),
                 reject_reason=data.get("reject_reason"),
                 backstop_algo_id=data.get("backstop_algo_id"),
+                exchange_tp_price=data.get("exchange_tp_price", 0.0) or 0.0,
                 entry_fill_ms=data.get("entry_fill_ms"),
                 is_reverse=data.get("is_reverse", False),
                 reverse_chain_step=data.get("reverse_chain_step", 0) or 0,
