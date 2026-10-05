@@ -726,19 +726,58 @@ function TradesTable({ trades }: { trades: Trade[] }) {
 
 // ── Per-symbol Stats Table ────────────────────────────────────────────────────
 
-function StatsTable({ stats }: { stats: Stats[] }) {
+const REVERSE_COLUMNS = 6;
+
+/**
+ * Счётчики реверсов по символам: R1..R6.
+ *
+ * R_n = сколько раз в этом символе случался ИМЕННО n-й реверс, то есть
+ * сколько циклов дошло до (n+1) ног. Цикл без реверсов (chain_depth=1) в
+ * счётчики не попадает. Так у монеты с шестью циклами по два реверса
+ * будет R1=6, R2=6, R3=0.
+ *
+ * chain_depth заполняется при закрытии цикла; у части старых сделок он NULL
+ * (записи до фикса), такие циклы не учитываются ни в одной колонке.
+ */
+function countReverses(rows: Trade[]): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const tr of rows) {
+    if (!tr.symbol || tr.is_open) continue;
+    if (tr.status === "rejected") continue;
+    const depth = Number(tr.chain_depth ?? 0) || 0;
+    if (depth < 2) continue;
+    const arr = (out[tr.symbol] ||= Array(REVERSE_COLUMNS).fill(0));
+    for (let n = 1; n <= REVERSE_COLUMNS; n++) {
+      if (depth >= n + 1) arr[n - 1]++;
+    }
+  }
+  return out;
+}
+
+function StatsTable({ stats, reversals }: { stats: Stats[]; reversals: Record<string, number[]> }) {
   return (
     <div className="overflow-auto rounded-lg border border-zinc-800">
       <Table>
         <TableHeader>
           <TableRow className="border-zinc-800 hover:bg-transparent">
-            {["Symbol", "Trades", "Wins", "Losses", "Win Rate", "Total PnL", "Avg Win", "Avg Loss"].map((h) => (
-              <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
+            {["Symbol", "Trades", "Wins", "Losses", "Win Rate", "Total PnL", "Avg Win", "Avg Loss",
+              ...Array.from({ length: REVERSE_COLUMNS }, (_, i) => `R${i + 1}`)].map((h) => (
+              <TableHead
+                key={h}
+                className={`${h.startsWith("R") ? "text-amber-400/90" : "text-zinc-400"} text-xs`}
+                title={h.startsWith("R")
+                  ? `Сколько раз в этом символе случался ${h.slice(1)}-й реверс (цикл дошёл до ${Number(h.slice(1)) + 1} ног)`
+                  : undefined}
+              >
+                {h}
+              </TableHead>
             ))}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {stats.map((s) => (
+          {stats.map((s) => {
+            const r = reversals[s.symbol];
+            return (
             <TableRow key={s.symbol} className="border-zinc-800 hover:bg-zinc-800/50">
               <TableCell className="font-bold">{s.symbol}</TableCell>
               <TableCell>{s.total}</TableCell>
@@ -750,8 +789,12 @@ function StatsTable({ stats }: { stats: Stats[] }) {
               </TableCell>
               <TableCell className="font-mono text-green-400">+{fmt(s.avg_win, 4)}</TableCell>
               <TableCell className="font-mono text-red-400">{fmt(s.avg_loss, 4)}</TableCell>
+              {Array.from({ length: REVERSE_COLUMNS }, (_, i) => (
+                <TableCell key={i} className="font-mono text-zinc-300">{r ? r[i] : 0}</TableCell>
+              ))}
             </TableRow>
-          ))}
+            );
+          })}
         </TableBody>
       </Table>
     </div>
@@ -787,6 +830,7 @@ export default function Dashboard() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
+  const [reverseCounts, setReverseCounts] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [notice, setNotice] = useState<string | null>(null);
@@ -847,13 +891,15 @@ export default function Dashboard() {
       // загруженной странице иначе показывает меньше сделок, чем вкладка
       // Статистика (она агрегирует всю таблицу).
       const tradeSymbol = selectedSymbol === "all" ? undefined : selectedSymbol;
-      // Запросы независимы: раньше стоял Promise.all, и падение ЛЮБОГО из
-      // трёх (например /trades при пустой БД) оставляло setBots невызванным —
-      // дашборд показывал ноль карточек, хотя /api/bots отвечал нормально.
-      const [b, t, s] = await Promise.allSettled([
+      // Запросы независимы: падение ЛЮБОГО из трёх раньше оставляло setBots
+      // невызванным — дашборд показывал ноль карточек при живом API.
+      const [b, t, s, rev] = await Promise.allSettled([
         fetchBots(),
         fetchTrades(tradeSymbol, 1000),
         fetchStats(),
+        // Отдельный запрос БЕЗ фильтра по монете: счётчики реверсов нужны по
+        // всем символам сразу, а trades выше отфильтрован выбранным символом.
+        fetchTrades(undefined, 1000),
       ]);
       if (b.status === "fulfilled" && Array.isArray(b.value)) setBots(b.value);
       else if (b.status === "rejected") {
@@ -872,6 +918,10 @@ export default function Dashboard() {
       }
       if (s.status === "fulfilled") setStats(Array.isArray(s.value) ? s.value : []);
       else console.error("[dashboard] не удалось загрузить /trades/stats", s.reason);
+      if (rev.status === "fulfilled") {
+        const rows = Array.isArray(rev.value?.trades) ? rev.value.trades : [];
+        setReverseCounts(countReverses(rows));
+      }
       setLastRefresh(new Date());
     } catch {
       // API not available yet
@@ -1476,7 +1526,7 @@ export default function Dashboard() {
             )}
 
             <TabsContent value="stats" className="mt-4">
-              <StatsTable stats={stats} />
+              <StatsTable stats={stats} reversals={reverseCounts} />
             </TabsContent>
 
             <TabsContent value="backtest" className="mt-4">
