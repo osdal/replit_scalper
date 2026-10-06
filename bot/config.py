@@ -97,7 +97,12 @@ class Config:
     reverse_sl_pct: float = 1.0            # Виртуальный SL обратной ноги от её входа: reverse SHORT
                                            # sl = E_rev*(1+pct/100), reverse LONG sl = E_rev*(1-pct/100).
     reverse_chain_max: int = 10            # Макс. шагов reverse за цикл. 0 = БЕЗ ЛИМИТА (добавляем
-                                           # ногу сколько нужно). step >= max → нет нового плеча, force-close.
+                                            # ногу сколько нужно). step >= max → нет нового плеча, force-close.
+    reverse_cum_loss_pct: float = 5.0      # Принудительно закрыть цикл, если суммарный убыток
+                                            # (realized legs + текущий unrealized) >= этого % от референса.
+                                            # 0 = выкл.
+    reverse_cum_ref_deposit_usd: float = 0.0  # Референс для cumulative loss cap в USD.
+                                            # 0 = текущий equity/депозит автоматически.
     loss_streak_skip_enabled: bool = True  # False = НЕ пропускать сигналы после серии убытков
                                            # (skip:loss_streak_3/5/7).
     reverse_fee_buffer_pct: float = 0.0   # Опциональная ДОП. маржа к окну безубытка сверх явных комиссий:
