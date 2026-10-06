@@ -29,7 +29,7 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
   const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
-    return {
+    const cfg = {
       max_positions: Number(raw.max_positions) || def.max_positions,
       loss_streak_trigger: Number(raw.loss_streak_trigger) || def.loss_streak_trigger,
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
@@ -42,8 +42,18 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
         ? Number(raw.max_positions_ignore_after_hours)
         : def.max_positions_ignore_after_hours,
     };
+    const env_max = process.env.MAX_POSITIONS;
+    if (env_max !== undefined && env_max !== null && env_max !== "") {
+      cfg.max_positions = Number(env_max);
+    }
+    return cfg;
   } catch {
-    return def;
+    const def2 = { ...def };
+    const env_max = process.env.MAX_POSITIONS;
+    if (env_max !== undefined && env_max !== null && env_max !== "") {
+      def2.max_positions = Number(env_max);
+    }
+    return def2;
   }
 }
 
