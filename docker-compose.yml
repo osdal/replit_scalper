@@ -87,6 +87,9 @@ services:
       - DASHBOARD_API_URL=http://localhost:5000/api
       # Релей сигналов testnet -> live уходит на соседний контейнер.
       - SIGNAL_RELAY_URL=http://api-live:5000/api
+      # Cumulative loss cap для reverse-цепочки (0 = выкл).
+      - REVERSE_CUM_LOSS_PCT=5
+      - REVERSE_CUM_REF_DEPOSIT_USD=0
 
   dashboard-testnet:
     <<: *dashboard-base
@@ -124,6 +127,9 @@ services:
       # PORT=5001, DATABASE_PATH=./data/bot_live.db) с override и падает,
       # если файла нет или ключи пустые.
       - BOT_ENV=live
+      # Cumulative loss cap для reverse-цепочки (0 = выкл).
+      - REVERSE_CUM_LOSS_PCT=5
+      - REVERSE_CUM_REF_DEPOSIT_USD=0
 
   dashboard-live:
     <<: *dashboard-base
