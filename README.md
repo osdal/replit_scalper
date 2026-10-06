@@ -1042,6 +1042,11 @@ Daily-скрипт регистрируется в планировщике за
 
 ## 16. Changelog
 
+### 2026-10-06
+- **Reverse cumulative loss cap (live + testnet)**: добавлен непрерывный контроль суммарного убытка reverse-цепочки. Если `реализованный убыток по закрытым ногам + текущий unrealized` >= `REVERSE_CUM_LOSS_PCT`% от депозита — цикл принудительно закрывается моментально, без ожидания закрытия следующей ноги. Референс депозита: `REVERSE_CUM_REF_DEPOSIT_USD=0` → текущий equity автоматически. Частота проверки: раз в 5 секунд на символ. Кэш сбрасывается после любого закрытия позиции. Логи: `[REVERSE] cumulative loss cap hit | symbol=...`. Причина закрытия: `cum_loss_cap`.
+- **Commit/Push**: `124601d` — добавлены env-переменные `REVERSE_CUM_LOSS_PCT`/`REVERSE_CUM_REF_DEPOSIT_USD` в `.env`, `.env.live`, `docker-compose.yml` (оба стека), `bot/config.py` и логика в `bot/main.py` (`_get_cumulative_loss`, `_check_reverse_cum_loss`, проверка в `on_candle` и перед `open_reverse_position`).
+- **Деплой на Oracle VM**: обновлён `docker-compose.yml` на `92.5.180.72`, пересобран и поднят `replit_scalper-api-live`. В контейнере подтверждено: `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`.
+
 ### 2026-09-19
 - **Strict break-even reverse sizing**: `send_qty = held_plan + Qo`, где `held_plan = Qo*|E-S|/|S-P3_plan|`; точная цель выхода от фактического reverse-филла `P* = E_rev ∓ Qo*|E-E_rev|/Qh` (Qh — фактический net reverse qty) — цикл `REVERSE_BE` закрывается в ≈0 минус комиссии (см. 3.6).
 - **Метки выходов**: `REVERSE_BE` (плановый TP-лимит исполнен), `REVERSE_BACKSTOP` (биржевой backstop реально исполнился), `REVERSE_MARKET` (bot-initiated market/marketable, ручное или гэп), legacy `REVERSE`, плюс `TP1`/`TP2`/`SL` в `trades.exit_reason`; `refinalize_cycle_after_flat` перезаписывает строку trades по фактическому флэту (см. 3.6a).
