@@ -130,6 +130,8 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Лимит позиций только для live.
+      - MAX_POSITIONS=1
 
   dashboard-live:
     <<: *dashboard-base

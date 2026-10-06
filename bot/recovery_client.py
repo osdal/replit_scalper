@@ -27,7 +27,7 @@ def readRecoveryConfig() -> dict:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             import yaml as _yaml
             raw = _yaml.safe_load(f) or {}
-        return {
+        cfg = {
             "recovery_enabled": bool(raw.get("recovery_enabled", False)),
             "recovery_bonus_pct": float(raw.get("recovery_bonus_pct", 0)),
             "recovery_max_pct": float(raw.get("recovery_max_pct", 50.0)),
@@ -37,10 +37,18 @@ def readRecoveryConfig() -> dict:
             "max_free_debt_usd": float(raw.get("max_free_debt_usd", 15.0)),
             "daily_loss_limit_usd": float(raw.get("daily_loss_limit_usd", 8.0)),
         }
+        env_max = os.getenv("MAX_POSITIONS")
+        if env_max is not None:
+            cfg["max_positions"] = int(env_max)
+        return cfg
     except Exception:
-        return {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_pct": 50.0,
+        cfg = {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_pct": 50.0,
                 "max_positions": 2, "loss_streak_trigger": 2, "loss_pause_signals": 3,
                 "max_free_debt_usd": 15.0, "daily_loss_limit_usd": 8.0}
+        env_max = os.getenv("MAX_POSITIONS")
+        if env_max is not None:
+            cfg["max_positions"] = int(env_max)
+        return cfg
 
 
 class RecoveryClient:
