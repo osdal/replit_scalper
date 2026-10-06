@@ -587,6 +587,12 @@ export function exitReasonMeta(raw: unknown): { label: string; className: string
         className: "bg-amber-100 text-amber-700",
         title: "reverse chain limit reached — the bot force-closed the position at market",
       };
+    case "REVERSE_CUM_LOSS_CAP":
+      return {
+        label: "Cum-loss cap",
+        className: "bg-red-100 text-red-700",
+        title: "Cumulative cycle loss reached the % of deposit cap — the bot force-closed the whole reverse cycle at market.",
+      };
     case "REVERSE":
       return {
         label: "Reverse",

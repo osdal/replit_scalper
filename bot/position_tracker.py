@@ -644,6 +644,8 @@ class PositionTracker:
                        REVERSE_BE;
           "chain_stop" — исчерпан лимит reverse-цепочки, бот принудительно
                        закрыл весь нетто → REVERSE_CHAIN_STOP;
+          "cum_loss_cap" — суммарный убыток цикла достиг лимита % депозита,
+                       бот принудительно закрыл цикл → REVERSE_CUM_LOSS_CAP;
           None/"market" — бот закрыл сам (marketable/market), ручное/внешнее
                        закрытие или гэп.
 
@@ -656,6 +658,8 @@ class PositionTracker:
         """
         if closed_by in ("chain_stop", "chain_failed"):
             return "REVERSE_CHAIN_STOP"
+        if closed_by == "cum_loss_cap":
+            return "REVERSE_CUM_LOSS_CAP"
         if closed_by == "backstop":
             return "REVERSE_BACKSTOP"
         if closed_by == "tp":
@@ -675,13 +679,15 @@ class PositionTracker:
     def _reverse_close_reason(self, closed_by: Optional[str]) -> str:
         """Краткая причина завершения reverse-цикла для БД (разбор «почему не
         пошли на следующий круг»): chain_tp / chain_backstop / chain_max /
-        chain_failed / chain_market."""
+        chain_failed / cum_loss_cap / chain_market."""
         if closed_by == "tp":
             return "chain_tp"
         if closed_by == "backstop":
             return "chain_backstop"
         if closed_by == "chain_stop":
             return "chain_max"
+        if closed_by == "cum_loss_cap":
+            return "cum_loss_cap"
         if closed_by == "chain_failed":
             return "chain_failed"
         return "chain_market"

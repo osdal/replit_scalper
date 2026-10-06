@@ -38,7 +38,7 @@ export const tradesTable = sqliteTable("trades", {
   cycle_pnl:    real("cycle_pnl"),
   chain_depth:  integer("chain_depth"),
   // Причина завершения reverse-цикла: chain_tp | chain_backstop | chain_max |
-  // chain_failed | chain_market (для не-reverse пусто).
+  // chain_failed | cum_loss_cap | chain_market (для не-reverse пусто).
   cycle_close_reason: text("cycle_close_reason"),
   commission:   real("commission"),
   quote_volume: real("quote_volume"),

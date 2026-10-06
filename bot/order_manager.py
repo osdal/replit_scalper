@@ -391,6 +391,28 @@ class OrderManager:
                 return float(p.get("entryPrice", 0))
         return None
 
+    async def get_unrealized_pnl(self, fresh: bool = False) -> Optional[float]:
+        """Суммарный unrealized PnL по символу (USDT).
+
+        В отличие от get_position_info различает «позиции нет» (0.0) и «не удалось
+        получить данные» (None) — для защитных проверок это принципиально: сбой
+        запроса нельзя трактовать как нулевой убыток.
+        fresh=True — сначала сбросить TTL-кэш позиций.
+        """
+        if fresh:
+            self._invalidate_position_cache()
+        positions = await self._fetch_positions()
+        if positions is None:
+            return None
+        total = 0.0
+        for p in positions:
+            try:
+                if abs(float(p.get("positionAmt", 0) or 0)) > 0:
+                    total += float(p.get("unrealizedProfit", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return total
+
     async def get_position_info(self) -> dict | None:
         """
         Возвращает информацию о текущей позиции на Бинансе.
@@ -435,7 +457,9 @@ class OrderManager:
         self.log.warning(f"[LIVE] Using signal price as fallback: {fallback}")
         return fallback
 
-    async def get_balance(self, mode: Optional[str] = None) -> float:
+    async def get_balance(self, mode: Optional[str] = None, force: bool = False) -> float:
+        """Баланс USDT. force=True — игнорировать TTL-кэш (нужно, когда баланс
+        только что изменился из-за закрытия ноги)."""
         if mode is None:
             mode = self.cfg.mode
         if mode != "live":
@@ -443,7 +467,7 @@ class OrderManager:
 
         now = time.monotonic()
         cache = self._balance_cache
-        if (cache["value"] is not None and cache["mode"] == mode
+        if (not force and cache["value"] is not None and cache["mode"] == mode
                 and (now - cache["ts"]) < BALANCE_CACHE_TTL_SEC):
             self.log.debug(f"[CACHE] balance hit | mode={mode}")
             return cache["value"]

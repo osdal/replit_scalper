@@ -27,6 +27,7 @@ from strategy import calculate_indicators, calculate_htf_indicators, get_all_sig
 from preset_config import get_preset_config
 from signal_handler import SignalHandler
 from order_manager import OrderManager
+from cum_loss_cap import CumLossCap
 from position_tracker import PositionTracker, Position, _to_epoch_ms
 from backtester import run_backtest
 from db_reporter import DbReporter
@@ -83,19 +84,28 @@ _REVERSE_CLOSED_BY_REASON = {
     "backstop": "REVERSE_BACKSTOP",
     "market": "REVERSE_MARKET",
     "chain_stop": "REVERSE_CHAIN_STOP",
+    "cum_loss_cap": "REVERSE_CUM_LOSS_CAP",
 }
 
 # Глобальные переменные для отслеживания recovery-состояния
 _recovery_state = {}  # {symbol: {"chainId": int, "debtAmount": float, "is_recovery": bool}}
 
-# Cumulative loss cap для reverse-цепочки: суммируем реализованный убыток закрытых
-# ног + текущий unrealized. Как soon как сумма >= N% от депозита — принудительно
-# закрываем весь цикл.
-_reverse_cum_loss: dict[str, float] = {}
-_reverse_cum_ts: dict[str, float] = {}
+# Cumulative loss cap для reverse-цепочки: суммируем реализованный net закрытых
+# ног + текущий unrealized (со знаком). Как только суммарный убыток >= N% от
+# депозита ЦИКЛА — принудительно закрываем весь цикл (на бирже + в трекере).
+# Логика и подробности — bot/cum_loss_cap.py.
 _REVERSE_CUM_LOSS_PCT = float(os.getenv("REVERSE_CUM_LOSS_PCT") or "0")
 _REVERSE_CUM_REF_DEPOSIT_USD = float(os.getenv("REVERSE_CUM_REF_DEPOSIT_USD") or "0")
-_REVERSE_CUM_LOSS_INTERVAL = 5.0  # секунд между запросами к бирже для cumulative loss
+# Как часто (сек) пересчитывать убыток на тиках. Каждый пересчёт — 1 REST к
+# позициям (реализованный net кэшируется до смены шага цепочки/30с).
+_REVERSE_CUM_LOSS_INTERVAL = float(os.getenv("REVERSE_CUM_LOSS_INTERVAL_SEC") or "1.0")
+_CUM_CAP = CumLossCap(
+    pct=_REVERSE_CUM_LOSS_PCT,
+    fixed_ref_usd=_REVERSE_CUM_REF_DEPOSIT_USD,
+    interval_sec=_REVERSE_CUM_LOSS_INTERVAL,
+)
+# Защита от параллельного закрытия цикла из тика и из on_candle.
+_CUM_CAP_CLOSING: set = set()
 
 # Очередь симуляции исходов отклонённых сигналов.
 # Каждый элемент: {"trade_id": int, "direction": str, "entry": float, "sl": float,
@@ -976,70 +986,24 @@ async def _close_stale_db_trade(
     return pnl_val
 
 
-async def _get_cumulative_loss(symbol: str, order_mgr: OrderManager, tracker: PositionTracker) -> tuple[float, float]:
-    """Возвращает (cumulative_loss, unrealized_loss) для reverse-цепочки.
-
-    cumulative_loss — суммарный убыток цикла (realized legs).
-    unrealized_loss — текущий убыток открытой позиции (unrealized_pnl), если она ниже входа.
-    """
-    cumulative_loss = 0.0
-    unrealized_loss = 0.0
-    try:
-        net_realized, _, _ = await tracker.cycle_realized_net()
-        if net_realized is not None and net_realized < 0:
-            cumulative_loss = abs(net_realized)
-    except Exception:
-        pass
-    try:
-        pos_info = await order_mgr.get_position_info()
-        if pos_info:
-            upnl = float(pos_info.get("unrealized_pnl") or 0.0)
-            if upnl < 0:
-                unrealized_loss = abs(upnl)
-    except Exception:
-        pass
-    return cumulative_loss, unrealized_loss
-
-
 async def _check_reverse_cum_loss(
     symbol: str, order_mgr: OrderManager, tracker: PositionTracker, log
 ) -> bool:
-    """Проверяет cumulative loss cap для reverse-цепочки.
+    """Периодическая проверка cumulative loss cap для reverse-цепочки.
 
-    Returns True, если нужно принудительно закрыть цикл.
+    Returns True, если нужно принудительно закрыть цикл. Вызывается на каждом
+    тике цены (не только на закрытии свечи); троттлинг — _REVERSE_CUM_LOSS_INTERVAL.
     """
-    if _REVERSE_CUM_LOSS_PCT <= 0:
+    if not _CUM_CAP.enabled:
         return False
-    if not tracker.has_open_position() or not tracker.position.is_reverse:
-        _reverse_cum_loss.pop(symbol, None)
-        _reverse_cum_ts.pop(symbol, None)
+    pos = tracker.position
+    # Данные цикла берутся с биржи — для paper-позиций проверка бессмысленна.
+    if pos is not None and (getattr(pos, "mode", None) or order_mgr.cfg.mode) != "live":
         return False
-    now = time.time()
-    last_ts = _reverse_cum_ts.get(symbol, 0.0)
-    if now - last_ts < _REVERSE_CUM_LOSS_INTERVAL:
+    snap = await _CUM_CAP.should_close(symbol, order_mgr, tracker, log)
+    if snap is None:
         return False
-    _reverse_cum_ts[symbol] = now
-
-    ref = _REVERSE_CUM_REF_DEPOSIT_USD
-    if ref <= 0:
-        try:
-            ref = await order_mgr.get_balance("live")
-        except Exception:
-            ref = 0.0
-    if ref <= 0:
-        return False
-
-    cumulative_loss, unrealized_loss = await _get_cumulative_loss(symbol, order_mgr, tracker)
-    cum_loss = cumulative_loss + unrealized_loss
-    threshold = ref * _REVERSE_CUM_LOSS_PCT / 100.0
-    if cum_loss < threshold:
-        return False
-
-    log.error(
-        f"[REVERSE] cumulative loss cap | symbol={symbol} "
-        f"cum={cum_loss:+.4f} threshold={threshold:.4f} ({_REVERSE_CUM_LOSS_PCT}% of {ref:.2f}) "
-        f"realized={cumulative_loss:.4f} unrealized={unrealized_loss:.4f} — force-closing"
-    )
+    log.error(f"[REVERSE] cumulative loss cap | symbol={symbol} {snap.describe()} — force-closing")
     return True
 
 
@@ -1703,9 +1667,7 @@ async def _run_live_or_paper(
             if not reason:
                 reason = _REVERSE_CLOSED_BY_REASON.get(closed_by, "REVERSE_MARKET")
             await tracker.refinalize_cycle_after_flat(reason)
-            if cfg.symbol in _reverse_cum_loss:
-                _reverse_cum_loss.pop(cfg.symbol, None)
-                _reverse_cum_ts.pop(cfg.symbol, None)
+            _CUM_CAP.reset(cfg.symbol)
 
         async def _finalize_skipped_reverse(
             leg_dir: str, reason: str, preset_before, price: float,
@@ -1745,15 +1707,85 @@ async def _run_live_or_paper(
             if preset_before and tracker.position is None:
                 _on_position_closed(preset_before)
             events.info(f"SL_CLOSE | reverse skipped ({reason}); pnl={pnl}")
-            if not tracker.has_open_position() and cfg.symbol in _reverse_cum_loss:
-                _reverse_cum_loss.pop(cfg.symbol, None)
-                _reverse_cum_ts.pop(cfg.symbol, None)
+            if not tracker.has_open_position():
+                _CUM_CAP.reset(cfg.symbol)
             if report:
                 await recovery.report_result(pnl)
+
+        async def _close_cycle_by_cum_loss_cap() -> Optional[float]:
+            """Принудительно закрывает reverse-цикл по cumulative loss cap.
+
+            Раньше cap только снимал TP/SL и помечал позицию закрытой в трекере,
+            а саму позицию на бирже НЕ закрывал. Теперь путь тот же, что у
+            REVERSE_CHAIN_STOP: market reduceOnly → подтверждение флэта → финализация.
+            Возвращает PnL цикла либо None, если позицию закрыть не удалось
+            (тогда трекер не трогаем — попытка повторится на следующем тике).
+            """
+            leg = tracker.position
+            if leg is None or cfg.symbol in _CUM_CAP_CLOSING:
+                return None
+            _CUM_CAP_CLOSING.add(cfg.symbol)
+            try:
+                direction = leg.direction
+                preset_before = getattr(leg, "preset", None)
+                try:
+                    await order_mgr.cancel_all_tp_sl(direction, mode=pos_mode)
+                except Exception as e:
+                    log.debug(f"[REVERSE] cancel before cum-loss close failed: {e}")
+                if is_live_close:
+                    try:
+                        closed = await order_mgr.close_position_market(direction, mode=pos_mode)
+                        order_mgr._invalidate_position_cache()
+                        real_qty = await order_mgr._get_real_position_qty(direction)
+                        if real_qty > DUST_QTY or real_qty < 0:
+                            # Остаток / не удалось проверить — пробуем добить пыль.
+                            closed = await order_mgr.close_dust(direction, mode=pos_mode) or closed
+                            order_mgr._invalidate_position_cache()
+                            real_qty = await order_mgr._get_real_position_qty(direction)
+                        if real_qty > DUST_QTY or real_qty < 0:
+                            log.error(
+                                f"[REVERSE] cum-loss cap close NOT confirmed | symbol={cfg.symbol} "
+                                f"dir={direction} real_qty={real_qty} closed={closed} — will retry"
+                            )
+                            events.error(
+                                f"[REVERSE] cum-loss cap close not confirmed | "
+                                f"symbol={cfg.symbol} — retrying"
+                            )
+                            return None
+                    except Exception as e:
+                        log.error(f"[REVERSE] cum-loss cap force-close failed: {e} — will retry")
+                        return None
+                pnl = await tracker.apply_hit_async(
+                    "SL", current_price, candle_time_ms, closed_by="cum_loss_cap"
+                )
+                if preset_before and tracker.position is None:
+                    _on_position_closed(preset_before)
+                if is_live_close:
+                    await _force_flat_after_reverse(direction, "cum_loss_cap")
+                else:
+                    await tracker.refinalize_cycle_after_flat("REVERSE_CUM_LOSS_CAP")
+                events.warning(
+                    f"[REVERSE] cumulative loss cap hit | symbol={cfg.symbol} "
+                    f"pnl={pnl:.4f} — cycle force-closed"
+                )
+                _CUM_CAP.reset(cfg.symbol)
+                if not bool(getattr(leg, "reject_reason", None)):
+                    await recovery.report_result(pnl)
+                return pnl
+            finally:
+                _CUM_CAP_CLOSING.discard(cfg.symbol)
 
         # «Отклонённая» (rejected) сделка исключается из глобального счётчика серии
         # убытков и recovery — она не должна влиять на риск-контроль (как и на статистику).
         is_rejected = bool(getattr(pos, 'reject_reason', None))
+        if hit == "CUM_LOSS_CAP":
+            # Синтетический hit: суммарный убыток цикла достиг лимита (см. тики и
+            # on_candle). Закрываем цикл на бирже + в трекере и считаем убыток.
+            if pos is not None and tracker.has_open_position():
+                if await _close_cycle_by_cum_loss_cap() is not None:
+                    _consecutive_losses += 1
+                    _last_loss_time = time.time()
+            return
         if hit == "TP1" and not pos.is_recovery:
             events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
             preset_before = getattr(pos, 'preset', None)
@@ -1919,43 +1951,25 @@ async def _run_live_or_paper(
                 )
                 cap_reached = False
                 closed_by = "market"
-                if _REVERSE_CUM_LOSS_PCT > 0:
-                    ref = _REVERSE_CUM_REF_DEPOSIT_USD
-                    if ref <= 0:
-                        try:
-                            ref = await order_mgr.get_balance("live")
-                        except Exception:
-                            ref = 0.0
-                    if ref > 0:
-                        cumulative_loss, unrealized_loss = await _get_cumulative_loss(cfg.symbol, order_mgr, tracker)
-                        cum_loss = cumulative_loss + unrealized_loss
-                        threshold = ref * _REVERSE_CUM_LOSS_PCT / 100.0
-                        if cum_loss >= threshold:
-                            cap_reached = True
-                            closed_by = "cum_loss_cap"
-                            log.error(
-                                f"[REVERSE] cumulative loss cap before open | symbol={cfg.symbol} "
-                                f"cum={cum_loss:+.4f} threshold={threshold:.4f} ({_REVERSE_CUM_LOSS_PCT}% of {ref:.2f}) "
-                                f"step={chain_step} — force-closing"
-                            )
-                if cap_reached:
-                    try:
-                        await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
-                    except Exception as e:
-                        log.debug(f"[REVERSE] cancel before cum-loss close failed: {e}")
-                    pnl = await tracker.apply_hit_async(
-                        "SL", current_price, candle_time_ms, closed_by=closed_by
+                # Cumulative loss cap: ПЕРЕД тем как добавлять новую ногу проверяем,
+                # что суммарный убыток цикла (закрытые ноги + эта нога на своём
+                # виртуальном SL) не достиг лимита. Данные свежие (fresh=True).
+                if _CUM_CAP.enabled and is_live_close:
+                    _cap_snap = await _CUM_CAP.evaluate(
+                        cfg.symbol, order_mgr, tracker, log,
+                        fresh=True, net_realized=NET_REALIZED, unrealized=unrealized,
                     )
-                    if preset_before and tracker.position is None:
-                        _on_position_closed(preset_before)
-                    events.warning(
-                        f"[REVERSE] cumulative loss cap hit | symbol={cfg.symbol} "
-                        f"pnl={pnl:.4f} — force-closed"
-                    )
-                    if cfg.symbol in _reverse_cum_loss:
-                        _reverse_cum_loss.pop(cfg.symbol, None)
-                        _reverse_cum_ts.pop(cfg.symbol, None)
-                    return
+                    if _cap_snap is not None and _cap_snap.hit:
+                        log.error(
+                            f"[REVERSE] cumulative loss cap before open | symbol={cfg.symbol} "
+                            f"{_cap_snap.describe()} step={chain_step} — force-closing"
+                        )
+                        if await _close_cycle_by_cum_loss_cap() is not None:
+                            _consecutive_losses += 1
+                            _last_loss_time = time.time()
+                        # Если закрыть не удалось — новую ногу НЕ открываем; цикл
+                        # повторит попытку на следующем тике (SL-хит ещё актуален).
+                        return
                 reverse_result = await order_mgr.open_reverse_position(
                     original_direction=pos.direction,
                     original_entry=cycle_entry,
@@ -2408,17 +2422,9 @@ async def _run_live_or_paper(
                     cfg.symbol, order_mgr, tracker, log
                 )
                 if should_close:
-                    try:
-                        await order_mgr.cancel_all_tp_sl(tracker.position.direction, mode=cfg.mode)
-                    except Exception as e:
-                        log.debug(f"[REVERSE] cancel before cum-loss close failed: {e}")
-                    pnl = await tracker.apply_hit_async("SL", current_price, candle_time_ms, closed_by="cum_loss_cap")
-                    if hasattr(tracker, "_on_position_closed") and tracker.position is None:
-                        _on_position_closed(getattr(tracker.position, "preset", None) or "")
-                    events.warning(
-                        f"[REVERSE] cumulative loss cap hit | symbol={cfg.symbol} "
-                        f"pnl={pnl:.4f} — force-closed"
-                    )
+                    # Закрытие на бирже + в трекере + статистика — в process_hit
+                    # (тот же путь, что у тикового триггера).
+                    await process_hit("CUM_LOSS_CAP", current_price, candle_time_ms)
                     await reporter.report_heartbeat(current_price)
                     await _simulate_rejected_outcome(current_price, reporter, recovery, log)
                     if tracker.has_open_position():
@@ -2436,8 +2442,6 @@ async def _run_live_or_paper(
                         })
                     else:
                         await reporter.report_position(None)
-                    _reverse_cum_loss.pop(cfg.symbol, None)
-                    _reverse_cum_ts.pop(cfg.symbol, None)
                     return
 
             await reporter.report_heartbeat(current_price)
@@ -2457,9 +2461,7 @@ async def _run_live_or_paper(
                 })
             else:
                 await reporter.report_position(None)
-                if cfg.symbol in _reverse_cum_loss:
-                    _reverse_cum_loss.pop(cfg.symbol, None)
-                    _reverse_cum_ts.pop(cfg.symbol, None)
+                _CUM_CAP.reset(cfg.symbol)
 
             if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
@@ -3769,6 +3771,7 @@ async def _run_live_or_paper(
                 if shutdown_event.is_set():
                     break
                 if not tracker.has_open_position():
+                    _CUM_CAP.reset(cfg.symbol)  # цикл закончился — забываем депозит цикла
                     continue
                 # FIX A: виртуальный TP/SL считается по последней торговой цене,
                 # mark — только fallback (см. _latest_trigger_price).
@@ -3784,12 +3787,21 @@ async def _run_live_or_paper(
                     last_tick_hb_ts = now_ts
                     await reporter.report_heartbeat(current_price)
                 hit = tracker.check(current_price)
+                if not hit and _CUM_CAP.enabled and tracker.position is not None \
+                        and tracker.position.is_reverse:
+                    # Cumulative loss cap на КАЖДОМ тике (а не раз в свечу): суммарный
+                    # убыток цикла пересчитывается постоянно; при достижении лимита
+                    # цикл закрывается немедленно, не дожидаясь закрытия ноги.
+                    if await _check_reverse_cum_loss(cfg.symbol, order_mgr, tracker, log):
+                        await process_hit(
+                            "CUM_LOSS_CAP", current_price, int(time.time() * 1000)
+                        )
+                        continue
                 if hit:
                     candle_time_ms = int(time.time() * 1000)
                     await process_hit(hit, current_price, candle_time_ms)
-                    if not tracker.has_open_position() and cfg.symbol in _reverse_cum_loss:
-                        _reverse_cum_loss.pop(cfg.symbol, None)
-                        _reverse_cum_ts.pop(cfg.symbol, None)
+                    if not tracker.has_open_position():
+                        _CUM_CAP.reset(cfg.symbol)
             except Exception as e:
                 log.debug(f"[TICK_SL_TP] error: {e}")
 
@@ -3841,9 +3853,8 @@ async def _run_live_or_paper(
                 pnl = await tracker.apply_hit_async("TP2", current_price, int(time.time() * 1000))
                 if preset_before and tracker.position is None:
                     _on_position_closed(preset_before)
-                if not tracker.has_open_position() and cfg.symbol in _reverse_cum_loss:
-                    _reverse_cum_loss.pop(cfg.symbol, None)
-                    _reverse_cum_ts.pop(cfg.symbol, None)
+                if not tracker.has_open_position():
+                    _CUM_CAP.reset(cfg.symbol)
                 if trade_id_before and reporter:
                     try:
                         await reporter.patch_trade(trade_id_before, {"exit_reason": "TIME_PROFIT"})

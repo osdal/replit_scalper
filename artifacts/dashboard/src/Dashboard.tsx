@@ -555,6 +555,13 @@ function reasonBadge(reason: string): ReasonBadge {
         title: "reverse chain limit reached — the bot force-closed the position at market",
         className: "bg-amber-600/20 text-amber-300 border-amber-500/40",
       };
+    case "REVERSE_CUM_LOSS_CAP":
+      return {
+        variant: "destructive",
+        label: "Cum-loss cap",
+        title: "cumulative cycle loss reached the % of deposit cap — the bot force-closed the whole reverse cycle at market",
+        className: "bg-red-600/20 text-red-300 border-red-500/40",
+      };
     case "REVERSE":
       return {
         variant: "secondary",
