@@ -122,6 +122,10 @@ ssh oracle-bot "sudo docker compose -f /opt/trading-bot/docker-compose.yml ps"
 сами. **Боты — нет:** в `.env.live` `AUTO_RESTART_BOTS=false` намеренно, чтобы
 реальные деньги не поехали торговать без явного действия оператора.
 
+**Правило по умолчанию:** live-ботов не запускаю автоматически при деплое,
+рестарте стека, редеплое или любом другом изменении кода. Запускаю только по
+явному запросу оператора.
+
 Запустить ботов можно двумя способами:
 
 ```bash
@@ -1054,6 +1058,7 @@ Daily-скрипт регистрируется в планировщике за
 - Не изменялось: независимый лимит просадки по одной позиции в `artifacts/api-server/src/routes/live.ts` (п. 18.11) — он не видит реализованные убытки прошлых ног и может сработать раньше.
 
 ### 2026-10-06
+- **Правило запуска live-ботов**: по умолчанию live-ботов не запускаю автоматически при деплое, рестарте стека, редеплое или любом другом изменении кода. Запускаю только по явному запросу оператора. В `.env.live` `AUTO_RESTART_BOTS=false`, `restart_bots.sh` запускается только по явному вызову.
 - **Reverse cumulative loss cap (live + testnet)**: добавлен непрерывный контроль суммарного убытка reverse-цепочки. Если `реализованный убыток по закрытым ногам + текущий unrealized` >= `REVERSE_CUM_LOSS_PCT`% от депозита — цикл принудительно закрывается моментально, без ожидания закрытия следующей ноги. Референс депозита: `REVERSE_CUM_REF_DEPOSIT_USD=0` → текущий equity автоматически. Частота проверки: раз в 5 секунд на символ. Кэш сбрасывается после любого закрытия позиции. Логи: `[REVERSE] cumulative loss cap hit | symbol=...`. Причина закрытия: `cum_loss_cap`.
 - **Commit/Push**: `124601d` — добавлены env-переменные `REVERSE_CUM_LOSS_PCT`/`REVERSE_CUM_REF_DEPOSIT_USD` в `.env`, `.env.live`, `docker-compose.yml` (оба стека), `bot/config.py` и логика в `bot/main.py` (`_get_cumulative_loss`, `_check_reverse_cum_loss`, проверка в `on_candle` и перед `open_reverse_position`).
 - **Деплой на Oracle VM**: обновлён `docker-compose.yml` на `92.5.180.72`, пересобран и поднят `replit_scalper-api-live`. В контейнере подтверждено: `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`.
