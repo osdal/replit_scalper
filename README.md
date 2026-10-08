@@ -1048,11 +1048,12 @@ Daily-скрипт регистрируется в планировщике за
 
 ### 2026-10-08 (фиксация MAX_POSITIONS=1 на live)
 
-- **Коренная причина:** live-боты проверяли лимит позиций у **неправильного API**. В `docker-compose.yml` у сервиса `api-live` отсутствовали переменные `DASHBOARD_API_URL` и `PORT=5001`. Python-код бота (`bot/recovery_client.py:17`) жёстко прописан дефолт `http://localhost:5000/api` (testnet), поэтому live-боты всегда получали `allowed: true` из testnet API (`max_positions: 10`, 2 открытые позиции) и открывали реальные позиции на Binance без ограничений.
-- **Фикс:** добавлены `DASHBOARD_API_URL=http://localhost:5001/api` и `PORT=5001` в сервис `api-live` в `docker-compose.yml`, образ пересобран (`docker compose build api-live`), контейнер перезапущен.
-- **Проверка:** `http://localhost:5001/api/trading/check` теперь корректно возвращает `{"allowed": false, "reason": "max_positions", "positions_open": N}` при `N >= MAX_POSITIONS=1`.
-- **Текущее состояние:** после перезапуска работают 4 live-бота (`1000PEPEUSDT`, `APTUSDT`, `ARBUSDT`, `BNBUSDT`). `ATOMUSDT` и `FETUSDT` не запущены. Существующие открытые позиции — это pre-fix сделки, они ждут SL/TP. Новые входы корректно блокируются.
-- **Оставшиеся шаги:** (1) очистить фантомные/закрытые позиции в БД; (2) оператор стартует оставшихся ботов из дашборда.
+- **Первичная проблема:** live-боты проверяли лимит позиций у **неправильного API**. В `docker-compose.yml` у сервиса `api-live` отсутствовали переменные `DASHBOARD_API_URL` и `PORT=5001`. Python-код бота (`bot/recovery_client.py:17`) жёстко прописан дефолт `http://localhost:5000/api` (testnet), поэтому live-боты всегда получали `allowed: true` из testnet API (`max_positions: 10`, 2 открытые позиции) и открывали реальные позиции на Binance без ограничений.
+- **Фикс первичной проблемы:** добавлены `DASHBOARD_API_URL=http://localhost:5001/api` и `PORT=5001` в сервис `api-live` в `docker-compose.yml`, образ пересобран (`docker compose build api-live`), контейнер перезапущен.
+- **Вторая проблема (обнаружена экспериментом 2026-10-08):** даже после фикса `DASHBOARD_API_URL` лимит `MAX_POSITIONS=1` всё равно не работал строго. Причина — `bot/recovery_config.yaml:19` `max_positions_ignore_after_hours: 2`. Функция `countOpenPositions()` (`artifacts/api-server/src/routes/trading.ts:100`) исключала из счётчика позиции старше 2 часов. Позиция `BNBUSDT`, открытая в `05:55`, к `08:40` была старше 2 часов и не учитывалась в лимите; счётчик показывал `0`, и `1000PEPEUSDT` получил `allowed: true`, хотя реально открытых позиций было ≥1.
+- **Фикс второй проблемы:** `max_positions_ignore_after_hours: 0` в `bot/recovery_config.yaml`. Теперь `countOpenPositions()` считает **все** открытые позиции без возрастного окна. `/trading/check` корректно возвращает `{"allowed": false, "reason": "max_positions", "positions_open": N}` при `N >= MAX_POSITIONS=1`.
+- **Текущее состояние:** после обоих фиксов работают 2 live-бота (`BNBUSDT`, `1000PEPEUSDT`). Оба имеют по 1 открытой позиции. `/trading/check` возвращает `positions_open: 2`, новые входы заблокированы. `ATOMUSDT`, `APTUSDT`, `ARBUSDT`, `FETUSDT` не запущены.
+- **Оставшиеся шаги:** (1) дождаться закрытия позиций по SL/TP или закрыть их вручную; (2) очистить фантомные/закрытые позиции в БД; (3) оператор стартует оставшихся ботов из дашборда — новые входы теперь корректно блокируются.
 
 ### 2026-10-06 (доработка cumulative loss cap)
 
