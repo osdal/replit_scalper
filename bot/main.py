@@ -1970,6 +1970,22 @@ async def _run_live_or_paper(
                         # Если закрыть не удалось — новую ногу НЕ открываем; цикл
                         # повторит попытку на следующем тике (SL-хит ещё актуален).
                         return
+
+                # Global risk check: max_positions + loss streak pause
+                # Reverse legs also count towards the global position limit.
+                if recovery:
+                    risk_check = await recovery.can_open()
+                    if not risk_check.get("allowed", True):
+                        reason = risk_check.get("reason", "risk_block")
+                        log.warning(
+                            f"[RISK] Reverse leg blocked by server: reason={reason} "
+                            f"positions={risk_check.get('positions_open')} "
+                            f"— skipping reverse chain step {chain_step} for {cfg.symbol}"
+                        )
+                        # Don't open reverse leg; the current leg's SL was hit,
+                        # so the cycle effectively ends here (or retries next tick).
+                        return
+
                 reverse_result = await order_mgr.open_reverse_position(
                     original_direction=pos.direction,
                     original_entry=cycle_entry,
@@ -2974,55 +2990,84 @@ async def _run_live_or_paper(
                     signal_data["tp1_price"] = signal.tp1_price
                     signal_data["tp2_price"] = signal.tp2_price
 
-            result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
-            if result is not None:
-                entry_price, qty = result[0], result[1]
-                signal_data["qty"] = qty
-                signal.entry_price = entry_price
-                if is_recovery and len(result) > 2:
-                    signal.tp1_price = result[2]
-                    signal.tp2_price = result[2]  # no TP2 for recovery
-                await tracker.open_async(
-                    signal, qty=qty,
-                    is_recovery=is_recovery,
-                    recovery_chain_id=chain_id,
-                    reject_reason=open_reject_reason,
-                )
-                # Персистим algoId биржевого backstop, выставленного order_mgr в
-                # entry flow (open_position -> _place_all_orders / recovery branch),
-                # чтобы рестарт не оставил orphan/дубль.
-                if tracker.position is not None:
-                    tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
-                    # Фактическая цена биржевого TP-лимита: нужна реконсилятору,
-                    # чтобы выход по исполненному ордеру не помечался как stale_close.
-                    tracker.position.exchange_tp_price = order_mgr.exchange_tp_price
-                    tracker._save_state()
-                # Релей testnet→live: публикуем вход + уровни стопа/тейков
-                # (только если задан SIGNAL_RELAY_URL; live не публикует).
-                if os.getenv("SIGNAL_RELAY_URL"):
-                    try:
-                        await reporter.publish_relay_signal({
-                            "symbol": cfg.symbol,
-                            "kind": "entry",
-                            "direction": signal.direction,
-                            "entry_price": entry_price,
-                            "sl_price": signal.sl_price,
-                            "tp1_price": signal.tp1_price,
-                            "tp2_price": signal.tp2_price,
-                            "preset": signal.preset,
-                            "source": "testnet",
-                        })
-                    except Exception as e:
-                        log.debug(f"[RELAY] publish failed: {e}")
-                events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
-                if (getattr(signal, 'mode', None) or cfg.mode) == "live":
-                    notifier.send_signal(signal_data)
-                _recent_open_times.append(now)
-                _last_signal_time[cfg.symbol] = now
-                _on_position_opened(signal.preset)
-            elif chain_id is not None:
-                log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
-                await recovery.release(chain_id=chain_id)
+            if open_reject_reason:
+                # Отклонённая позиция: только виртуальная запись в БД, на биржу не лезем
+                log.info(f"[RISK] {open_reject_reason} for {cfg.symbol} — creating VIRTUAL rejected trade (no exchange position)")
+                qty = 0.0
+                if cfg.margin_pct > 0:
+                    margin = round(1000 * cfg.margin_pct / 100, 1)
+                    qty = (margin * cfg.leverage) / signal.entry_price
+                elif cfg.fixed_notional_usd > 0:
+                    qty = (cfg.fixed_notional_usd * cfg.leverage) / signal.entry_price
+                elif cfg.fixed_qty > 0:
+                    qty = cfg.fixed_qty
+                elif cfg.fixed_risk_usd > 0:
+                    qty = cfg.fixed_risk_usd / (signal.entry_price * cfg.sl_pct / 100)
+                else:
+                    from order_manager import calc_quantity
+                    qty = calc_quantity(
+                        balance=1000,
+                        risk_pct=cfg.risk_pct,
+                        sl_pct=cfg.sl_pct,
+                        entry_price=signal.entry_price,
+                        leverage=cfg.leverage,
+                    )
+                trade_id = await reporter.report_rejected(signal_data, open_reject_reason, qty=qty, mode=cfg.mode)
+                log.info(f"[RISK] Virtual rejected trade created: id={trade_id} reason={open_reject_reason}")
+                # Release recovery chain if one was claimed but we're not using it
+                if chain_id is not None:
+                    await recovery.release(chain_id=chain_id)
+            else:
+                # Нормальная позиция: открываем на бирже
+                result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
+                if result is not None:
+                    entry_price, qty = result[0], result[1]
+                    signal_data["qty"] = qty
+                    signal.entry_price = entry_price
+                    if is_recovery and len(result) > 2:
+                        signal.tp1_price = result[2]
+                        signal.tp2_price = result[2]  # no TP2 for recovery
+                    await tracker.open_async(
+                        signal, qty=qty,
+                        is_recovery=is_recovery,
+                        recovery_chain_id=chain_id,
+                        reject_reason=open_reject_reason,
+                    )
+                    # Персистим algoId биржевого backstop, выставленного order_mgr в
+                    # entry flow (open_position -> _place_all_orders / recovery branch),
+                    # чтобы рестарт не оставил orphan/дубль.
+                    if tracker.position is not None:
+                        tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                        # Фактическая цена биржевого TP-лимита: нужна реконсилятору,
+                        # чтобы выход по исполненному ордеру не помечался как stale_close.
+                        tracker.position.exchange_tp_price = order_mgr.exchange_tp_price
+                        tracker._save_state()
+                    # Релей testnet→live: публикуем вход + уровни стопа/тейков
+                    # (только если задан SIGNAL_RELAY_URL; live не публикует).
+                    if os.getenv("SIGNAL_RELAY_URL"):
+                        try:
+                            await reporter.publish_relay_signal({
+                                "symbol": cfg.symbol,
+                                "kind": "entry",
+                                "direction": signal.direction,
+                                "entry_price": entry_price,
+                                "sl_price": signal.sl_price,
+                                "tp1_price": signal.tp1_price,
+                                "tp2_price": signal.tp2_price,
+                                "preset": signal.preset,
+                                "source": "testnet",
+                            })
+                        except Exception as e:
+                            log.debug(f"[RELAY] publish failed: {e}")
+                    events.info(f"POSITION_OPEN | {signal.direction} {cfg.symbol} preset={signal.preset} entry={entry_price} qty={qty} is_recovery={is_recovery} chain_id={chain_id}")
+                    if (getattr(signal, 'mode', None) or cfg.mode) == "live":
+                        notifier.send_signal(signal_data)
+                    _recent_open_times.append(now)
+                    _last_signal_time[cfg.symbol] = now
+                    _on_position_opened(signal.preset)
+                elif chain_id is not None:
+                    log.warning(f"[RECOVERY] Failed to open position for chain #{chain_id} — releasing")
+                    await recovery.release(chain_id=chain_id)
 
         except Exception as e:
             log.error(f"on_candle error: {e}", exc_info=True)
@@ -3252,12 +3297,11 @@ async def _run_live_or_paper(
 
     # Мягкая остановка (Stop в дашборде): API выставляет stop_requested, бот
     # перестаёт открывать новые позиции, доводит текущую по своей логике
-    # (TP/SL/reverse) и выходит, когда станет флэт. По истечении
-    # GRACEFUL_STOP_MAX_MIN минут выходит даже с открытой позицией (биржевые
-    # стоп/TP остаются). Kill-кнопка по-прежнему убивает процесс жёстко.
+    # (TP/SL/reverse) и выходит ТОЛЬКО когда станет флэт. Таймаут удалён:
+    # для live это опасно — позиция остаётся без управления. Kill-кнопка
+    # по-прежнему убивает процесс жёстко.
     _stop_requested = False
     _stop_requested_since = 0.0
-    _graceful_max_sec = max(0.0, float(os.getenv("GRACEFUL_STOP_MAX_MIN", "60") or 60)) * 60.0
 
     async def _graceful_stop_watcher():
         nonlocal _stop_requested, _stop_requested_since
@@ -3273,7 +3317,7 @@ async def _run_live_or_paper(
                 if state and state.get("stop_requested"):
                     _stop_requested = True
                     _stop_requested_since = time.time()
-                    log.info("[STOP] graceful stop requested — new entries disabled; ждём флэт")
+                    log.info("[STOP] graceful stop requested — new entries disabled; waiting for flat")
                     try:
                         events.info("GRACEFUL_STOP_REQUESTED")
                     except Exception:
@@ -3282,23 +3326,8 @@ async def _run_live_or_paper(
                     continue
             if not tracker.has_open_position():
                 log.info("[STOP] graceful stop: position flat — exiting")
-                # Фиксируем причину: без неё карточка в дашборде после выхода
-                # показывает просто «STOPPED», и оператор не видит, что это была
-                # именно мягкая остановка по кнопке Stop (а не падение/автостоп).
                 try:
                     await reporter.report_stop_reason("graceful_stop")
-                except Exception:
-                    pass
-                shutdown_event.set()
-                break
-
-            if _graceful_max_sec > 0 and (time.time() - _stop_requested_since) > _graceful_max_sec:
-                log.warning(
-                    f"[STOP] graceful stop timeout ({int(_graceful_max_sec)}s) — "
-                    f"exiting with position still open"
-                )
-                try:
-                    await reporter.report_stop_reason("graceful_stop_timeout")
                 except Exception:
                     pass
                 shutdown_event.set()
@@ -3342,6 +3371,16 @@ async def _run_live_or_paper(
             if tracker.has_open_position():
                 log.info("[RELAY] position already open — signal skipped")
                 return False, "position_open"
+            # Global risk check: max_positions + loss streak pause
+            if recovery:
+                risk_check = await recovery.can_open()
+                if not risk_check.get("allowed", True):
+                    reason = risk_check.get("reason", "risk_block")
+                    log.warning(
+                        f"[RISK] Relay entry blocked by server: reason={reason} "
+                        f"positions={risk_check.get('positions_open')} — skipped for {cfg.symbol}"
+                    )
+                    return False, f"risk:{reason}"
             tp1 = float(payload.get("tp1_price") or 0) or entry_px
             relay_signal = Signal(
                 direction=direction,

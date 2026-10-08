@@ -127,11 +127,14 @@ services:
       # PORT=5001, DATABASE_PATH=./data/bot_live.db) с override и падает,
       # если файла нет или ключи пустые.
       - BOT_ENV=live
-      # Cumulative loss cap для reverse-цепочки (0 = выкл).
+      - PORT=5001
+      # Cumulative loss cap для reverse-цепочке (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
       # Лимит позиций только для live.
       - MAX_POSITIONS=1
+      # Боты спавнятся внутри этого контейнера -> localhost:5001 = свой API.
+      - DASHBOARD_API_URL=http://localhost:5001/api
 
   dashboard-live:
     <<: *dashboard-base

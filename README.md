@@ -300,7 +300,7 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 ### 3.3 Recovery-ограничения
 
 - `recovery_max_pct` — макс. % депозита под recovery-сделку.
-- `max_positions` — глобальный лимит открытых позиций (через API).
+- `max_positions` — глобальный лимит открытых позиций (через API). Live: `1` (`MAX_POSITIONS=1` в `docker-compose.yml`). Testnet: `10` (`bot/recovery_config.yaml`).
 - `loss_streak_trigger` — после N убытков подряд включается пауза на `loss_pause_signals` сигналов.
 - `daily_loss_limit_usd` — дневной лимит убытков (USDT).
 - `max_free_debt_usd` — потолок долга recovery (новые claim запрещены при превышении).
@@ -837,9 +837,9 @@ llm_provider_retry_delay_sec: 1.0
 recovery_enabled: false     # текущее состояние
 recovery_bonus_pct: 50
 recovery_max_pct: 50
-max_positions: 100000       # глобальный лимит позиций (большое число = без лимита; 0 НЕ работает — сервер падает в дефолт 2)
-loss_streak_trigger: 3      # после N убытков ПОДРЯД (глобально по всем монетам) включается пауза
-loss_pause_signals: 5       # сколько сигналов пропустить, пока активна пауза
+max_positions: 10            # глобальный лимит открытых позиций по всем символам (live: 1 через env, testnet: 10)
+loss_streak_trigger: 35      # Число убытков подряд для паузы (глобально по всем монетам)
+loss_pause_signals: 5        # Сколько сигналов пропустить, пока активна пауза после серии убытков
 pause_timeout_minutes: 120
 max_free_debt_usd: 15.0
 daily_loss_limit_usd: 100000
@@ -1046,6 +1046,14 @@ Daily-скрипт регистрируется в планировщике за
 
 ## 16. Changelog
 
+### 2026-10-08 (фиксация MAX_POSITIONS=1 на live)
+
+- **Коренная причина:** live-боты проверяли лимит позиций у **неправильного API**. В `docker-compose.yml` у сервиса `api-live` отсутствовали переменные `DASHBOARD_API_URL` и `PORT=5001`. Python-код бота (`bot/recovery_client.py:17`) жёстко прописан дефолт `http://localhost:5000/api` (testnet), поэтому live-боты всегда получали `allowed: true` из testnet API (`max_positions: 10`, 2 открытые позиции) и открывали реальные позиции на Binance без ограничений.
+- **Фикс:** добавлены `DASHBOARD_API_URL=http://localhost:5001/api` и `PORT=5001` в сервис `api-live` в `docker-compose.yml`, образ пересобран (`docker compose build api-live`), контейнер перезапущен.
+- **Проверка:** `http://localhost:5001/api/trading/check` теперь корректно возвращает `{"allowed": false, "reason": "max_positions", "positions_open": N}` при `N >= MAX_POSITIONS=1`.
+- **Текущее состояние:** после перезапуска работают 4 live-бота (`1000PEPEUSDT`, `APTUSDT`, `ARBUSDT`, `BNBUSDT`). `ATOMUSDT` и `FETUSDT` не запущены. Существующие открытые позиции — это pre-fix сделки, они ждут SL/TP. Новые входы корректно блокируются.
+- **Оставшиеся шаги:** (1) очистить фантомные/закрытые позиции в БД; (2) оператор стартует оставшихся ботов из дашборда.
+
 ### 2026-10-06 (доработка cumulative loss cap)
 
 - **Закрытие на бирже.** Раньше при срабатывании cap бот только снимал TP/SL и помечал позицию закрытой в трекере — сама позиция на бирже оставалась открытой. Теперь путь тот же, что у `REVERSE_CHAIN_STOP`: market reduceOnly → подтверждение флэта (если не подтверждено — трекер не трогаем и повторяем на следующем тике) → финализация цикла → `recovery.report_result` и счётчик серии убытков.
@@ -1062,6 +1070,13 @@ Daily-скрипт регистрируется в планировщике за
 - **Reverse cumulative loss cap (live + testnet)**: добавлен непрерывный контроль суммарного убытка reverse-цепочки. Если `реализованный убыток по закрытым ногам + текущий unrealized` >= `REVERSE_CUM_LOSS_PCT`% от депозита — цикл принудительно закрывается моментально, без ожидания закрытия следующей ноги. Референс депозита: `REVERSE_CUM_REF_DEPOSIT_USD=0` → текущий equity автоматически. Частота проверки: раз в 5 секунд на символ. Кэш сбрасывается после любого закрытия позиции. Логи: `[REVERSE] cumulative loss cap hit | symbol=...`. Причина закрытия: `cum_loss_cap`.
 - **Commit/Push**: `124601d` — добавлены env-переменные `REVERSE_CUM_LOSS_PCT`/`REVERSE_CUM_REF_DEPOSIT_USD` в `.env`, `.env.live`, `docker-compose.yml` (оба стека), `bot/config.py` и логика в `bot/main.py` (`_get_cumulative_loss`, `_check_reverse_cum_loss`, проверка в `on_candle` и перед `open_reverse_position`).
 - **Деплой на Oracle VM**: обновлён `docker-compose.yml` на `92.5.180.72`, пересобран и поднят `replit_scalper-api-live`. В контейнере подтверждено: `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`.
+- **Фикс graceful stop**: удалён таймаут `GRACEFUL_STOP_MAX_MIN`; бот теперь ждёт флэт естественным путём (SL/TP/reverse), без принудительного выхода с открытой позицией. Kill-кнопка по-прежнему убивает процесс жёстко.
+- **Фикс reverse chain risk check**: перед открытием reverse-ноги добавлена проверка `recovery.can_open()` (`bot/main.py:~1973`). Если `max_positions` достигнут — reverse шаг пропускается, текущая нога закрывается по SL.
+- **Фикс relay risk check**: перед relay-входом добавлена проверка `recovery.can_open()` (`bot/main.py:~3404`). Если `allowed: false` — сигнал отклоняется с причиной `risk:<reason>`.
+- **Фикс rejected trades**: отклонённые позиции больше не вызывают `order_mgr.open_position()` (`bot/main.py:~2977`). Создаётся только виртуальная запись в БД через `reporter.report_rejected()`, на биржу не лезем.
+- **Testnet max_positions**: в `bot/recovery_config.yaml` `max_positions` изменён с `100` на `10` (testnet limit).
+- **Dockerfile**: удалён BuildKit cache mount (`--mount=type=cache`) — не поддерживался в Oracle VM, сборка падала. Обычная установка `npm install -g pnpm && pnpm install --frozen-lockfile`.
+- **Деплой на Oracle VM**: `docker-compose.yml` синхронизирован с локальным (`PORT=5001`, `DASHBOARD_API_URL=http://localhost:5001/api` добавлены в `api-live`), образ пересобран, контейнер перезапущен.
 
 ### 2026-09-19
 - **Strict break-even reverse sizing**: `send_qty = held_plan + Qo`, где `held_plan = Qo*|E-S|/|S-P3_plan|`; точная цель выхода от фактического reverse-филла `P* = E_rev ∓ Qo*|E-E_rev|/Qh` (Qh — фактический net reverse qty) — цикл `REVERSE_BE` закрывается в ≈0 минус комиссии (см. 3.6).

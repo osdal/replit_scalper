@@ -13,9 +13,8 @@ WORKDIR /app
 # монтируем только bot/, data/, logs/ и .env* — без node_modules.
 FROM base AS deps
 COPY . .
-# store-dir на cache-mount: пересборки не качают пакеты заново.
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    npm install -g pnpm && pnpm install --frozen-lockfile --store-dir=/pnpm/store
+# Без BuildKit cache mount — обычная установка (работает везде).
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
 
 # dev-образ: образ deps + Python-зависимости ботов. Они нужны api-серверу,
 # потому что он сам спавнит ботов (кнопка Start в дашборде) для обоих
