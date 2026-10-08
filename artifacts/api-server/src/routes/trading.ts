@@ -16,6 +16,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
 import { stopAllBots } from "./bots";
+import { binanceRequest } from "../grid-orders-lib";
+import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
 
 const router = Router();
 
@@ -44,14 +46,15 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
     };
     const env_max = process.env.MAX_POSITIONS;
     if (env_max !== undefined && env_max !== null && env_max !== "") {
-      cfg.max_positions = Number(env_max);
+      // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
+      cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
     }
     return cfg;
   } catch {
     const def2 = { ...def };
     const env_max = process.env.MAX_POSITIONS;
     if (env_max !== undefined && env_max !== null && env_max !== "") {
-      def2.max_positions = Number(env_max);
+      def2.max_positions = sanitizeMaxPositions(env_max, def2.max_positions);
     }
     return def2;
   }
@@ -93,22 +96,62 @@ async function autoResetStale(control: any, timeoutMinutes: number): Promise<boo
   return false;
 }
 
-// Максимум одновременно открытых позиций: учитываются только ПРИНЯТЫЕ открытые
-// позиции (status != 'rejected'). Отклонённые (is_open=0) не занимают слот и не
-// считаются в лимите. Порог max_positions_ignore_after_hours исключает долго
-// открытые позиции (>N часов) из счёта. Если порог = 0, считаются ВСЕ принятые.
-async function countOpenPositions(ignoreAfterHours: number): Promise<number> {
+// ── Слоты глобального лимита позиций ──────────────────────────────────────────
+// Слот привязан к символу. Занято = символы с открытой ПРИНЯТОЙ позицией в БД
+// (status != 'rejected'; отклонённые виртуальные слот не занимают) ∪ символы с
+// живым резервом (бот уже получил разрешение, но строка в БД ещё не появилась)
+// [∪ символы с позицией на бирже при MAX_POSITIONS_EXCHANGE_CHECK=1].
+// Подробности и обоснование — lib/slotReservations.ts.
+const SLOT_TTL_MS = Math.max(5, Number(process.env.SLOT_RESERVATION_TTL_SEC) || 60) * 1000;
+const slots = new SlotReservations({ ttlMs: SLOT_TTL_MS });
+
+const EXCHANGE_CHECK = ["1", "true", "yes", "on"].includes(
+  String(process.env.MAX_POSITIONS_EXCHANGE_CHECK ?? "").trim().toLowerCase(),
+);
+const EXCHANGE_CACHE_MS = 2000;
+let exchangeCache: { ts: number; symbols: string[] } | null = null;
+
+/** Символы с ненулевой позицией на бирже; null — не удалось получить (тогда опираемся на БД+резервы). */
+async function exchangeOpenSymbols(): Promise<string[] | null> {
+  if (exchangeCache && Date.now() - exchangeCache.ts < EXCHANGE_CACHE_MS) return exchangeCache.symbols;
+  try {
+    const raw = await binanceRequest("GET", "/fapi/v2/positionRisk", {});
+    const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const symbols = new Set<string>();
+    for (const p of list) {
+      const amt = Number(p?.positionAmt ?? 0) || 0;
+      if (Math.abs(amt) < 1e-12) continue;
+      const sym = String(p?.symbol || "").toUpperCase();
+      if (sym) symbols.add(sym);
+    }
+    exchangeCache = { ts: Date.now(), symbols: [...symbols] };
+    return exchangeCache.symbols;
+  } catch (e) {
+    console.warn("[trading] exchange position check failed, falling back to DB+reservations:", String(e));
+    return null;
+  }
+}
+
+/** Символы с открытой принятой позицией в БД. ignoreAfterHours=0 — считать все. */
+async function dbOpenSymbols(ignoreAfterHours: number): Promise<string[]> {
   const cutoff = ignoreAfterHours > 0
     ? new Date(Date.now() - ignoreAfterHours * 60 * 60 * 1000).toISOString()
     : null;
-  const [res] = cutoff
-    ? await db.select({ n: sql<number>`count(*)` })
+  const rows = cutoff
+    ? await db.selectDistinct({ symbol: tradesTable.symbol })
         .from(tradesTable)
         .where(sql`is_open = 1 AND status != 'rejected' AND entry_time >= ${cutoff}`)
-    : await db.select({ n: sql<number>`count(*)` })
+    : await db.selectDistinct({ symbol: tradesTable.symbol })
         .from(tradesTable)
         .where(sql`is_open = 1 AND status != 'rejected'`);
-  return Number(res?.n || 0);
+  return rows.map((r) => String(r.symbol || "").toUpperCase()).filter(Boolean);
+}
+
+async function loadOccupiedSymbols(ignoreAfterHours: number): Promise<string[]> {
+  const fromDb = await dbOpenSymbols(ignoreAfterHours);
+  if (!EXCHANGE_CHECK) return fromDb;
+  const fromExchange = await exchangeOpenSymbols();
+  return fromExchange ? [...new Set([...fromDb, ...fromExchange])] : fromDb;
 }
 
 /** Сумма убытков (pnl < 0) по закрытым сделкам за текущий UTC-день. Положительное число. */
@@ -140,7 +183,13 @@ router.post("/check", async (req, res) => {
   try {
     const cfg = readConfig();
     const control = await getControlRow();
-    const positions = await countOpenPositions(cfg.max_positions_ignore_after_hours);
+    const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+    // reserve=true — занять слот атомарно (вызывается ботом непосредственно перед
+    // ордером). Без флага запрос «информационный» и ничего не занимает.
+    const wantReserve = req.body?.reserve === true && symbol !== "";
+    const { occupied: positions } = await slots.inspect(
+      () => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours),
+    );
     const daily_loss = await getDailyLoss();
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
@@ -177,11 +226,23 @@ router.post("/check", async (req, res) => {
       });
     }
 
-    if (positions >= cfg.max_positions) {
+    // Лимит позиций: проверка и (при reserve) занятие слота — под одной блокировкой,
+    // иначе синхронные сигналы многих ботов видят один и тот же счётчик (race).
+    // Символ, который уже занимает слот (открытая позиция/резерв), лимитом не
+    // блокируется — это добор reverse-ноги в уже открытую цепочку, а не новая позиция.
+    const slot = await slots.check(
+      symbol,
+      cfg.max_positions,
+      () => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours),
+      wantReserve,
+    );
+    if (!slot.allowed) {
       return res.json({
         allowed: false,
         reason: "max_positions",
-        positions_open: positions,
+        positions_open: slot.occupied,
+        positions_reserved: slot.reserved,
+        max_positions: cfg.max_positions,
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
@@ -191,13 +252,35 @@ router.post("/check", async (req, res) => {
     return res.json({
       allowed: true,
       reason: null,
-      positions_open: positions,
+      positions_open: slot.occupied,
+      positions_reserved: slot.reserved,
+      max_positions: cfg.max_positions,
+      own_slot: slot.own,
+      reservation_id: slot.reservationId,
       loss_streak: control.loss_streak,
       paused_remaining: control.paused_remaining,
       daily_loss: Number(daily_loss.toFixed(2)),
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
+  }
+});
+
+/**
+ * POST /api/trading/release
+ * Бот отпускает резерв слота, если ордер так и не был выставлен (open_position
+ * вернул None / исключение). Если бот просто упал — резерв гаснет сам по TTL.
+ * body: { symbol: string, reservation_id?: string }
+ */
+router.post("/release", async (req, res) => {
+  try {
+    const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "symbol required" });
+    const id = req.body?.reservation_id ? String(req.body.reservation_id) : null;
+    const released = await slots.release(symbol, id);
+    return res.json({ released });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
   }
 });
 
@@ -350,12 +433,14 @@ router.get("/status", async (_req, res) => {
       control.loss_streak = 0;
       control.paused_remaining = 0;
     }
-    const positions = await countOpenPositions(cfg.max_positions_ignore_after_hours);
+    const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours));
     const daily_loss = await getDailyLoss();
     const free_debt = await getFreeDebt();
     res.json({
-      positions_open: positions,
+      positions_open: st.open,
+      positions_reserved: st.reserved,
       max_positions: cfg.max_positions,
+      exchange_check: EXCHANGE_CHECK,
       max_positions_ignore_after_hours: cfg.max_positions_ignore_after_hours,
       loss_streak: control.loss_streak,
       loss_streak_trigger: cfg.loss_streak_trigger,

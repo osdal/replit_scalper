@@ -90,6 +90,11 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Резервирование слота лимита позиций (атомарно, против гонки синхронных
+      # сигналов): TTL резерва в секундах и сверка занятых слотов с биржей
+      # (positionRisk; 0 = выкл, включать сначала на testnet).
+      - SLOT_RESERVATION_TTL_SEC=60
+      - MAX_POSITIONS_EXCHANGE_CHECK=0
 
   dashboard-testnet:
     <<: *dashboard-base
@@ -133,6 +138,9 @@ services:
       - REVERSE_CUM_REF_DEPOSIT_USD=0
       # Лимит позиций только для live.
       - MAX_POSITIONS=1
+      # Резервирование слота лимита позиций (см. testnet): TTL резерва и сверка с биржей.
+      - SLOT_RESERVATION_TTL_SEC=60
+      - MAX_POSITIONS_EXCHANGE_CHECK=0
       # Боты спавнятся внутри этого контейнера -> localhost:5001 = свой API.
       - DASHBOARD_API_URL=http://localhost:5001/api
 

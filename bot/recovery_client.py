@@ -57,6 +57,8 @@ class RecoveryClient:
         self.log = logger
         self._session: Optional["aiohttp.ClientSession"] = None
         self.enabled = readRecoveryConfig().get("recovery_enabled", False)
+        # Токен резерва слота (если сервер выдал при can_open(reserve=True)).
+        self._slot_id: Optional[str] = None
         if not self.enabled:
             self.log.debug("[RECOVERY] Disabled via recovery_config.yaml")
 
@@ -180,11 +182,21 @@ class RecoveryClient:
 
     # ── Глобальное управление рисками (лимит позиций + пауза после серии убытков) ──
 
-    async def can_open(self) -> dict:
+    async def can_open(self, reserve: bool = False) -> dict:
         """
         Спрашивает сервер, можно ли открыть новую позицию с учётом
         глобального лимита позиций и паузы после серии убытков.
         Возвращает: {"allowed": bool, "reason": str|None, ...}
+
+        reserve=False — информационная проверка, ничего не занимает.
+        reserve=True  — сервер АТОМАРНО занимает слот под этот символ (резерв живёт
+        ограниченное время). Вызывать непосредственно перед отправкой ордера и,
+        если ордер не ушёл, вернуть слот через release_slot(). Это устраняет
+        гонку «много ботов одновременно видят свободный слот».
+
+        Символ, который уже занимает слот (открытая позиция), лимитом позиций не
+        блокируется: так reverse-нога в открытую цепочку не конкурирует за слот.
+
         При ЛЮБОЙ ошибке/недоступности сервера — fail-closed: не разрешаем
         открытие (иначе боты в момент рестарта API/сетевого сбоя лезут сверх
         лимита и открывают лишние позиции).
@@ -197,11 +209,13 @@ class RecoveryClient:
         try:
             async with session.post(
                 f"{API_URL}/trading/check",
-                json={"symbol": self.symbol},
+                json={"symbol": self.symbol, "reserve": bool(reserve)},
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    if reserve:
+                        self._slot_id = data.get("reservation_id") if data.get("allowed") else None
                     if not data.get("allowed"):
                         reason = data.get("reason", "blocked")
                         self.log.warning(
@@ -216,6 +230,29 @@ class RecoveryClient:
         except Exception as e:
             self.log.error(f"[RISK] trading/check error: {e} — FAIL-CLOSED")
             return fail_closed
+
+    async def release_slot(self) -> None:
+        """
+        Возвращает слот, занятый can_open(reserve=True), если ордер так и не был
+        отправлен. Безопасно вызывать без резерва (no-op). Ошибки не пробрасываются:
+        если запрос не дошёл, резерв сам истечёт по TTL на сервере.
+        """
+        token, self._slot_id = self._slot_id, None
+        if not token:
+            return
+        session = await self._get_session()
+        if session is None:
+            return
+        try:
+            async with session.post(
+                f"{API_URL}/trading/release",
+                json={"symbol": self.symbol, "reservation_id": token},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    self.log.warning(f"[RISK] release_slot failed: status={resp.status} (TTL will free it)")
+        except Exception as e:
+            self.log.warning(f"[RISK] release_slot error: {e} (TTL will free it)")
 
     async def report_result(self, pnl: float, simulated: bool = False) -> None:
         """

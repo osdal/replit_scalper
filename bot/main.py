@@ -1971,8 +1971,11 @@ async def _run_live_or_paper(
                         # повторит попытку на следующем тике (SL-хит ещё актуален).
                         return
 
-                # Global risk check: max_positions + loss streak pause
-                # Reverse legs also count towards the global position limit.
+                # Global risk check: loss streak pause / daily limit.
+                # Reverse-нога — это добор в УЖЕ открытую позицию, а не новая позиция:
+                # символ уже занимает слот, поэтому сервер лимитом max_positions его не
+                # блокирует (свободные слоты остаются для новых входов, а депозит — для
+                # reverse-шагов). Запрос информационный (reserve=False).
                 if recovery:
                     risk_check = await recovery.can_open()
                     if not risk_check.get("allowed", True):
@@ -2990,6 +2993,32 @@ async def _run_live_or_paper(
                     signal_data["tp1_price"] = signal.tp1_price
                     signal_data["tp2_price"] = signal.tp2_price
 
+            # Атомарное резервирование слота ПЕРЕД ордером. Ранний can_open() выше —
+            # информационный (ничего не занимает): до ордера проходят секунды (claim,
+            # guard, расчёт уровней), а сигналы многих ботов синхронны (закрытие свечи),
+            # поэтому без резерва десятки ботов одновременно видели «свободно» и
+            # max_positions превышался. Резерв атомарен на сервере. Если слот только что
+            # забрал другой бот — сигнал становится rejected (виртуальная запись), как и
+            # при раннем отказе. После этой точки до ордера путей отказа нет.
+            slot_reserved = False
+            if recovery and not open_reject_reason:
+                slot_check = await recovery.can_open(reserve=True)
+                if slot_check.get("allowed", True):
+                    slot_reserved = bool(slot_check.get("reservation_id"))
+                else:
+                    late_reason = slot_check.get("reason", "risk_block")
+                    if late_reason == "pause" and (slot_check.get("loss_streak") or 0) > 0:
+                        late_reason = "loss_streak"
+                    open_reject_reason = late_reason
+                    log.info(
+                        f"[RISK] risk:{late_reason} for {cfg.symbol} at slot reservation "
+                        f"(lost the race) — opening as REJECTED "
+                        f"(positions={slot_check.get('positions_open')})"
+                    )
+                    # Долг мог быть захвачен ранним claim(): виртуальная ветка ниже его
+                    # отпустит; состояние recovery для символа сбрасываем.
+                    _recovery_state[cfg.symbol] = {"chainId": None, "debtAmount": 0.0, "is_recovery": False}
+
             if open_reject_reason:
                 # Отклонённая позиция: только виртуальная запись в БД, на биржу не лезем
                 log.info(f"[RISK] {open_reject_reason} for {cfg.symbol} — creating VIRTUAL rejected trade (no exchange position)")
@@ -3019,7 +3048,15 @@ async def _run_live_or_paper(
                     await recovery.release(chain_id=chain_id)
             else:
                 # Нормальная позиция: открываем на бирже
-                result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
+                try:
+                    result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
+                except BaseException:
+                    if slot_reserved:
+                        await recovery.release_slot()
+                    raise
+                if result is None and slot_reserved:
+                    # Ордер не выставлен — возвращаем слот, чтобы он не простаивал до TTL.
+                    await recovery.release_slot()
                 if result is not None:
                     entry_price, qty = result[0], result[1]
                     signal_data["qty"] = qty
@@ -3371,9 +3408,11 @@ async def _run_live_or_paper(
             if tracker.has_open_position():
                 log.info("[RELAY] position already open — signal skipped")
                 return False, "position_open"
-            # Global risk check: max_positions + loss streak pause
+            # Global risk check: max_positions + loss streak pause. reserve=True —
+            # атомарно занимаем слот (релей-входы тоже приходят пачкой по многим ботам).
+            slot_reserved = False
             if recovery:
-                risk_check = await recovery.can_open()
+                risk_check = await recovery.can_open(reserve=True)
                 if not risk_check.get("allowed", True):
                     reason = risk_check.get("reason", "risk_block")
                     log.warning(
@@ -3381,6 +3420,7 @@ async def _run_live_or_paper(
                         f"positions={risk_check.get('positions_open')} — skipped for {cfg.symbol}"
                     )
                     return False, f"risk:{reason}"
+                slot_reserved = bool(risk_check.get("reservation_id"))
             tp1 = float(payload.get("tp1_price") or 0) or entry_px
             relay_signal = Signal(
                 direction=direction,
@@ -3395,9 +3435,16 @@ async def _run_live_or_paper(
                 f"[RELAY] executing | {direction} {cfg.symbol} preset={relay_signal.preset} "
                 f"entry={entry_px} sl={relay_signal.sl_price} tp1={relay_signal.tp1_price}"
             )
-            result = await order_mgr.open_position(relay_signal, mode=cfg.mode)
+            try:
+                result = await order_mgr.open_position(relay_signal, mode=cfg.mode)
+            except BaseException:
+                if slot_reserved:
+                    await recovery.release_slot()
+                raise
             if result is None:
                 log.warning("[RELAY] open_position returned None")
+                if slot_reserved:
+                    await recovery.release_slot()
                 return False, "open_failed"
             entry_price, qty = result[0], result[1]
             await tracker.open_async(relay_signal, qty=qty)

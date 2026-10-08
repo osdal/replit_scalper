@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import yaml from "js-yaml";
+import { upsertYamlScalar } from "../lib/yamlUpsert";
 import { exec } from "child_process";
 import { promisify } from "util";
 
@@ -53,18 +54,48 @@ router.put("/config", (req, res) => {
   try {
     const { recovery_enabled, recovery_bonus_pct, recovery_max_pct } = req.body;
     const current = readRecoveryConfig();
-    const content = yaml.dump({
-      recovery_enabled: !!recovery_enabled,
-      recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
-      // Если фронтенд не передал recovery_max_pct (он сейчас управляется
-      // только через ручное редактирование файла, не через UI) — сохраняем
-      // текущее значение, чтобы не затереть его молча при простом
-      // переключении тоггла recovery_enabled через дашборд.
-      recovery_max_pct: recovery_max_pct !== undefined
-        ? Number(recovery_max_pct)
-        : current.recovery_max_pct,
-    });
-    fs.writeFileSync(CONFIG_PATH, `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`);
+    // Если фронтенд не передал recovery_max_pct (он сейчас управляется только
+    // через ручное редактирование файла, не через UI) — сохраняем текущее значение.
+    const nextMax = recovery_max_pct !== undefined
+      ? Number(recovery_max_pct)
+      : current.recovery_max_pct;
+
+    let text: string | null = null;
+    try {
+      text = fs.readFileSync(CONFIG_PATH, "utf8");
+    } catch {
+      text = null;
+    }
+
+    if (text !== null) {
+      // Обновляем ТОЛЬКО эти три ключа точечно. Раньше файл целиком перезаписывался
+      // тремя ключами: max_positions, loss_streak_trigger, daily_loss_limit_usd,
+      // max_positions_ignore_after_hours и все комментарии пропадали, а сервер
+      // падал на дефолты (max_positions=2, ignore_after_hours=2, daily_loss=8).
+      text = upsertYamlScalar(text, "recovery_enabled", !!recovery_enabled);
+      text = upsertYamlScalar(text, "recovery_bonus_pct", Number(recovery_bonus_pct) || 0);
+      text = upsertYamlScalar(text, "recovery_max_pct", nextMax);
+    } else {
+      // Файла нет — создаём минимальный (прежнее поведение).
+      const content = yaml.dump({
+        recovery_enabled: !!recovery_enabled,
+        recovery_bonus_pct: Number(recovery_bonus_pct) || 0,
+        recovery_max_pct: nextMax,
+      });
+      text = `# Общий конфиг режима компенсации убытков (recovery mode)\n# Применяется ко всем ботам одновременно через API сервер\n\n${content}`;
+    }
+
+    // Атомарная запись: бот и сервер читают файл на каждом запросе; при обычном
+    // writeFileSync (truncate + write) читатель мог увидеть пустой файл и откатиться
+    // на дефолты. tmp + rename подменяет файл целиком.
+    const tmp = `${CONFIG_PATH}.tmp-${process.pid}`;
+    try {
+      fs.writeFileSync(tmp, text);
+      fs.renameSync(tmp, CONFIG_PATH);
+    } catch {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      fs.writeFileSync(CONFIG_PATH, text); // например, если файл смонтирован как отдельный bind-mount
+    }
     res.json(readRecoveryConfig());
   } catch (e) {
     res.status(500).json({ error: String(e) });
