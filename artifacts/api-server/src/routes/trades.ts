@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
-import { eq, desc, sql } from "drizzle-orm";
+import { and, eq, desc, sql, isNull } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -168,12 +168,30 @@ router.get("/", async (req, res) => {
     const symbol = req.query.symbol as string | undefined;
     const limit  = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
-    let query = db.select().from(tradesTable).orderBy(desc(tradesTable.entry_time)).limit(limit).offset(offset);
-    if (symbol) query = query.where(eq(tradesTable.symbol, symbol.toUpperCase())) as typeof query;
+
+    // Все условия — ОДНИМ where(and(...)), а не цепочкой where().
+    // Проверено на боевой БД: два .where() подряд в drizzle-orm 0.45.2 теряют
+    // ПЕРВОЕ условие. Запрос /trades?symbol=HBARUSDT&limit=10 возвращал сделки
+    // всех символов, и каждый бот, спрашивая свои, получал чужие открытые сделки
+    // и закрывал их ценой СВОЕГО символа (HBAR=0.09 <- RENDER=2.09, убыток -126).
+    // Второе условие — isNull(reject_reason), а НЕ eq(col, null): последнее
+    // генерирует SQL `= NULL`, а в SQL сравнение с NULL всегда ложно и фильтр
+    // молча скрывал ВСЕ сделки (массив пустой при корректном total).
+    const conditions: any[] = [isNull(tradesTable.reject_reason)];
+    if (symbol) conditions.push(eq(tradesTable.symbol, symbol.toUpperCase()));
+
+    const query = db.select().from(tradesTable)
+      .where(and(...conditions))
+      .orderBy(desc(tradesTable.entry_time))
+      .limit(limit)
+      .offset(offset);
+
     const trades = await query;
     const [{ total }] = await db.select({ total: sql<number>`count(*)` }).from(tradesTable);
     res.json({ trades, total });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // PATCH /trades/:id — обновить сделку (закрытие, синхронизация PnL)

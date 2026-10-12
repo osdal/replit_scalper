@@ -18,11 +18,11 @@
 #  Сборка выполняется один раз: docker compose build (или docker compose up -d --build).
 #
 #  Запуск:
-#    docker-compose up -d                 # оба стека
-#    docker-compose up -d api-testnet dashboard-testnet     # только testnet
-#    docker-compose up -d api-live dashboard-live           # только live
-#    docker-compose logs -f api-live
-#    docker-compose down                  # остановить оба
+#    docker compose up -d                 # оба стека
+#    docker compose up -d api-testnet dashboard-testnet     # только testnet
+#    docker compose up -d api-live dashboard-live           # только live
+#    docker compose logs -f api-live
+#    docker compose down                  # остановить оба
 #
 #  restart: unless-stopped — контейнеры поднимаются сами после ребута хоста
 #  и после «простоя» инстанса в Oracle Cloud (бесплатный A1 могут остановить).
@@ -90,11 +90,7 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
-      # Резервирование слота лимита позиций (атомарно, против гонки синхронных
-      # сигналов): TTL резерва в секундах и сверка занятых слотов с биржей
-      # (positionRisk; 0 = выкл, включать сначала на testnet).
-      - SLOT_RESERVATION_TTL_SEC=60
-      - MAX_POSITIONS_EXCHANGE_CHECK=0
+      # Лимит позиций только для live.
 
   dashboard-testnet:
     <<: *dashboard-base
@@ -133,16 +129,12 @@ services:
       # если файла нет или ключи пустые.
       - BOT_ENV=live
       - PORT=5001
-      # Cumulative loss cap для reverse-цепочке (0 = выкл).
+      # Лимит позиций для live: 3 (из .env.live)
+      - MAX_POSITIONS=3
+      - DASHBOARD_API_URL=http://localhost:5001/api
+      # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
-      # Лимит позиций только для live.
-      - MAX_POSITIONS=1
-      # Резервирование слота лимита позиций (см. testnet): TTL резерва и сверка с биржей.
-      - SLOT_RESERVATION_TTL_SEC=60
-      - MAX_POSITIONS_EXCHANGE_CHECK=0
-      # Боты спавнятся внутри этого контейнера -> localhost:5001 = свой API.
-      - DASHBOARD_API_URL=http://localhost:5001/api
 
   dashboard-live:
     <<: *dashboard-base

@@ -229,7 +229,7 @@ function llmProviderBadges(status: LLMStatus) {
 
 // ── Bot Card ─────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete }: { bot: Bot; onToggle: () => void; onKill: () => void; onSaveConfig: (symbol: string, cfg: Record<string, unknown>) => void; isToggling: boolean; onDelete: (symbol: string) => void }) {
+function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, trades }: { bot: Bot; onToggle: () => void; onKill: () => void; onSaveConfig: (symbol: string, cfg: Record<string, unknown>) => void; isToggling: boolean; onDelete: (symbol: string) => void; trades: Trade[] }) {
   const [showCfg, setShowCfg] = useState(false);
   const [cfg, setCfg] = useState<Record<string, string>>({});
 
@@ -368,7 +368,7 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete }: 
           ))}
         </div>
 
-        {pos ? (
+        {pos && !trades.some(t => t.symbol === bot.symbol && t.entry_price === pos.entry_price && t.status === "rejected") ? (
           <div className="rounded-lg bg-zinc-800 p-3 space-y-2 mt-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-zinc-400">OPEN POSITION</span>
@@ -836,6 +836,10 @@ const STORAGE_KEY = "backtest_result";
 export default function Dashboard() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
+  // Сырой список ВСЕХ сделок (включая rejected) — нужен BotCard, чтобы скрыть
+  // позицию, открытую отклонённым сигналом. В `trades` rejected уже отфильтрованы,
+  // поэтому проверка по нему никогда бы не нашла отклонённую сделку.
+  const [allTradesRaw, setAllTradesRaw] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
   const [reverseCounts, setReverseCounts] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
@@ -853,7 +857,9 @@ export default function Dashboard() {
   const symbols = [...new Set([...bots.map(b => b.symbol), ...trades.map(t => t.symbol)])]
     .filter(Boolean)
     .sort();
-  const filteredTrades = selectedSymbol === "all" ? trades : trades.filter(t => t.symbol === selectedSymbol);
+  const filteredTrades = selectedSymbol === "all"
+    ? trades.filter((t) => t.status !== "rejected")
+    : trades.filter((t) => t.status !== "rejected" && t.symbol === selectedSymbol);
   const IS_LIVE = import.meta.env.VITE_THEME === "live";
   // Inline backtest state
   const [btSymbol, setBtSymbol] = useState("BTCUSDT");
@@ -915,9 +921,13 @@ export default function Dashboard() {
       }
       if (t.status === "fulfilled") {
         const allTrades = Array.isArray(t.value?.trades) ? t.value.trades : [];
+        setAllTradesRaw(allTrades);
         // Internal-only "skip:*" records (loss streak filters, cycle/preset limits, cooldown)
-        // clutter the trades table with an endless "cancelled" stream — hide them from the UI.
-        setTrades(allTrades.filter((tr: Trade) => !String(tr.reject_reason || "").startsWith("skip:")));
+        // and rejected trades are hidden from UI to keep tables clean.
+        setTrades(allTrades.filter((tr: Trade) => 
+          !String(tr.reject_reason || "").startsWith("skip:") && 
+          tr.status !== "rejected"
+        ));
       } else {
         // Раньше это молча проглатывалось, и вкладка Trades выглядела пустой
         // при живом API — теперь причина видна в консоли браузера.
@@ -1451,7 +1461,7 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {bots.map((bot) => (
-                  <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} onKill={() => handleKill(bot)} onSaveConfig={handleSaveConfig} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} />
+                   <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} onKill={() => handleKill(bot)} onSaveConfig={handleSaveConfig} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} trades={allTradesRaw} />
                 ))}
               </div>
             )}

@@ -21,8 +21,29 @@ _CONFIG_PATH = os.getenv("RECOVERY_CONFIG_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_config.yaml"))
 
 
+def _env_max_positions() -> "int | None":
+    """MAX_POSITIONS из окружения как int, либо None если не задан/не число/пустой.
+
+    Раньше здесь стоял `int(env_max)` без защиты: при пустой строке или нечисловом
+    значении int() бросал ValueError — причём в except-ветке тоже, то есть уже
+    непойманно, и readRecoveryConfig() падала на старте бота.
+    """
+    raw = os.getenv("MAX_POSITIONS")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def readRecoveryConfig() -> dict:
     """Читает recovery_config.yaml при каждом вызове (без кэша)."""
+    env_max = _env_max_positions()
     try:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             import yaml as _yaml
@@ -37,17 +58,15 @@ def readRecoveryConfig() -> dict:
             "max_free_debt_usd": float(raw.get("max_free_debt_usd", 15.0)),
             "daily_loss_limit_usd": float(raw.get("daily_loss_limit_usd", 8.0)),
         }
-        env_max = os.getenv("MAX_POSITIONS")
         if env_max is not None:
-            cfg["max_positions"] = int(env_max)
+            cfg["max_positions"] = env_max
         return cfg
     except Exception:
         cfg = {"recovery_enabled": False, "recovery_bonus_pct": 0, "recovery_max_pct": 50.0,
                 "max_positions": 2, "loss_streak_trigger": 2, "loss_pause_signals": 3,
                 "max_free_debt_usd": 15.0, "daily_loss_limit_usd": 8.0}
-        env_max = os.getenv("MAX_POSITIONS")
         if env_max is not None:
-            cfg["max_positions"] = int(env_max)
+            cfg["max_positions"] = env_max
         return cfg
 
 
