@@ -1,0 +1,45 @@
+# Line-ending normalization.
+#
+# The repo is developed on Windows but everything is executed inside Linux
+# containers. core.autocrlf is a LOCAL setting, so a checkout on another
+# machine could hand tools/deploy_api.sh CRLF endings and break the shell
+# (the same reason bash/WSL here cannot exec ssh.exe reliably). Attributes make
+# the behaviour deterministic for every clone, regardless of local config.
+#
+# Rule of thumb: LF for anything executed on Linux, CRLF for Windows scripts.
+
+* text=auto
+
+# Executed inside Linux containers: always LF.
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.py    text eol=lf
+*.pl    text eol=lf
+
+# Config the containers parse: LF.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.conf  text eol=lf
+*.env   text eol=lf
+
+# Windows-only scripts: CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Real binaries: git must never touch them. Note .gitignore already excludes
+# *.pem / *.key / *.db, this is belt and braces for anything tracked anyway.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif    binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.so    binary
+
+# Docs: LF everywhere, no surprises in diffs.
+*.md    text eol=lf
