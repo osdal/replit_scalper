@@ -1707,8 +1707,7 @@ async def _run_live_or_paper(
             if preset_before and tracker.position is None:
                 _on_position_closed(preset_before)
             events.info(f"SL_CLOSE | reverse skipped ({reason}); pnl={pnl}")
-            if not tracker.has_open_position():
-                _CUM_CAP.reset(cfg.symbol)
+            # Не сбрасываем _CUM_CAP здесь - цепочка может продолжиться на следующем реверсе
             if report:
                 await recovery.report_result(pnl)
 
@@ -2480,7 +2479,8 @@ async def _run_live_or_paper(
                 })
             else:
                 await reporter.report_position(None)
-                _CUM_CAP.reset(cfg.symbol)
+                # Не сбрасываем _CUM_CAP здесь - цепочка может продолжиться на следующем реверсе
+                # _CUM_CAP.reset(cfg.symbol)  # УДАЛЕНО: сброс только при полном флэте цепочки
 
             if candle_count[0] % HEARTBEAT_CANDLES == 0:
                 htf_trend_now = get_htf_trend_latest(htf_buffer) if cfg.htf_enabled else "off"
@@ -3856,9 +3856,12 @@ async def _run_live_or_paper(
                     price_event.clear()
                 if shutdown_event.is_set():
                     break
-                if not tracker.has_open_position():
-                    _CUM_CAP.reset(cfg.symbol)  # цикл закончился — забываем депозит цикла
-                    continue
+if not tracker.has_open_position():
+                # Позиция закрылась между тиками - цепочка закончилась
+                if _CUM_CAP.is_in_chain(cfg.symbol):
+                    _CUM_CAP.mark_chain_ended(cfg.symbol)
+                    _CUM_CAP.reset(cfg.symbol)
+                continue
                 # FIX A: виртуальный TP/SL считается по последней торговой цене,
                 # mark — только fallback (см. _latest_trigger_price).
                 current_price, _price_src = await _latest_trigger_price()
@@ -3887,7 +3890,10 @@ async def _run_live_or_paper(
                     candle_time_ms = int(time.time() * 1000)
                     await process_hit(hit, current_price, candle_time_ms)
                     if not tracker.has_open_position():
-                        _CUM_CAP.reset(cfg.symbol)
+                        # Позиция закрылась хитом - цепочка может быть закончена
+                        if _CUM_CAP.is_in_chain(cfg.symbol):
+                            _CUM_CAP.mark_chain_ended(cfg.symbol)
+                            _CUM_CAP.reset(cfg.symbol)
             except Exception as e:
                 log.debug(f"[TICK_SL_TP] error: {e}")
 
@@ -3940,7 +3946,10 @@ async def _run_live_or_paper(
                 if preset_before and tracker.position is None:
                     _on_position_closed(preset_before)
                 if not tracker.has_open_position():
-                    _CUM_CAP.reset(cfg.symbol)
+                    # Позиция закрылась тайм-профитом - цепочка может быть закончена
+                    if _CUM_CAP.is_in_chain(cfg.symbol):
+                        _CUM_CAP.mark_chain_ended(cfg.symbol)
+                        _CUM_CAP.reset(cfg.symbol)
                 if trade_id_before and reporter:
                     try:
                         await reporter.patch_trade(trade_id_before, {"exit_reason": "TIME_PROFIT"})

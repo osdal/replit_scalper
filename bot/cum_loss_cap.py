@@ -73,21 +73,29 @@ class CumLossCap:
         self.realized_ttl_sec = float(realized_ttl_sec)
         self.warn_interval_sec = float(warn_interval_sec)
         self._clock = clock
-        self._ref: dict[str, float] = {}
+        self._ref: dict[str, float] = {}           # fixed deposit per symbol (set once per chain)
         self._ts: dict[str, float] = {}
         self._realized: dict[str, tuple[int, float, float]] = {}  # step, ts, net
         self._warn_ts: dict[str, float] = {}
+        self._initialized: dict[str, bool] = {}    # whether deposit was fixed for this symbol
+        self._in_reverse_chain: dict[str, bool] = {}  # whether reverse chain is active
 
     @property
     def enabled(self) -> bool:
         return self.pct > 0
 
-    def reset(self, symbol: str) -> None:
-        """Сбросить состояние цикла (вызывать при флэте / новом цикле)."""
-        self._ref.pop(symbol, None)
-        self._ts.pop(symbol, None)
-        self._realized.pop(symbol, None)
-        self._warn_ts.pop(symbol, None)
+def mark_chain_ended(self, symbol: str) -> None:
+        """Отметить, что реверс-цепочка полностью завершена (флэт).
+        Вызывать ТОЛЬКО когда позиция полностью закрыта и больше нет реверс-ног.
+        """
+        self._in_reverse_chain.pop(symbol, None)
+        # НЕ сбрасываем _initialized и _ref здесь - они нужны для истории,
+        # reset() вызывается отдельно при полном флэте.
+    
+    def is_in_chain(self, symbol: str) -> bool:
+        """Проверка, активна ли реверс-цепочка для символа."""
+        return self._in_reverse_chain.get(symbol, False)
+        self._in_reverse_chain.pop(symbol, None)
 
     def _warn(self, symbol: str, log, msg: str) -> None:
         now = self._clock()
@@ -96,7 +104,7 @@ class CumLossCap:
         self._warn_ts[symbol] = now
         log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
 
-    async def evaluate(
+async def evaluate(
         self,
         symbol: str,
         order_mgr,
@@ -116,6 +124,10 @@ class CumLossCap:
         pos = tracker.position
         step = int(getattr(pos, "reverse_chain_step", 0) or 0) if pos is not None else 0
         now = self._clock()
+
+        # Помечаем, что реверс-цепочка активна, если есть реверс-позиция
+        if pos is not None and getattr(pos, "is_reverse", False):
+            self._in_reverse_chain[symbol] = True
 
         # --- реализованный net цикла ---------------------------------------
         if net_realized is None:
@@ -147,24 +159,31 @@ class CumLossCap:
                 return None
         unrealized = float(unrealized)
 
-        # --- депозит цикла (фиксируем один раз) -------------------------------
-        ref = self.fixed_ref_usd
-        if ref <= 0:
-            ref = self._ref.get(symbol, 0.0)
+        # --- депозит цикла (фиксируем ОДИН РАЗ на старте цепочки) ------------
+        # ref фиксируется ОДИН РАЗ при открытии ПЕРВОЙ реверс-ноги
+        # и НИКОГДА не пересчитывается до полного закрытия цепочки (reset)
+        if not self._initialized.get(symbol, False):
+            ref = self.fixed_ref_usd
             if ref <= 0:
-                try:
-                    wallet = float(await order_mgr.get_balance("live", force=True))
-                except Exception as e:  # noqa: BLE001
-                    self._warn(symbol, log, f"balance unavailable: {e!r}")
-                    return None
-                if wallet <= 0:
-                    self._warn(symbol, log, f"balance invalid: {wallet}")
-                    return None
-                # wallet сейчас = депозит на старте цикла + net реализованного
-                ref = wallet - net_realized
+                ref = self._ref.get(symbol, 0.0)
                 if ref <= 0:
-                    ref = wallet
-                self._ref[symbol] = ref
+                    try:
+                        wallet = float(await order_mgr.get_balance("live", force=True))
+                    except Exception as e:  # noqa: BLE001
+                        self._warn(symbol, log, f"balance unavailable: {e!r}")
+                        return None
+                    if wallet <= 0:
+                        self._warn(symbol, log, f"balance invalid: {wallet}")
+                        return None
+                    # wallet сейчас = депозит на старте цикла + net реализованного
+                    ref = wallet - net_realized
+                    if ref <= 0:
+                        ref = wallet
+                    self._ref[symbol] = ref
+            self._initialized[symbol] = True
+            self._in_reverse_chain[symbol] = True
+        else:
+            ref = self._ref[symbol]
 
         return CapSnapshot(
             realized_pnl=net_realized,
@@ -186,7 +205,11 @@ class CumLossCap:
         pos = tracker.position
         if (not tracker.has_open_position() or pos is None
                 or not getattr(pos, "is_reverse", False)):
-            self.reset(symbol)
+            # Нет открытой реверс-позиции - цепочка могла закончиться
+            if self._in_reverse_chain.get(symbol, False):
+                # Цепочка была активна, но теперь позиции нет - цепочка закончилась
+                self._in_reverse_chain.pop(symbol, None)
+                self.reset(symbol)
             return None
         now = self._clock()
         if now - self._ts.get(symbol, -1e18) < self.interval_sec:
