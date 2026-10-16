@@ -45,11 +45,13 @@ class FakeOrderMgr:
         self.wallet = wallet
         self.upnl = upnl
         self.upnl_calls = 0
+        self.fresh_args = []
         self.balance_calls = 0
         self.balance_raises = False
 
     async def get_unrealized_pnl(self, fresh=False):
         self.upnl_calls += 1
+        self.fresh_args.append(fresh)
         return self.upnl
 
     async def get_balance(self, mode=None, force=False):
@@ -76,6 +78,7 @@ def make_cap(**kw):
     clk = Clock()
     kw.setdefault("pct", 5.0)
     kw.setdefault("interval_sec", 1.0)
+    kw.setdefault("min_interval_sec", 0.0)  # в тестах проверяем сам троттлинг, а не пол
     return CumLossCap(clock=clk, **kw), clk
 
 
@@ -278,3 +281,23 @@ def test_tracker_labels_for_cum_loss_cap():
     assert cls._classify_reverse_exit(stub, None, 1.0, "SL", closed_by="chain_stop") \
         == "REVERSE_CHAIN_STOP"
     assert cls._reverse_close_reason(stub, "chain_stop") == "chain_max"
+
+
+# --------------------------------------------------------------------------
+# Нагрузка на Binance: пол интервала и кэш позиций на периодических проверках
+# --------------------------------------------------------------------------
+def test_default_interval_floor_protects_binance_weight():
+    """Хост-main передаёт interval=1.0 — пол по умолчанию не даёт опрашивать чаще MIN_INTERVAL_SEC."""
+    import cum_loss_cap as m
+    cap = CumLossCap(pct=5.0, interval_sec=1.0)   # так создаёт main.py
+    assert cap.interval_sec == m.MIN_INTERVAL_SEC >= 5.0
+    assert CumLossCap(pct=5.0, interval_sec=30.0).interval_sec == 30.0   # больший интервал не трогаем
+
+
+def test_periodic_check_uses_position_cache_but_before_open_is_fresh(log):
+    cap, _ = make_cap()
+    om, tr = FakeOrderMgr(wallet=38.6, upnl=-0.1), FakeTracker(net_realized=-1.4, step=3)
+    run(cap.should_close("X", om, tr, log))          # периодическая проверка
+    assert om.fresh_args == [False]                   # без сброса кэша позиций
+    run(cap.evaluate("X", om, tr, log, fresh=True))   # путь «перед открытием ноги»
+    assert om.fresh_args == [False, True]

@@ -21,11 +21,18 @@
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 EPS = 1e-9
+
+# Нижняя граница интервала периодической проверки (сек). Каждая проверка — это
+# REST positionRisk (weight 5) на КАЖДОГО бота в reverse-цепочке; при 1 с это
+# 300 weight/мин на бота, а лимит Binance Futures — общий на IP (2400/мин на все
+# процессы). Переопределяется переменной CUM_CAP_MIN_INTERVAL_SEC.
+MIN_INTERVAL_SEC = float(os.getenv("CUM_CAP_MIN_INTERVAL_SEC") or "10")
 
 
 @dataclass
@@ -63,13 +70,15 @@ class CumLossCap:
         pct: float,
         fixed_ref_usd: float = 0.0,
         interval_sec: float = 1.0,
+        min_interval_sec: Optional[float] = None,
         realized_ttl_sec: float = 30.0,
         warn_interval_sec: float = 60.0,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.pct = float(pct or 0.0)
         self.fixed_ref_usd = float(fixed_ref_usd or 0.0)
-        self.interval_sec = float(interval_sec)
+        floor = MIN_INTERVAL_SEC if min_interval_sec is None else float(min_interval_sec)
+        self.interval_sec = max(float(interval_sec), floor)
         self.realized_ttl_sec = float(realized_ttl_sec)
         self.warn_interval_sec = float(warn_interval_sec)
         self._clock = clock
@@ -94,27 +103,24 @@ class CumLossCap:
         self._warn_ts.pop(symbol, None)
 
 
-def mark_chain_ended(self, symbol: str) -> None:
-    """Отметить, что реверс-цепочка полностью завершена (флэт).
-    Вызывать ТОЛЬКО когда позиция полностью закрыта и больше нет реверс-ног.
-    """
-    self._in_reverse_chain.pop(symbol, None)
-    # НЕ сбрасываем _initialized и _ref здесь - они нужны для истории,
-    # reset() вызывается отдельно при полном флэте.
+    def mark_chain_ended(self, symbol: str) -> None:
+        """Отметить, что реверс-цепочка полностью завершена (флэт).
+        Вызывать ТОЛЬКО когда позиция полностью закрыта и больше нет реверс-ног.
+        """
+        self._in_reverse_chain.pop(symbol, None)
+        # НЕ сбрасываем _initialized и _ref здесь - reset() вызывается отдельно
+        # при полном флэте.
 
+    def is_in_chain(self, symbol: str) -> bool:
+        """Проверка, активна ли реверс-цепочка для символа."""
+        return self._in_reverse_chain.get(symbol, False)
 
-def is_in_chain(self, symbol: str) -> bool:
-    """Проверка, активна ли реверс-цепочка для символа."""
-    return self._in_reverse_chain.get(symbol, False)
-
-
-def _warn(self, symbol: str, log, msg: str) -> None:
-    now = self._clock()
-    if now - self._warn_ts.get(symbol, -1e18) < self.warn_interval_sec:
-        return
-    self._warn_ts[symbol] = now
-    log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
-
+    def _warn(self, symbol: str, log, msg: str) -> None:
+        now = self._clock()
+        if now - self._warn_ts.get(symbol, -1e18) < self.warn_interval_sec:
+            return
+        self._warn_ts[symbol] = now
+        log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
 
     async def evaluate(
         self,
@@ -162,7 +168,7 @@ def _warn(self, symbol: str, log, msg: str) -> None:
         # --- плавающий результат -------------------------------------------
         if unrealized is None:
             try:
-                unrealized = await order_mgr.get_unrealized_pnl(fresh=True)
+                unrealized = await order_mgr.get_unrealized_pnl(fresh=fresh)
             except Exception as e:  # noqa: BLE001
                 self._warn(symbol, log, f"unrealized unavailable: {e!r}")
                 return None
@@ -176,7 +182,9 @@ def _warn(self, symbol: str, log, msg: str) -> None:
         # и НИКОГДА не пересчитывается до полного закрытия цепочки (reset)
         if not self._initialized.get(symbol, False):
             ref = self.fixed_ref_usd
-            if ref <= 0:
+            if ref > 0:
+                self._ref[symbol] = ref   # иначе второй вызов упадёт с KeyError
+            else:
                 ref = self._ref.get(symbol, 0.0)
                 if ref <= 0:
                     try:
@@ -195,7 +203,7 @@ def _warn(self, symbol: str, log, msg: str) -> None:
             self._initialized[symbol] = True
             self._in_reverse_chain[symbol] = True
         else:
-            ref = self._ref[symbol]
+            ref = self._ref.get(symbol, 0.0) or self.fixed_ref_usd
 
         return CapSnapshot(
             realized_pnl=net_realized,

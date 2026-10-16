@@ -3856,12 +3856,12 @@ async def _run_live_or_paper(
                     price_event.clear()
                 if shutdown_event.is_set():
                     break
-if not tracker.has_open_position():
-                # Позиция закрылась между тиками - цепочка закончилась
-                if _CUM_CAP.is_in_chain(cfg.symbol):
-                    _CUM_CAP.mark_chain_ended(cfg.symbol)
-                    _CUM_CAP.reset(cfg.symbol)
-                continue
+                if not tracker.has_open_position():
+                    # Позиция закрылась между тиками - цепочка закончилась
+                    if _CUM_CAP.is_in_chain(cfg.symbol):
+                        _CUM_CAP.mark_chain_ended(cfg.symbol)
+                        _CUM_CAP.reset(cfg.symbol)
+                    continue
                 # FIX A: виртуальный TP/SL считается по последней торговой цене,
                 # mark — только fallback (см. _latest_trigger_price).
                 current_price, _price_src = await _latest_trigger_price()
