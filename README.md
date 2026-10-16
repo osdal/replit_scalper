@@ -1530,3 +1530,44 @@ docker-compose down
   - `resetStaleRunningBots` делает **один** перебор процессов вместо перебора на каждого бота (было ≈4с × 40 ≈ 3 минуты простоя, из-за чего `app.listen` не открывался);
   - интерпретатор python резолвится один раз и кэшируется в `cachedPythonCmd` (`hasDeps` = `execSync` с импортом `pandas`+`binance` больше не выполняется на каждый старт бота);
   - если перебор процессов не удался (`tryFindAllBotPids` вернул `null`), stale-ресет пропускается, чтобы не пометить живых ботов остановленными.
+
+### 19. Исправления 2026-10-16 (Oracle live: сделки не открывались, боты не запускались)
+
+#### 19.1 `bot/cum_loss_cap.py` — отсутствовал метод `reset`
+- **Симптом:** Боты запускались, но при закрытии каждой свечи падали с `AttributeError: 'CumLossCap' object has no attribute 'reset'`. Торговля не шла, код exits code=1.
+- **Причина:** Метод `reset(symbol)` вызывался в `should_close` (строка 220) и `mark_chain_ended`, но не был объявлен в классе `CumLossCap`.
+- **Исправление:** Добавлен метод `reset(symbol)` в класс `CumLossCap` — сбрасывает `_ref`, `_initialized`, `_in_reverse_chain`, `_realized`, `_ts`, `_warn_ts` для указанного символа.
+
+#### 19.2 `artifacts/api-server/src/routes/trades.ts` — коррупция файла (unaired characters, сломанные строковые литералы)
+- **Симптом:** API-сервер не стартовал: `SyntaxError: Unterminated string literal` и `Unexpected ","` при парсинге `trades.ts`.
+- **Причина:** Файл скопировался с повреждёнными символами (пропущенные кавычки `return ";` вместо `return "";`), сломанные регулярные выражения `replace(//g, '')`, сломанный тип аннотации `Map<string, { ... }>`, сломанные `replace(/\\g, '')`.
+- **Исправление:** Файл заменён на исправленную версию с репозитория хоста.
+
+#### 19.3 `artifacts/api-server/src/botPaths.ts` — `configPath()` возвращал относительный путь
+- **Симптом:** Живые боты запускались процессами, но API-сервер в reconcile-цикле не находил их (`[reconcile] <symbol>: no live process — marked stopped`) и помечал остановленными.
+- **Причина:** `configPath()` возвращал относительный путь `configs/live/config_*.yaml`, а процесс запускался с абсолютным путём через `BOT_CONFIG_DIR`. Совпадение `cmd.includes(BOT_CONFIG_DIR)` не находилось.
+- **Исправление:** `configPath()` возвращает `path.join(BOT_CONFIG_DIR, configFileName(symbol))` — полный абсолютный путь, совпадающий с командой запуска процесса.
+
+#### 19.4 `docker-compose.yml` — отсутствовала переменная `BINANCE_TESTNET=false` для `api-live`
+- **Симптом:** Живые боты запускались, но сразу падали при попытке подключения к Binance.
+- **Причина:** В `docker-compose.yml` для `api-live` не было переменной `BINANCE_TESTNET`. Без неё бот не мог подключиться к live API Binance и выходил с ошибкой.
+- **Исправление:** Добавлена переменная `- BINANCE_TESTNET=false` в секцию `environment` сервиса `api-live`.
+
+#### 19.5 `botPaths.ts` — временное изменение `configPath` (отменено)
+- Во время отладки `configPath` временно возвращал относительный путь `path.join("configs", BOT_ENV, configFileName(symbol))`. Возвращено к absolue путю через `BOT_CONFIG_DIR`, так как иначе reconcile-цикл не находил процессы ботов.
+
+### Как запустить после деплоя
+
+```bash
+# SSH-туннель (в отдельном окне PowerShell)
+ssh oracle-bot
+
+# В браузере: http://localhost:5176 — Arm, затем Start у нужного бота
+
+# Или все боты разом через CLI:
+ssh oracle-bot "cd /opt/trading-bot && bash /tmp/start_all_bots.sh"
+
+# Проверить статус:
+ssh oracle-bot "cd /opt/trading-bot && docker compose ps api-live"
+ssh oracle-bot "cd /opt/trading-bot && curl -s http://localhost:5001/api/bots | tr ',' '\n' | grep -E 'is_running' | sort | uniq -c"
+```

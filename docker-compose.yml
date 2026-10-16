@@ -129,6 +129,7 @@ services:
       # если файла нет или ключи пустые.
       - BOT_ENV=live
       - PORT=5001
+      - BINANCE_TESTNET=false
       # Лимит позиций для live: 3 (из .env.live)
       - MAX_POSITIONS=3
       - DASHBOARD_API_URL=http://localhost:5001/api

@@ -84,27 +84,39 @@ class CumLossCap:
     def enabled(self) -> bool:
         return self.pct > 0
 
+    def reset(self, symbol: str) -> None:
+        """Полный сброс состояния цикла для символа (после полного флэта цепочки)."""
+        self._ref.pop(symbol, None)
+        self._initialized.pop(symbol, None)
+        self._in_reverse_chain.pop(symbol, None)
+        self._realized.pop(symbol, None)
+        self._ts.pop(symbol, None)
+        self._warn_ts.pop(symbol, None)
+
+
 def mark_chain_ended(self, symbol: str) -> None:
-        """Отметить, что реверс-цепочка полностью завершена (флэт).
-        Вызывать ТОЛЬКО когда позиция полностью закрыта и больше нет реверс-ног.
-        """
-        self._in_reverse_chain.pop(symbol, None)
-        # НЕ сбрасываем _initialized и _ref здесь - они нужны для истории,
-        # reset() вызывается отдельно при полном флэте.
-    
-    def is_in_chain(self, symbol: str) -> bool:
-        """Проверка, активна ли реверс-цепочка для символа."""
-        return self._in_reverse_chain.get(symbol, False)
-        self._in_reverse_chain.pop(symbol, None)
+    """Отметить, что реверс-цепочка полностью завершена (флэт).
+    Вызывать ТОЛЬКО когда позиция полностью закрыта и больше нет реверс-ног.
+    """
+    self._in_reverse_chain.pop(symbol, None)
+    # НЕ сбрасываем _initialized и _ref здесь - они нужны для истории,
+    # reset() вызывается отдельно при полном флэте.
 
-    def _warn(self, symbol: str, log, msg: str) -> None:
-        now = self._clock()
-        if now - self._warn_ts.get(symbol, -1e18) < self.warn_interval_sec:
-            return
-        self._warn_ts[symbol] = now
-        log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
 
-async def evaluate(
+def is_in_chain(self, symbol: str) -> bool:
+    """Проверка, активна ли реверс-цепочка для символа."""
+    return self._in_reverse_chain.get(symbol, False)
+
+
+def _warn(self, symbol: str, log, msg: str) -> None:
+    now = self._clock()
+    if now - self._warn_ts.get(symbol, -1e18) < self.warn_interval_sec:
+        return
+    self._warn_ts[symbol] = now
+    log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
+
+
+    async def evaluate(
         self,
         symbol: str,
         order_mgr,
