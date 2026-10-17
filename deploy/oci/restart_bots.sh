@@ -71,6 +71,8 @@ for f in "$CFG_DIR"/config_*.yaml; do
     *'"success":true'*) started=$((started+1)) ;;
     *) failed="$failed $sym" ;;
   esac
+  # Пауза между стартами, чтобы не бить API-сервер и биржу одновременно
+  sleep 5
 done
 
 echo "      запущено: $started"

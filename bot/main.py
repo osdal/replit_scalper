@@ -4,6 +4,7 @@ import os
 import sys
 import signal
 import time
+import zlib
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -29,6 +30,7 @@ from signal_handler import SignalHandler
 from order_manager import OrderManager
 from cum_loss_cap import CumLossCap
 from position_tracker import PositionTracker, Position, _to_epoch_ms
+from binance_gate import AccountGate, wrap_client
 from backtester import run_backtest
 from db_reporter import DbReporter
 from recovery_client import RecoveryClient
@@ -52,6 +54,11 @@ LOCK_FILE_TEMPLATE = "bot.lock.{env}.{symbol}"
 
 # Порог "пыли" по объёму — совпадает с dust-логикой ниже (abs(qty) < 0.001).
 DUST_QTY = 0.001
+
+# Сдвиг по символу для пыли/стале-ордеров: размазываем запросы всех ботов по
+# разным свечам, чтобы не бить API одновременно.
+def _symbol_shift(symbol: str) -> int:
+    return zlib.crc32(symbol.encode()) % 12
 
 # FIX A: виртуальные TP/SL считаются по последней ТОРГОВОЙ цене (kline k.c).
 # Mark-цена используется только как fallback, если торговая отсутствует/старше
@@ -1438,6 +1445,12 @@ async def main():
         testnet=os.getenv("BINANCE_TESTNET", "false").lower() == "true",
     )
 
+    # Ворота Binance rate-limit: общий файл data/binance_gate.json между всеми
+    # ботами, обёртка вокруг AsyncClient._request.
+    gate = AccountGate()
+    client = wrap_client(client, gate)
+    log.info(f"[RATE_LIMIT] Gate active | limit={gate.weight_limit_1m}, shed_at={gate.shed_at}")
+
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
     recovery = RecoveryClient(symbol=cfg.symbol, logger=log)
     
@@ -2494,9 +2507,12 @@ async def _run_live_or_paper(
                     await tracker.sync_unrealized_pnl()
 
             # Check for dust positions and stale orders on exchange every 12 candles
-            if candle_count[0] % 12 == 0 and cfg.mode == "live":
+            # (сдвиг по символу, чтобы 40 ботов не били API одновременно)
+            if (candle_count[0] + _symbol_shift(cfg.symbol)) % 12 == 0 and cfg.mode == "live":
                 try:
-                    all_positions = await order_mgr.client.futures_position_information()
+                    all_positions = await order_mgr.client.futures_position_information(
+                        symbol=cfg.symbol
+                    )
                     syms_with_pos = set()
                     for p in all_positions:
                         amt = float(p.get("positionAmt", "0") or 0)

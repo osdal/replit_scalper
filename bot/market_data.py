@@ -31,6 +31,12 @@ _last_traded_ts: float = 0.0
 _mark_price: float = 0.0
 _mark_price_ts: float = 0.0
 
+# --- REST-кэш цены (Задание B) -------------------------------------------
+# Кэш последней REST-цены по символу: symbol -> (price, ts). Живёт 5 с.
+_rest_price_cache: Dict[str, tuple[float, float]] = {}
+# Минимальный интервал между REST-запросами одного бота к одному символу (сек).
+_MIN_REST_INTERVAL_SEC = 5.0
+
 
 def get_price_snapshot() -> Dict[str, float]:
     """Снимок last/mark с их timestamp для выбора источника триггера в боте."""
@@ -126,6 +132,9 @@ async def get_current_price(
     REST ticker дёргается ТОЛЬКО если WS-значение отсутствует или устарело.
     Никогда не бросает: при ошибке REST возвращает последнюю известную WS-цену
     (или 0.0), чтобы не ронять SL/TP-тик.
+
+    Кэш REST-цены: символ -> (цена, ts), живёт 5 с. Между REST-запросами
+    одного бота к одному символу минимум _MIN_REST_INTERVAL_SEC (5 с).
     """
     price = float(ws_price or 0.0)
     ws_ts = float(ws_ts or 0.0)
@@ -142,10 +151,20 @@ async def get_current_price(
                 f"[PRICE] WS price stale ({age:.1f}s > {max_age:.0f}s) for {symbol}, "
                 f"falling back to REST ticker"
             )
+
+    # --- Кэш REST-цены: не ходить в REST чаще раза в _MIN_REST_INTERVAL_SEC --
+    cached = _rest_price_cache.get(symbol)
+    if cached is not None:
+        cached_price, cached_ts = cached
+        cached_age = time.time() - cached_ts
+        if cached_price > 0 and cached_age <= _MIN_REST_INTERVAL_SEC:
+            return cached_price
+
     try:
         ticker = await client.futures_symbol_ticker(symbol=symbol)
         rest_price = float(ticker.get("price", 0) or 0)
         if rest_price > 0:
+            _rest_price_cache[symbol] = (rest_price, time.time())
             return rest_price
     except Exception as e:
         if logger:
