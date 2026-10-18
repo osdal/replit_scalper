@@ -1447,9 +1447,13 @@ async def main():
 
     # Ворота Binance rate-limit: общий файл data/binance_gate.json между всеми
     # ботами, обёртка вокруг AsyncClient._request.
+    # Включаются только если BINANCE_GATE_ENABLED=1 (по умолчанию 0 — как до ворот).
     gate = AccountGate()
-    client = wrap_client(client, gate)
-    log.info(f"[RATE_LIMIT] Gate active | limit={gate.weight_limit_1m}, shed_at={gate.shed_at}")
+    if os.getenv("BINANCE_GATE_ENABLED", "0").lower() in ("1", "true", "yes"):
+        client = wrap_client(client, gate)
+        log.info(f"[RATE_LIMIT] Gate ACTIVE | limit={gate.weight_limit_1m}, shed_at={gate.shed_at}")
+    else:
+        log.info(f"[RATE_LIMIT] Gate OFF (BINANCE_GATE_ENABLED!=1) | limit={gate.weight_limit_1m}, shed_at={gate.shed_at}")
 
     reporter = DbReporter(symbol=cfg.symbol, logger=log)
     recovery = RecoveryClient(symbol=cfg.symbol, logger=log)

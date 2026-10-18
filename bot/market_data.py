@@ -157,7 +157,9 @@ async def get_current_price(
     if cached is not None:
         cached_price, cached_ts = cached
         cached_age = time.time() - cached_ts
-        if cached_price > 0 and cached_age <= _MIN_REST_INTERVAL_SEC:
+        # Кэш живёт _MIN_REST_INTERVAL_SEC даже если цена 0 (например, после
+        # ошибки REST). Возвращаем кэшированное значение без повторного запроса.
+        if cached_age <= _MIN_REST_INTERVAL_SEC:
             return cached_price
 
     try:
@@ -167,6 +169,9 @@ async def get_current_price(
             _rest_price_cache[symbol] = (rest_price, time.time())
             return rest_price
     except Exception as e:
+        # Даже при ошибке запомнить время попытки, чтобы не долбить REST
+        # чаще раза в _MIN_REST_INTERVAL_SEC даже при серии ошибок.
+        _rest_price_cache[symbol] = (0.0, time.time())
         if logger:
             logger.warning(
                 f"[PRICE] REST ticker failed for {symbol}: {type(e).__name__}: {e!r}"

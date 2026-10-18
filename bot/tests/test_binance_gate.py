@@ -62,6 +62,7 @@ def test_check_and_reserve_critical_passes_shed(tmp_path):
     gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
     allowed, reason = gate.check_and_reserve(weight=1, is_critical=True)
     assert allowed is True
+    assert reason == "ok"
 
 
 def test_check_and_reserve_banned(tmp_path):
@@ -87,13 +88,14 @@ def test_check_and_reserve_banned_critical_still_blocked(tmp_path):
 # --------------------------------------------------------------------------- #
 #  AccountGate: record_response + ban                                         #
 # --------------------------------------------------------------------------- #
-def test_record_response_accumulates(tmp_path):
+def test_record_response_replaces_not_sums(tmp_path):
+    """X-MBX-USED-WEIGHT-1M — итог за минуту, сохраняется как есть (замена, не сложение)."""
     p = tmp_path / "gate.json"
     write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 100, "ts": __import__("time").time()})
     gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
     gate.record_response(weight_used=50)
-    data = read_gate(p)
-    assert data["used_weight_1m"] == 150
+    data = read_gate(gate._my_path())
+    assert data["used_weight_1m"] == 50  # замена, не сложение
 
 
 def test_record_response_resets_window(tmp_path):
@@ -103,7 +105,7 @@ def test_record_response_resets_window(tmp_path):
     write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 9999, "ts": time.time() - 120})
     gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
     gate.record_response(weight_used=10)
-    data = read_gate(p)
+    data = read_gate(gate._my_path())
     assert data["used_weight_1m"] == 10
 
 
@@ -151,6 +153,12 @@ def test_is_critical():
     assert _is_critical("DELETE", "/fapi/v1/order") is True
     assert _is_critical("GET", "/fapi/v1/account") is True
     assert _is_critical("GET", "/fapi/v1/positionRisk") is True
+    assert _is_critical("GET", "/fapi/v1/exchangeInfo") is True
+    assert _is_critical("GET", "/fapi/v1/leverageBracket") is True
+    assert _is_critical("POST", "/fapi/v1/leverage") is True
+    assert _is_critical("GET", "/fapi/v1/openOrders") is True
+    assert _is_critical("GET", "/fapi/v1/klines?limit=100") is True
+    assert _is_critical("GET", "/fapi/v1/klines?limit=99") is False
     assert _is_critical("GET", "/fapi/v1/ticker/price") is False
     assert _is_critical("GET", "/fapi/v1/klines") is False
 
@@ -162,6 +170,7 @@ class FakeResponse:
     def __init__(self, headers=None, text=""):
         self.headers = headers or {}
         self._text = text
+
     async def text(self):
         return self._text
 
@@ -170,12 +179,15 @@ class FakeClient:
     def __init__(self, should_raise=None):
         self.should_raise = should_raise
         self.calls = []
+        self.response = None
 
     async def _request(self, method, uri, signed, force_params=False, **kwargs):
         self.calls.append((method, uri))
         if self.should_raise:
             raise self.should_raise
-        return FakeResponse(headers={"X-MBX-USED-WEIGHT-1M": "3"})
+        resp = FakeResponse(headers={"X-MBX-USED-WEIGHT-1M": "3"})
+        self.response = resp
+        return resp
 
 
 def test_wrap_client_allows_and_records(tmp_path):
@@ -187,7 +199,7 @@ def test_wrap_client_allows_and_records(tmp_path):
 
     resp = run(client._request("GET", "/fapi/v1/ticker/price", signed=False, symbol="BTCUSDT"))
     assert resp.headers.get("X-MBX-USED-WEIGHT-1M") == "3"
-    data = read_gate(p)
+    data = read_gate(gate._my_path())
     assert data["used_weight_1m"] == 3  # фактический вес из заголовка ответа
 
 
@@ -200,8 +212,7 @@ def test_wrap_client_sheds_secondary(tmp_path):
 
     with pytest.raises(Exception) as exc:
         run(client._request("GET", "/fapi/v1/ticker/price", signed=False, symbol="BTCUSDT"))
-    assert "-429" in str(exc.value)
-
+    assert exc.value.code == -429
 
 def test_wrap_client_records_ban(tmp_path):
     p = tmp_path / "gate.json"
@@ -213,7 +224,6 @@ def test_wrap_client_records_ban(tmp_path):
 
     class BanClient:
         async def _request(self, method, uri, signed, force_params=False, **kwargs):
-            # Исключение с атрибутом code, как у BinanceAPIException
             e = Exception("IP banned until 99999999999")
             e.code = -1003
             raise e
@@ -223,5 +233,5 @@ def test_wrap_client_records_ban(tmp_path):
     with pytest.raises(Exception) as exc:
         run(client._request("GET", "/fapi/v1/ticker/price", signed=False, symbol="BTCUSDT"))
     assert exc.value.code == -1003
-    data = read_gate(p)
+    data = read_gate(gate._my_path())
     assert data["ban_until_ms"] == 99999999999

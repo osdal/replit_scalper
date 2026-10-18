@@ -57,7 +57,6 @@ def test_cache_expires_after_5s():
     assert client.call_count == 1
     # Истекший кэш — эмулируем время, меняем цену в клиенте
     client.price = 51000.0
-    # Прямо manipulations с кэшем: ставим ts в прошлое
     cached = _rest_price_cache.get("BTCUSDT")
     cached = (cached[0], cached[1] - 10.0)  # 10 секунд назад
     _rest_price_cache["BTCUSDT"] = cached
@@ -98,3 +97,16 @@ def test_different_symbols_independent_cache():
     p2 = run(get_current_price(client, "ETHUSDT"))
     assert p2 == 200.0
     assert client.call_count == 2
+
+
+def test_rest_failure_records_attempt_time():
+    """При ошибке REST время попытки запоминается, и следующие 5с запросов не делается."""
+    _rest_price_cache.clear()
+    client = FakeClient(price=0.0, should_fail=True)
+    p1 = run(get_current_price(client, "BTCUSDT"))
+    assert p1 == 0.0
+    assert client.call_count == 1
+    # Сразу второй вызов — кэш попытки ещё жив (0 < 5с), запрос не делается
+    p2 = run(get_current_price(client, "BTCUSDT"))
+    assert p2 == 0.0
+    assert client.call_count == 1  # не увеличился, т.к. кэш попытки ещё живой

@@ -1,26 +1,16 @@
 """
-Общая защита от IP-бана Binance (-1003 / -429) между всеми ботами (один файл на все
-процессы, атомарная запись tmp+rename).
+Общая защита от IP-бана Binance (-1003 / -429) между всеми ботами.
 
-Состояние:  data/binance_gate.json
-    {"ban_until_ms": int, "used_weight_1m": int, "ts": float}
+Каждый процесс пишет в СВОЙ файл <prefix>.<pid>.json. Читатели агрегируют все
+файлы <path>.*: бан = максимум ban_until_ms, вес = самое свежее показание не
+старше 60 с. Никакой общей записи из многих процессов в один файл.
 
-Ворота на уровне AsyncClient: оборачиваем AsyncClient._request. Перед каждым
-REST-запросом проверяем gate, после ответа пишем фактический использованный вес
-(X-MBX-USED-WEIGHT-1M) и ban_until_ms при -1003.
-
-Приоритеты:
-  * КРИТИЧНЫЕ (ордера, отмена, закрытие позиции, backstop, sync при старте)
-    проходят ВСЕГДА, кроме явного бана (-1003).
-  * ВТОРОСТЕПЕННЫЕ (heartbeat, пыль, баланс для отчётов, klines-фолбэк, cum-cap)
-    откладываются/пропускаются, когда used_weight_1m > BINANCE_SHED_AT или идёт бан.
-
-Fail-open: если файл не читается/битый — работаем как раньше, пишем WARNING раз в
-минуту. Раз в минуту пишем одну INFO-строку: used_weight_1m, сколько запросов
-отложено.
+Все операции с файлом обёрнуты в try/except — fail-open, WARNING при сбое.
+Запись состояния не чаще раза в секунду на Prozess (бан — без задержки).
 """
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -28,17 +18,15 @@ import time
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger("binance_gate")# Вес по умолчанию, если заголовок X-MBX-USED-WEIGHT-1M недоступен.
+logger = logging.getLogger("binance_gate")
+
 DEFAULT_WEIGHT = 1
-
-# Лимит веса Binance USD-M Futures (2400 weight/мин на IP).
 WEIGHT_LIMIT_1M = int(os.getenv("BINANCE_WEIGHT_LIMIT_1M", "2400"))
-
-# Доля лимита, выше которой второстепенные запросы откладываются.
 SHED_AT = float(os.getenv("BINANCE_SHED_AT", "0.75"))
-
-# Как часто писать INFO-строку со статистикой (сек).
 STATS_INTERVAL_SEC = 60.0
+WRITE_INTERVAL_SEC = 1.0
+WEIGHT_TTL_SEC = 60.0
+RETRY_AFTER_DEFAULT_SEC = 10.0
 
 
 def _now_ms() -> int:
@@ -50,7 +38,6 @@ def _now_sec() -> float:
 
 
 def _parse_ban_until(message: Optional[str]) -> Optional[int]:
-    """Из '-1003 ... banned until 1787463454222' достаёт ms-таймстамп."""
     if not message:
         return None
     marker = "banned until "
@@ -72,9 +59,42 @@ def _parse_ban_until(message: Optional[str]) -> Optional[int]:
         return None
 
 
-class AccountGate:
-    """Общий шлюз ко всем REST-запросам Binance через общий JSON-файл."""
+def _parse_retry_after(message: Optional[str], headers: Optional[dict] = None) -> Optional[float]:
+    if headers is not None:
+        try:
+            ra = headers.get("Retry-After") or headers.get("retry-after")
+            if ra is not None:
+                return int(ra)
+        except (ValueError, TypeError):
+            pass
+    if not message:
+        return None
+    marker = "banned until "
+    idx = message.find(marker)
+    if idx < 0:
+        return None
+    rest = message[idx + len(marker):].strip()
+    digits = ""
+    for ch in rest:
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    if not digits:
+        return None
+    try:
+        return int(digits) / 1000.0
+    except ValueError:
+        return None
 
+
+class GateBlocked(Exception):
+    def __init__(self, message: str, code: int = -429):
+        super().__init__(message)
+        self.code = code
+
+
+class AccountGate:
     def __init__(
         self,
         path: str | Path = Path("data/binance_gate.json"),
@@ -86,13 +106,14 @@ class AccountGate:
         self.shed_at = shed_at
         self._last_stats_ts: float = 0.0
         self._deferred_count: int = 0
+        self._last_write_ts: float = 0.0
 
-    # ------------------------------------------------------------------ #
-    #  File helpers                                                      #
-    # ------------------------------------------------------------------ #
-    def _read(self) -> dict:
+    def _my_path(self) -> Path:
+        return Path(f"{self.path}.{os.getpid()}")
+
+    def _read_one(self, path: Path) -> dict:
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("not a dict")
@@ -100,40 +121,63 @@ class AccountGate:
         except Exception:
             return {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0}
 
-    def _write(self, data: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(self.path) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, str(self.path))
+    def _read_all(self) -> dict:
+        best = {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0}
+        try:
+            for fpath in glob.glob(str(self.path) + "*"):
+                try:
+                    d = self._read_one(Path(fpath))
+                except Exception:
+                    continue
+                if d.get("ban_until_ms", 0) > best["ban_until_ms"]:
+                    best["ban_until_ms"] = d["ban_until_ms"]
+                dts = d.get("ts", 0.0)
+                if _now_sec() - dts <= WEIGHT_TTL_SEC and dts > best.get("ts", 0.0):
+                    best["used_weight_1m"] = d.get("used_weight_1m", 0)
+                    best["ts"] = dts
+        except Exception:
+            pass
+        return best
 
-    # ------------------------------------------------------------------ #
-    #  Gate                                                              #
-    # ------------------------------------------------------------------ #
+    def _write_one(self, path: Path, data: dict) -> None:
+        now = _now_sec()
+        if now - self._last_write_ts < WRITE_INTERVAL_SEC:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(path) + f".tmp.{os.getpid()}.{int(now * 1000000)}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, str(path))
+            self._last_write_ts = now
+        except Exception as exc:
+            logger.warning(
+                f"[RATE_LIMIT] Не удалось записать состояние gate в {path}: {exc}"
+            )
+
+    # Backwards-compatible alias for _write_one
+    _write = _write_one
+
     def is_banned(self) -> bool:
-        data = self._read()
+        data = self._read_all()
         return data.get("ban_until_ms", 0) > _now_ms()
 
     def check_and_reserve(
         self, weight: int = DEFAULT_WEIGHT, is_critical: bool = False
     ) -> tuple[bool, str]:
-        """Проверяет gate и резервирует вес. Возвращает (allowed, reason).
+        try:
+            data = self._read_all()
+        except Exception:
+            logger.warning("[RATE_LIMIT] gate: не удалось прочитать состояние, пропуск")
+            return True, "ok"
 
-        КРИТИЧНЫЕ запросы проходят всегда (кроме явного бана).
-        ВТОРОСТЕПЕННЫЕ пропускаются, если used_weight_1m > shed_at или бан.
-        """
-        now = _now_sec()
-        data = self._read()
-
-        # --- Янтарный свет: явный бан --------------------------------------
         ban_until = data.get("ban_until_ms", 0)
         if ban_until > _now_ms():
             remaining = (ban_until - _now_ms()) / 1000.0
             return False, f"banned until {ban_until} ({remaining:.0f}s left)"
 
-        # --- Жёлтый свет: превышен весовой лимит --------------------------
         total_used = data.get("used_weight_1m", 0)
-        if total_used / self.weight_limit_1m > self.shed_at and not is_critical:
+        if not is_critical and total_used / self.weight_limit_1m > self.shed_at:
             self._deferred_count += 1
             self._maybe_log_stats()
             return False, f"shed {total_used}/{self.weight_limit_1m}"
@@ -143,36 +187,32 @@ class AccountGate:
     def record_response(
         self, weight_used: int, ban_until_ms: Optional[int] = None
     ) -> None:
-        """Записывает фактический использованный вес после ответа."""
         now = _now_sec()
-        data = self._read()
-
+        data = {"ban_until_ms": 0, "used_weight_1m": weight_used, "ts": now}
         if ban_until_ms and ban_until_ms > 0:
             data["ban_until_ms"] = ban_until_ms
-
-        # Сброс окна, если прошла минута
-        if now - data.get("ts", 0.0) > 60.0:
-            data["used_weight_1m"] = weight_used
-        else:
-            data["used_weight_1m"] = data.get("used_weight_1m", 0) + weight_used
-
-        data["ts"] = now
-        self._write(data)
+        try:
+            self._write_one(self._my_path(), data)
+        except Exception:
+            pass
 
     def record_ban(self, ban_until_ms: int) -> None:
-        """Записывает время снятия бана в общий файл."""
         now = _now_sec()
-        data = self._read()
-        data["ban_until_ms"] = ban_until_ms
-        data["ts"] = now
-        self._write(data)
+        data = {"ban_until_ms": ban_until_ms, "used_weight_1m": 0, "ts": now}
+        try:
+            self._write_one(self._my_path(), data)
+        except Exception:
+            pass
 
     def _maybe_log_stats(self) -> None:
         now = _now_sec()
         if now - self._last_stats_ts < STATS_INTERVAL_SEC:
             return
         self._last_stats_ts = now
-        data = self._read()
+        try:
+            data = self._read_all()
+        except Exception:
+            return
         logger.warning(
             f"[RATE_LIMIT] used_weight_1m={data.get('used_weight_1m', 0)}/"
             f"{self.weight_limit_1m}, deferred={self._deferred_count}, "
@@ -180,7 +220,10 @@ class AccountGate:
         )
 
     def get_status(self) -> dict:
-        data = self._read()
+        try:
+            data = self._read_all()
+        except Exception:
+            data = {}
         return {
             "ban_until_ms": data.get("ban_until_ms", 0),
             "used_weight_1m": data.get("used_weight_1m", 0),
@@ -190,13 +233,8 @@ class AccountGate:
         }
 
 
-# --------------------------------------------------------------------------- #
-#  Wrapper для AsyncClient._request                                         #
-# --------------------------------------------------------------------------- #
 def _estimate_weight(method: str, uri: str) -> int:
-    """Приблизительный вес запроса в единицах Binance weight."""
     u = uri.upper()
-    # Тяжёлые эндпоинты
     if "/ACCOUNT" in u:
         return 5
     if "/POSITIONRISK" in u:
@@ -213,63 +251,104 @@ def _estimate_weight(method: str, uri: str) -> int:
         return 2
     if "/DEPTH" in u:
         return 5
-    # Ордера и отмены
     if method.upper() in ("POST", "PUT", "DELETE"):
         return 1
     return DEFAULT_WEIGHT
 
 
 def _is_critical(method: str, uri: str) -> bool:
-    """Критические запросы: ордера, отмена, закрытие позиции, backstop, sync."""
     u = uri.upper()
     if method.upper() in ("POST", "DELETE", "PUT"):
-        # Ордера, отмена ордеров, algo-ордера
         if any(k in u for k in ("ORDER", "ALGOORDER")):
             return True
     if "/POSITIONRISK" in u or "/ACCOUNT" in u:
-        # Баланс/позиции — критичны для стартовой синхронизации
+        return True
+    if "/EXCHANGEINFO" in u:
+        return True
+    if "/LEVERAGEBRACKET" in u:
+        return True
+    if method.upper() == "POST" and "/LEVERAGE" in u:
+        return True
+    if "/OPENORDERS" in u:
+        return True
+    if "/KLINES" in u and "LIMIT=100" in u:
         return True
     return False
 
 
-def wrap_client(client, gate: AccountGate):
-    """Обёртка вокруг AsyncClient._request: проверяет gate перед каждым
-    REST-запросом, пишет использованный вес и ban_until_ms после ответа.
-
-    Никаких изменений в вызывающем коде — только обёртка метода _request.
-    """
+def _wrap_client(client, gate: AccountGate):
     original_request = client._request
 
     async def gated_request(method, uri, signed, force_params=False, **kwargs):
         weight = _estimate_weight(method, uri)
         is_critical = _is_critical(method, uri)
 
-        allowed, reason = gate.check_and_reserve(weight, is_critical=is_critical)
+        try:
+            allowed, reason = gate.check_and_reserve(weight, is_critical=is_critical)
+        except Exception:
+            logger.warning("[RATE_LIMIT] gate check failed, allowing request")
+            allowed = True
+
         if not allowed:
-            # Поднимаем обычное исключение с -429 в тексте — caller обработает
-            # его как отказ rate-limit.
-            raise Exception(f"gate shed: {reason} (code -429)")
+            e = Exception(f"gate shed: {reason} (code -429)")
+            e.code = -429
+            raise e
 
         try:
             response = await original_request(
                 method, uri, signed, force_params, **kwargs
             )
         except Exception as e:
-            code = getattr(e, 'code', 0)
+            code = getattr(e, "code", 0)
             if code == -1003:
                 ban_until = _parse_ban_until(str(e))
                 if ban_until:
-                    gate.record_ban(ban_until)
-            raise
-        except Exception:
+                    try:
+                        gate.record_ban(ban_until)
+                    except Exception:
+                        pass
+            elif code == -429:
+                headers = getattr(client, "response", None)
+                ra_seconds = None
+                if headers is not None:
+                    try:
+                        ra = headers.get("Retry-After") or headers.get("retry-after")
+                        if ra is not None:
+                            ra_seconds = int(ra)
+                    except (ValueError, TypeError):
+                        pass
+                if ra_seconds is None:
+                    ra_seconds = RETRY_AFTER_DEFAULT_SEC
+                try:
+                    gate.record_ban(int(_now_ms() + ra_seconds * 1000))
+                except Exception:
+                    pass
             raise
 
-        # Записываем фактический вес из заголовка ответа
-        used_weight = int(
-            response.headers.get("X-MBX-USED-WEIGHT-1M", weight)  # type: ignore
-        )
+        try:
+            headers_obj = getattr(client, "response", None)
+            used_weight = weight
+            if headers_obj is not None:
+                try:
+                    # client.response is a response object (not a dict),
+                    # get .headers from it
+                    headers_dict = getattr(headers_obj, "headers", headers_obj)
+                    hw = headers_dict.get("X-MBX-USED-WEIGHT-1M") or headers_dict.get(
+                        "x-mbx-used-weight-1m"
+                    )
+                    if hw is not None:
+                        used_weight = int(hw)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+        except Exception:
+            pass
         gate.record_response(used_weight)
+
         return response
 
     client._request = gated_request
     return client
+
+
+def wrap_client(client, gate: AccountGate):
+    return _wrap_client(client, gate)
