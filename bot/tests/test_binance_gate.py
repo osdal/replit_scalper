@@ -157,10 +157,16 @@ def test_is_critical():
     assert _is_critical("GET", "/fapi/v1/leverageBracket") is True
     assert _is_critical("POST", "/fapi/v1/leverage") is True
     assert _is_critical("GET", "/fapi/v1/openOrders") is True
-    assert _is_critical("GET", "/fapi/v1/klines?limit=100") is True
-    assert _is_critical("GET", "/fapi/v1/klines?limit=99") is False
-    assert _is_critical("GET", "/fapi/v1/ticker/price") is False
+    # Прогрев свечей (limit>=100) критичен; параметры приходят в kwargs, а не в строке запроса.
+    assert _is_critical("GET", "/fapi/v1/klines", data={"limit": 100}) is True
+    assert _is_critical("GET", "/fapi/v1/klines", params={"limit": 300}) is True
+    assert _is_critical("GET", "/fapi/v1/klines", data={"limit": 99}) is False
+    assert _is_critical("GET", "/fapi/v1/klines", data={"limit": 2}) is False
     assert _is_critical("GET", "/fapi/v1/klines") is False
+    # REST-цена защищает открытую позицию (фолбэк при устаревшем WS) — по весу не режется.
+    assert _is_critical("GET", "/fapi/v1/ticker/price") is True
+    assert _is_critical("GET", "/fapi/v1/order") is True        # статус ордера
+    assert _is_critical("POST", "/fapi/v1/marginType") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -211,7 +217,7 @@ def test_wrap_client_sheds_secondary(tmp_path):
     wrap_client(client, gate)
 
     with pytest.raises(Exception) as exc:
-        run(client._request("GET", "/fapi/v1/ticker/price", signed=False, symbol="BTCUSDT"))
+        run(client._request("GET", "/fapi/v1/klines", signed=False, data={"limit": 2}, symbol="BTCUSDT"))
     assert exc.value.code == -429
 
 def test_wrap_client_records_ban(tmp_path):
