@@ -98,6 +98,7 @@ rsi_low: 30
 rsi_period: 14
 signal_cooldown_min: 0
 sl_pct: 0.5
+reverse_chain_max: 100
 symbol: LTCUSDT
 time_profit_close_hours: 0
 timeframe: 5m

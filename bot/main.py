@@ -4,6 +4,7 @@ import os
 import sys
 import signal
 import time
+import random
 import zlib
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -1819,7 +1820,174 @@ async def _run_live_or_paper(
             pnl = await tracker.apply_hit_async(
                 hit, current_price, candle_time_ms, closed_by=closed_by
             )
-            if preset_before and tracker.position is None:
+            # Если reverse-нога закрылась по TP1, но суммарный PnL цикла всё ещё
+            # в минусе и цепочка не достигла лимита шагов — открываем следующую
+            # ногу реверса вместо окончательного закрытия цикла.
+            if pos.is_reverse and pnl < 0:
+                chain_step = int(getattr(pos, "reverse_chain_step", 0) or 0)
+                chain_max = int(getattr(cfg, "reverse_chain_max", 10) or 0)
+                if chain_max > 0 and chain_step < chain_max:
+                    log.info(
+                        f"[REVERSE] TP1 hit on reverse leg but total PnL {pnl:+.4f} < 0, "
+                        f"step={chain_step} < chain_max={chain_max} — opening next leg"
+                    )
+                    orig_trade_id = getattr(tracker, "_trade_id", None)
+                    preset_before = getattr(pos, 'preset', None)
+                    chain_step_next = chain_step + 1
+                    unrealized = None
+                    position_entry = None
+                    try:
+                        order_mgr._invalidate_position_cache()
+                        real_net_qty = await order_mgr._get_real_position_qty(pos.direction)
+                        real_net_entry = await order_mgr._get_real_position_entry(pos.direction)
+                        pos_info = await order_mgr.get_position_info()
+                        if pos_info:
+                            unrealized = float(pos_info.get("unrealized_pnl") or 0.0)
+                            position_entry = float(pos_info.get("entry_price") or 0.0) or None
+                    except Exception as e:
+                        log.warning(f"[REVERSE] chain real position fetch failed: {e}")
+                        real_net_qty, real_net_entry = -1.0, None
+                    if real_net_qty > 0:
+                        N = real_net_qty if pos.direction == "LONG" else -real_net_qty
+                    else:
+                        N = pos.remaining_qty if pos.direction == "LONG" else -pos.remaining_qty
+                    cycle_entry = (
+                        real_net_entry if (real_net_entry and real_net_entry > 0)
+                        else pos.entry_price
+                    )
+                    NET_REALIZED, _, _ = await tracker.cycle_realized_net()
+                    if NET_REALIZED is None:
+                        NET_REALIZED = float(getattr(pos, "reversed_from_pnl", 0.0) or 0.0)
+                        log.warning(
+                            f"[REVERSE] exchange net_realized unavailable (step={chain_step_next}) — "
+                            f"using reversed_from_pnl={NET_REALIZED:+.4f}"
+                        )
+                    trigger_p = (
+                        pos.sl_price if (pos.sl_price and pos.sl_price > 0) else current_price
+                    )
+                    if _CUM_CAP.enabled and is_live_close:
+                        _cap_snap = await _CUM_CAP.evaluate(
+                            cfg.symbol, order_mgr, tracker, log,
+                            fresh=True, net_realized=NET_REALIZED, unrealized=unrealized,
+                        )
+                        if _cap_snap is not None and _cap_snap.hit:
+                            log.error(
+                                f"[REVERSE] cumulative loss cap before open | symbol={cfg.symbol} "
+                                f"{_cap_snap.describe()} step={chain_step_next} — force-closing"
+                            )
+                            if await _close_cycle_by_cum_loss_cap() is not None:
+                                _consecutive_losses += 1
+                                _last_loss_time = time.time()
+                            return
+                    if recovery:
+                        risk_check = await recovery.can_open()
+                        if not risk_check.get("allowed", True):
+                            reason = risk_check.get("reason", "risk_block")
+                            log.warning(
+                                f"[RISK] Reverse leg blocked by server: reason={reason} "
+                                f"positions={risk_check.get('positions_open')} "
+                                f"— skipping reverse chain step {chain_step_next} for {cfg.symbol}"
+                            )
+                            return
+                    reverse_result = await order_mgr.open_reverse_position(
+                        original_direction=pos.direction,
+                        original_entry=cycle_entry,
+                        original_qty=abs(N),
+                        sl_price=trigger_p,
+                        mode=pos_mode,
+                        net_position=N,
+                        net_realized=NET_REALIZED,
+                        step=chain_step_next,
+                        unrealized=unrealized,
+                        position_entry=position_entry or cycle_entry,
+                    )
+                    if reverse_result:
+                        rev_entry, rev_qty, rev_tp = reverse_result
+                        _REVERSE_CHAIN_FAILS.pop(cfg.symbol, None)
+                        if rev_qty <= 0:
+                            await _finalize_skipped_reverse(
+                                pos.direction, "nothing to hedge", preset_before,
+                                current_price, candle_time_ms, not is_rejected,
+                            )
+                            return
+                        if N > 0:
+                            new_dir = "SHORT"
+                        elif N < 0:
+                            new_dir = "LONG"
+                        else:
+                            new_dir = "SHORT" if pos.direction == "LONG" else "LONG"
+                        _tp_safe = _safe_reverse_tp(new_dir, rev_entry, rev_tp)
+                        if _tp_safe != float(rev_tp or 0.0):
+                            log.error(
+                                f"[REVERSE] invalid reverse TP | dir={new_dir} entry={rev_entry} "
+                                f"tp={rev_tp} — virtual TP disabled"
+                            )
+                        rev_tp = _tp_safe
+                        prior_realized = NET_REALIZED if NET_REALIZED is not None else (
+                            getattr(pos, "reversed_from_pnl", 0.0)
+                            + tracker._calc_pnl(pos.direction, cycle_entry, trigger_p, abs(N))
+                        )
+                        cycle_orig_dir = getattr(pos, "reversed_from_direction", "") or pos.direction
+                        cycle_orig_entry = getattr(pos, "reversed_from_entry", 0.0) or cycle_entry
+                        cycle_orig_qty = getattr(pos, "reversed_from_qty", 0.0) or abs(N)
+                        rev_signal = Signal(
+                            direction=new_dir,
+                            entry_price=rev_entry,
+                            sl_price=0.0,
+                            tp1_price=rev_tp,
+                            tp2_price=rev_tp,
+                            timestamp=pd.Timestamp.now(),
+                            preset=preset_before or "reverse",
+                        )
+                        tracker.open(
+                            rev_signal, rev_qty,
+                            is_reverse=True,
+                            reversed_from_pnl=prior_realized,
+                            reversed_from_direction=cycle_orig_dir,
+                            reversed_from_qty=cycle_orig_qty,
+                            reversed_from_entry=cycle_orig_entry,
+                            reverse_chain_step=chain_step_next,
+                        )
+                        tracker._trade_id = orig_trade_id
+                        await tracker.update_open_trade(new_dir, rev_entry, rev_qty)
+                        tracker._save_state()
+                        if is_live:
+                            _rev_sl = (
+                                tracker.position.sl_price
+                                if tracker.position is not None else 0.0
+                            ) or rev_entry
+                            _lc_pct = float(os.getenv("REVERSE_LOSSCAP_PCT") or "5")
+                            _lc_ref = float(os.getenv("REVERSE_LOSSCAP_REF_DEPOSIT_USD") or "0")
+                            _lc_on = (
+                                (os.getenv("REVERSE_LOSSCAP_ENABLED") or "false").strip().lower()
+                                == "true"
+                            )
+                            _lc = await order_mgr.cycle_loss_cap(
+                                new_dir=new_dir, net_qty=rev_qty, entry=rev_entry,
+                                net_realized=prior_realized, virtual_sl=_rev_sl,
+                                pct=_lc_pct,
+                                ref_deposit=(_lc_ref if _lc_ref > 0 else None),
+                            )
+                            _lc_exact = None
+                            if _lc:
+                                _lc_msg = (
+                                    f"[LOSSCAP] step={chain_step_next} {new_dir} "
+                                    f"ref={_lc['ref']:.2f} target={_lc_pct:.1f}% "
+                                    f"P_cap={_lc['p_cap']:.6f} vsl={_rev_sl:.6f} "
+                                    f"trigger={_lc['trigger']:.6f} clamped={_lc['clamped']} "
+                                    f"worst={_lc['worst_pct']:.1f}% "
+                                    f"attainable={'yes' if _lc['attainable'] else 'NO'}"
+                                )
+                                log.info(_lc_msg)
+                                events.info(_lc_msg)
+                                if _lc_on:
+                                    _lc_exact = _lc["trigger"]
+                            order_mgr.backstop_algo_id = await order_mgr._place_exchange_backstop(
+                                new_dir, _rev_sl, qty=rev_qty, exact_trigger=_lc_exact
+                            )
+                            if tracker.position is not None:
+                                tracker.position.backstop_algo_id = order_mgr.backstop_algo_id
+                    return  # Don't fall through to finalization — chain continues
                 _on_position_closed(preset_before)
             new_sl = tracker.position.sl_price if tracker.position else 'N/A'
             events.info(f"TP1_APPLY | pnl={pnl} new_sl={new_sl} remaining_qty={tracker.position.remaining_qty if tracker.position else 0}")
@@ -1919,7 +2087,7 @@ async def _run_live_or_paper(
                 # накопленную книгу + уже реализованный PnL цикла в ноль.
                 preset_before = getattr(pos, 'preset', None)
                 chain_step = int(getattr(pos, "reverse_chain_step", 0) or 0)
-                chain_max = int(getattr(cfg, "reverse_chain_max", 2) or 0)
+                chain_max = int(getattr(cfg, "reverse_chain_max", 10) or 0)
                 # Снимаем защитные ордера текущей обратной ноги.
                 try:
                     await order_mgr.cancel_all_tp_sl(pos.direction, mode=pos_mode)
@@ -2442,6 +2610,13 @@ async def _run_live_or_paper(
         nonlocal _consecutive_losses, _last_loss_time
         last_candle_time[0] = time.time()
         _ = events  # capture events in closure
+        # Jitter 0–60 s после закрытия свечи: 40 ботов не долбят Binance API
+        # одновременно в :00/:05/:10, иначе упираемся в IP rate-limit (-1003).
+        try:
+            _jitter = random.uniform(0, 60)
+            await asyncio.sleep(_jitter)
+        except Exception:
+            pass
         try:
             new_row = pd.DataFrame([candle]).set_index("open_time")
             df_buffer = pd.concat([df_buffer, new_row]).tail(500)
@@ -3223,6 +3398,59 @@ async def _run_live_or_paper(
                                     tracker._save_state()
                         else:
                             log.warning("[SYNC_WARNING] Could not fetch position info")
+                else:
+                    # Tracker has no position but exchange might — sync foreign positions
+                    # (opened manually, by crashed process, or before bot start)
+                    if cfg.mode == "live":
+                        exchange_pos = await order_mgr.get_position_info()
+                        if exchange_pos:
+                            exchange_qty = exchange_pos.get("qty", 0)
+                            if abs(exchange_qty) > 0.000001:
+                                direction = "LONG" if exchange_qty > 0 else "SHORT"
+                                entry_price = float(exchange_pos.get("entryPrice", 0))
+                                entry_timestamp_ms = exchange_pos.get("entryTime")
+                                if entry_price > 0:
+                                    log.warning(
+                                        f"[SYNC_RUNTIME] Exchange has {direction} {cfg.symbol} "
+                                        f"qty={abs(exchange_qty)} but tracker is empty — "
+                                        f"syncing into tracker"
+                                    )
+                                    sl_dist = entry_price * cfg.sl_pct / 100
+                                    tp1_dist = entry_price * cfg.tp1_pct / 100
+                                    tp2_dist = entry_price * cfg.tp2_pct / 100
+
+                                    if direction == "LONG":
+                                        sl_price = entry_price - sl_dist
+                                        tp1_price = entry_price + tp1_dist
+                                        tp2_price = entry_price + tp2_dist
+                                    else:
+                                        sl_price = entry_price + sl_dist
+                                        tp1_price = entry_price - tp1_dist
+                                        tp2_price = entry_price - tp2_dist
+
+                                    if entry_timestamp_ms:
+                                        entry_timestamp = pd.Timestamp(int(entry_timestamp_ms), unit="ms")
+                                    else:
+                                        entry_timestamp = pd.Timestamp.utcnow()
+
+                                    tracker.position = Position(
+                                        direction=direction,
+                                        entry_price=entry_price,
+                                        sl_price=round(sl_price, 8),
+                                        tp1_price=round(tp1_price, 8),
+                                        tp2_price=round(tp2_price, 8),
+                                        total_qty=abs(exchange_qty),
+                                        remaining_qty=abs(exchange_qty),
+                                        entry_timestamp=entry_timestamp,
+                                        mode="live",
+                                    )
+                                    tracker._trade_id = None
+                                    tracker._save_state()
+                                    log.info(
+                                        f"[SYNC_RUNTIME] Synced {direction} {cfg.symbol} "
+                                        f"qty={abs(exchange_qty)} entry={entry_price} "
+                                        f"SL={sl_price:.4f} TP1={tp1_price:.4f} TP2={tp2_price:.4f}"
+                                    )
             except Exception as e:
                 log.warning(f"[SYNC_CHECK] Error during periodic check: {e}")
 

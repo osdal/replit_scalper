@@ -1126,7 +1126,12 @@ class PositionTracker:
         # Блок не зависит от self.position: apply_hit обычно уже очистил позицию,
         # а закрытие должно репортиться по сохранённому trade_id исходной ноги.
         if is_reverse:
-            total_pnl = total_trade_pnl + orig_leg_pnl
+            # exchange["pnl"] уже включает обе ноги цикла (исходную + обратную),
+            # поэтому orig_leg_pnl прибавляем только при fallback на локальный расчёт
+            if exchange is not None:
+                total_pnl = total_trade_pnl
+            else:
+                total_pnl = total_trade_pnl + orig_leg_pnl
             # Объём в БД — реальный размер исходной ноги, а не reverse-ноги.
             report_qty = orig_qty if orig_qty > 0.0 else total_qty_before
             if trade_id_before is None:

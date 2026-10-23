@@ -1587,3 +1587,30 @@ ssh oracle-bot "cd /opt/trading-bot && bash /tmp/start_all_bots.sh"
 ssh oracle-bot "cd /opt/trading-bot && docker compose ps api-live"
 ssh oracle-bot "cd /opt/trading-bot && curl -s http://localhost:5001/api/bots | tr ',' '\n' | grep -E 'is_running' | sort | uniq -c"
 ```
+
+### 2026-10-23 (реверс-цепочка без преждевременного закрытия, jitter против банов, SYNC_RUNTIME)
+
+#### 23.1 `bot/main.py` — реверс-цепочка продолжается при отрицательном суммарном PnL
+- **Проблема:** при закрытии обратной ноги по TP1 цепочка завершалась даже если суммарный PnL цикла всё ещё отрицательный. Продолжение цепочки (открытие следующей ноги) срабатывало только при ударе по SL (`main.py:1916`). TP1 на обратной ноге с минусом приводил к закрытию цикла в убыток вместо перехода на следующую ногу.
+- **Исправление:** после `apply_hit_async("TP1")` для `is_reverse` позиции, если `pnl < 0` и `chain_step < chain_max`, бот открывает следующую ногу реверса (풀 copy логики `open_reverse_position` с `NET_REALIZED`, `net_position`, `unrealized`, `cycle_loss_cap` и backstop). Цепочка продолжается до тех пор, пока суммарный PnL не станет положительным или не достигнет `reverse_chain_max`.
+- **Дефолт `reverse_chain_max`:** `2 → 10` (`main.py:1923`), соответствует `config.py:99`. LTC имеет `reverse_chain_max: 100` в своём конфиге.
+
+#### 23.2 `bot/config.py` — `reverse_cum_loss_pct` выключен
+- `reverse_cum_loss_pct: 10.0 → 0.0` — кросс-кап убытка в 10% от депозита больше не прерывает reverse-цепочку раньше времени. Лимитом теперь является только `reverse_chain_max`.
+
+#### 23.3 `bot/position_tracker.py` — фикс двойного подсчёта `orig_leg_pnl`
+- При закрытии reverse-позиции с биржевыми данными (`exchange is not None`) `total_trade_pnl` уже включает обе ноги цикла (из `_exchange_cycle_summary`). Раньше к нему прибавлялся `orig_leg_pnl` — убыток первой ноги считался дважды, итоговый PnL занижался. Теперь `orig_leg_pnl` прибавляется только при fallback на локальный расчёт (`exchange is None`).
+
+#### 23.4 `bot/main.py` — jitter 0–60 с в `on_candle` против банов Binance -1003
+- Все 40 ботов теперь засыпают на случайное время после закрытия свечи перед обработкой `on_candle`. Это убирает синхронный всплеск REST-запросов klines в :00/:05/:10, который приводил к IP-бану Binance (код -1003, «banned until <ms>»). Баны прекратились.
+
+#### 23.5 `bot/main.py` — `SYNC_RUNTIME` в `periodic_position_check`
+- Если трекер пуст, но на бирже есть позиция (открыта вручную, предыдущим экземпляром бота или до перезапуска), бот подхватывает её в состояние: создаёт `Position` с направлением, entry, SL/TP из конфига, `reverse_chain_step=0`. Позиция появляется в дашборде и начинает торговаться нормально. Проверка работает раз в час в `periodic_position_check`.
+
+#### 23.6 `bot/recovery_config.yaml` / `.env.live` — `max_positions: 1`
+- Глобальный лимит открытых позиций — 1. Пока открыта хотя бы одна позиция (LTC или DOGE), новые входы для остальных монет блокируются сервером с причиной `max_positions positions=N`. Reverse-ноги к уже открытой позиции слот не ocupают.
+
+#### 23.7 Тесты и деплой
+- `cd bot && python -m pytest tests/` — `128 passed`, 0 упавших.
+- Контейнер `replit_scalper-api-testnet` перезапущен, 39 ботов работают с новым кодом.
+- Изменения скопированы на сервер в `/opt/trading-bot/bot/` (main.py, config.py, configs/testnet/config_ltc.yaml, recovery_config.yaml).
