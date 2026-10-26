@@ -102,6 +102,12 @@ async function buildAll() {
       "electron",
     ],
     sourcemap: "linked",
+    // Resolve the workspace lib packages from the repo root: the previous
+    // /opt-only absolute paths broke every build outside the Oracle host.
+    alias: {
+      "@workspace/db": path.resolve(artifactDir, "../../lib/db/src/index.ts"),
+      "@workspace/api-zod": path.resolve(artifactDir, "../../lib/api-zod/src/index.ts"),
+    },
     plugins: [
       // pino relies on workers to handle logging, instead of externalizing it we use a plugin to handle it
       esbuildPluginPino({ transports: ["pino-pretty"] })
