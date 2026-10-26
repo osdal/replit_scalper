@@ -144,8 +144,43 @@ def test_estimate_weight_account():
     assert _estimate_weight("GET", "/fapi/v1/positionRisk") == 5
     assert _estimate_weight("GET", "/fapi/v1/ticker/price") == 1
     assert _estimate_weight("GET", "/fapi/v1/klines") == 1
+    # Вес klines зависит от limit — иначе прогрев на 300 свечей недооценивается.
+    assert _estimate_weight("GET", "/fapi/v1/klines", limit=2) == 1
+    assert _estimate_weight("GET", "/fapi/v1/klines", limit=100) == 2
+    assert _estimate_weight("GET", "/fapi/v1/klines", data={"limit": 300}) == 2
+    assert _estimate_weight("GET", "/fapi/v1/klines", params={"limit": 500}) == 5
+    assert _estimate_weight("GET", "/fapi/v1/klines", data={"limit": 1500}) == 10
     assert _estimate_weight("POST", "/fapi/v1/order") == 1
     assert _estimate_weight("GET", "/fapi/v1/unknown") == 1
+
+
+def test_note_request_aggregates_and_logs(tmp_path, caplog):
+    """Диагностика спроса: суммирует запросы по эндпоинту и пишет топ в лог."""
+    import time as _time
+
+    p = tmp_path / "gate.json"
+    write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 100, "ts": _time.time()})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
+    gate._demand_since = _time.time()
+
+    gate.note_request("GET", "/fapi/v1/klines?symbol=BTCUSDT&limit=2", 1, False, False)
+    gate.note_request("GET", "/fapi/v1/klines?symbol=ETHUSDT&limit=2", 1, False, True)
+    gate.note_request("GET", "/fapi/v1/positionRisk", 5, True, True)
+    gate.note_request("GET", "/fapi/v1/positionRisk", 5, True, True)
+
+    rec = gate._demand["GET /fapi/v1/positionRisk"]
+    assert rec[0] == 2 and rec[1] == 10 and rec[3] == 2
+    kl = gate._demand["GET /fapi/v1/klines"]
+    assert kl[0] == 2 and kl[1] == 2 and kl[2] == 1
+
+    # Окно истекло -> пишется строка с топом и счётчики сбрасываются.
+    gate._demand_since = _time.time() - 61
+    with caplog.at_level("WARNING", logger="binance_gate"):
+        gate.note_request("GET", "/fapi/v1/ticker/price", 1, True, True)
+    messages = [r.message for r in caplog.records if "demand" in r.message]
+    assert messages, "demand breakdown line not logged"
+    assert "GET /fapi/v1/positionRisk" in messages[0]
+    assert gate._demand["GET /fapi/v1/ticker/price"][0] == 1
 
 
 def test_is_critical():

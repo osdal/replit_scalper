@@ -109,6 +109,10 @@ class AccountGate:
         self._last_write_ts: float = 0.0
         self._cache: dict | None = None
         self._cache_ts: float = 0.0
+        # Диагностика спроса: какие эндпоинты сколько веса просят. Сбрасывается
+        # раз в STATS_INTERVAL_SEC и пишется одной строкой в лог.
+        self._demand: dict[str, list[int]] = {}
+        self._demand_since: float = _now_sec()
 
     # ------------------------------------------------------------------ #
     #  Файловые хелперы                                                  #
@@ -274,6 +278,50 @@ class AccountGate:
             f"banned_until={data.get('ban_until_ms', 0)}"
         )
 
+    def note_request(
+        self, method: str, uri: str, weight: int, is_critical: bool, allowed: bool
+    ) -> None:
+        """Учесть запрос для диагностики спроса (ничего не решает)."""
+        try:
+            self._maybe_log_demand()
+            key = f"{method.upper()} {uri.split('?')[0]}"
+            rec = self._demand.get(key)
+            if rec is None:
+                rec = self._demand[key] = [0, 0, 0, 0]
+            rec[0] += 1
+            rec[1] += int(weight)
+            if not allowed:
+                rec[2] += 1
+            if is_critical:
+                rec[3] += 1
+        except Exception:
+            pass
+
+    def _maybe_log_demand(self) -> None:
+        """Раз в STATS_INTERVAL_SEC пишет топ эндпоинтов по запрошенному весу.
+
+        Нужно, чтобы понять, кто именно съедает лимит 2400/мин: shedding видит
+        только суммарный вес из заголовков, без разбивки по запросам.
+        """
+        now = _now_sec()
+        window = now - self._demand_since
+        if window < STATS_INTERVAL_SEC or not self._demand:
+            return
+        items = sorted(self._demand.items(), key=lambda kv: kv[1][1], reverse=True)
+        total_req = sum(v[0] for _, v in items)
+        total_w = sum(v[1] for _, v in items)
+        total_shed = sum(v[2] for _, v in items)
+        total_crit = sum(v[3] for _, v in items)
+        top = " | ".join(
+            f"{k} req={v[0]} w={v[1]} shed={v[2]}" for k, v in items[:6]
+        )
+        logger.warning(
+            f"[RATE_LIMIT] demand {window:.0f}s | req={total_req} w={total_w} "
+            f"critical={total_crit} shed={total_shed} | {top}"
+        )
+        self._demand = {}
+        self._demand_since = now
+
     def get_status(self) -> dict:
         self._cache_ts = 0.0
         try:
@@ -292,7 +340,7 @@ class AccountGate:
 # --------------------------------------------------------------------------- #
 #  Веса запросов                                                            #
 # --------------------------------------------------------------------------- #
-def _estimate_weight(method: str, uri: str) -> int:
+def _estimate_weight(method: str, uri: str, **kwargs) -> int:
     """Приблизительный вес запроса в единицах Binance weight."""
     u = uri.upper()
     if "/ACCOUNT" in u:
@@ -304,6 +352,22 @@ def _estimate_weight(method: str, uri: str) -> int:
     if "/MYTRADES" in u:
         return 5
     if "/KLINES" in u:
+        # Вес klines зависит от limit: 1 (<100), 2 (100-499), 5 (500-999), 10 (>=1000).
+        limit = kwargs.get("limit")
+        if limit is None:
+            params = kwargs.get("data") or kwargs.get("params") or {}
+            if isinstance(params, dict):
+                limit = params.get("limit")
+        try:
+            n = int(limit) if limit is not None else 0
+        except (TypeError, ValueError):
+            n = 0
+        if n >= 1000:
+            return 10
+        if n >= 500:
+            return 5
+        if n >= 100:
+            return 2
         return 1
     if "/TICKER/PRICE" in u:
         return 1
@@ -371,7 +435,7 @@ def _wrap_client(client, gate: AccountGate):
     original_request = client._request
 
     async def gated_request(method, uri, signed, force_params=False, **kwargs):
-        weight = _estimate_weight(method, uri)
+        weight = _estimate_weight(method, uri, **kwargs)
         is_critical = _is_critical(method, uri, **kwargs)
 
         try:
@@ -379,6 +443,11 @@ def _wrap_client(client, gate: AccountGate):
         except Exception:
             logger.warning("[RATE_LIMIT] gate check failed, allowing request")
             allowed = True
+
+        try:
+            gate.note_request(method, uri, weight, is_critical, allowed)
+        except Exception:
+            pass
 
         if not allowed:
             raise GateBlocked(reason, code=-1003 if reason.startswith("banned until") else -429)
