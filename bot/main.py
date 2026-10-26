@@ -1162,7 +1162,7 @@ async def _sync_position_on_start(
         log.warning(
             f"[SYNC] Dust position on exchange | {direction} qty={exchange_qty} "
             f"notional≈${exchange_qty * entry_price:.4f} "
-            f"< minNotional=${min_notional:.2f} — closing residual, not adopting it"
+            f"< minNotional=${min_notional:.2f} — not adopting it (no order can close it)"
         )
         try:
             await order_mgr.cancel_all_tp_sl(direction)
@@ -1182,7 +1182,7 @@ async def _sync_position_on_start(
         else:
             log.warning(
                 f"[SYNC] Dust residual is still on exchange | {direction} "
-                f"qty={exchange_qty} — cleanup order armed, tracker state cleared"
+                f"qty={exchange_qty} — ignored; the next entry nets it, tracker state cleared"
             )
         return
 
@@ -3168,37 +3168,47 @@ async def _run_live_or_paper(
                 if stale and abs(stale.get("qty", 0.0)) > DUST_QTY:
                     stale_dir = stale.get("direction")
                     stale_qty = abs(stale.get("qty", 0.0))
-                    flattened = False
-                    try:
-                        flattened = await order_mgr.close_position_market(stale_dir, mode=entry_mode)
-                        if not flattened:
-                            flattened = await order_mgr.close_dust(stale_dir, mode=entry_mode)
-                    except Exception as e:
-                        log.warning(f"[GUARD] stale flatten failed: {e}")
-                        flattened = False
-                    if not flattened:
+                    stale_entry = float(stale.get("entry_price", 0) or 0.0)
+                    # Пыль (< MIN_NOTIONAL) закрыть нельзя: reduceOnly даёт -2022,
+                    # обычный market -4164, а closePosition на тестнете однажды
+                    # исполнился объёмом в 800 раз больше позиции. Такой остаток
+                    # безопаснее игнорировать — следующий вход его неттит.
+                    if await order_mgr._is_dust_notional(stale_qty, stale_entry):
                         log.warning(
-                            f"[GUARD] entry skipped: could not flatten stale position | "
-                            f"qty={stale_qty:.6f} direction={stale_dir}"
+                            f"[GUARD] stale dust below minNotional — ignoring | "
+                            f"qty={stale_qty:.6f} direction={stale_dir} "
+                            f"entry={stale_entry:.6f}; the next entry nets it"
                         )
-                        return
-                    log.info(
-                        f"[GUARD] stale position flattened | qty={stale_qty:.6f} direction={stale_dir}"
-                    )
-                    # Биржа уже сфлэттенила остаток помимо логики бота. Если по
-                    # этому остатку осталась открытая строка trades (is_open=1) —
-                    # закрываем её по реальным филлам, иначе в дашборде будет
-                    # висеть пустая открытая запись. Если соответствующей строки
-                    # нет — метод ничего не пишет, логируем и продолжаем.
-                    if not await tracker.close_open_trade_from_exchange(
-                        exit_reason="stale_flatten",
-                        direction=stale_dir,
-                    ):
+                    else:
+                        flattened = False
+                        try:
+                            flattened = await order_mgr.close_position_market(stale_dir, mode=entry_mode)
+                        except Exception as e:
+                            log.warning(f"[GUARD] stale flatten failed: {e}")
+                            flattened = False
+                        if not flattened:
+                            log.warning(
+                                f"[GUARD] entry skipped: could not flatten stale position | "
+                                f"qty={stale_qty:.6f} direction={stale_dir}"
+                            )
+                            return
                         log.info(
-                            f"[GUARD] stale position flattened but no matching open "
-                            f"trade row to close | direction={stale_dir} "
-                            f"qty={stale_qty:.6f}"
+                            f"[GUARD] stale position flattened | qty={stale_qty:.6f} direction={stale_dir}"
                         )
+                        # Биржа уже сфлэттенила остаток помимо логики бота. Если по
+                        # этому остатку осталась открытая строка trades (is_open=1) —
+                        # закрываем её по реальным филлам, иначе в дашборде будет
+                        # висеть пустая открытая запись. Если соответствующей строки
+                        # нет — метод ничего не пишет, логируем и продолжаем.
+                        if not await tracker.close_open_trade_from_exchange(
+                            exit_reason="stale_flatten",
+                            direction=stale_dir,
+                        ):
+                            log.info(
+                                f"[GUARD] stale position flattened but no matching open "
+                                f"trade row to close | direction={stale_dir} "
+                                f"qty={stale_qty:.6f}"
+                            )
 
             # relay-only: свои сигналы не торгуем (вход только из testnet-релея).
             if await _is_relay_only(cfg, log):
