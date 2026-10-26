@@ -1644,6 +1644,14 @@ async def _run_live_or_paper(
             except Exception as e:
                 log.warning(f"[REVERSE] residual check failed: {e}")
                 return
+            if real_qty < 0:
+                # Fetch failed (-1): cannot confirm flat. Leave everything as-is
+                # and retry next tick instead of finalizing a half-open row.
+                log.warning(
+                    f"[REVERSE] residual check inconclusive (fetch failed) | "
+                    f"direction={direction} - deferring finalize"
+                )
+                return
             if real_qty > 0:
                 if real_qty > DUST_QTY:
                     log.warning(
@@ -1666,6 +1674,26 @@ async def _run_live_or_paper(
                             log.debug(f"[REVERSE] post-close verify failed: {e}")
                 else:
                     await order_mgr.close_dust(direction, mode=pos_mode)
+            # Re-verify the exchange is actually flat before finalizing the row.
+            # Otherwise a failed fetch (-1) or an unclosed residual leaves the
+            # classic "DB closed, exchange still open" desync.
+            try:
+                order_mgr._invalidate_position_cache()
+                still_open = await order_mgr._get_real_position_qty(direction)
+            except Exception:
+                still_open = -1.0
+            if still_open < 0:
+                log.warning(
+                    f"[REVERSE] post-close verify inconclusive | "
+                    f"direction={direction} - deferring finalize"
+                )
+                return
+            if still_open > DUST_QTY:
+                log.warning(
+                    f"[REVERSE] residual not flat after close | "
+                    f"qty={still_open:.6f} direction={direction} - deferring finalize"
+                )
+                return
             if tracker.position is not None:
                 if (tracker.position.remaining_qty > 0.0
                         or tracker.position.total_qty > 0.0):
