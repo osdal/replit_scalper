@@ -93,6 +93,7 @@ max_position_notional_usd: 0
 max_position_pct_equity: 100
 mode: live
 paper_balance: 1000.0
+position_size_pct: 1
 position_size_usd: 0
 reverse_chain_max: 10
 risk_pct: 3

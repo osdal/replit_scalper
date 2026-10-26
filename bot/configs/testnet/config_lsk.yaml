@@ -91,6 +91,7 @@ max_position_pct_equity: 100
 mode: live
 name: LSK
 paper_balance: 1000.0
+position_size_pct: 1
 risk_pct: 3.0
 rsi_high: 70
 rsi_low: 30
