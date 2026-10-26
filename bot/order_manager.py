@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import time
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional, Tuple
 
 from binance import AsyncClient
@@ -79,8 +80,22 @@ def calc_quantity(
 
 
 def _round_step(value: float, step: float) -> float:
-    precision = max(0, round(-math.log10(step)))
-    return round(math.floor(value / step) * step, precision)
+    """Округление quantity ВНИЗ до шага биржи без ошибок двоичной точки.
+
+    Старая реализация считала ``math.floor(value / step) * step``. Для
+    value=73.1, step=0.1 деление даёт 730.9999999999999 → floor 730 → 73.0,
+    то есть на один шаг МЕНЬШЕ позиции. Такой недобор закрывал 73.0 из 73.1 и
+    оставлял на бирже остаток 0.1 — «пыль», которую нельзя ни защитить TP
+    (биржа отвечает -2022 ReduceOnly), ни закрыть (-4164 notional). Поэтому
+    считаем через Decimal: 73.1 / 0.1 = 731 ровно.
+    """
+    if value is None or step is None or step <= 0:
+        return value
+    d_step = Decimal(str(step))
+    if d_step <= 0:
+        return value
+    steps = (Decimal(str(value)) / d_step).to_integral_value(rounding=ROUND_FLOOR)
+    return float(steps * d_step)
 
 
 def _extract_max_leverage(data: object) -> Optional[int]:
@@ -191,6 +206,12 @@ class OrderManager:
         # отличить выход по TP от необъяснимого stale_close, если уровни
         # разошлись. Персистится через Position.exchange_tp_price.
         self.exchange_tp_price: float = 0.0
+        # Причина, по которой реверс сознательно не открыт в прошлой попытке
+        # ("dust" — хедж ниже MIN_NOTIONAL). main.py не делает retry в этом случае.
+        self.last_reverse_skip_reason: Optional[str] = None
+        # Монотонное время последней попытки поставить closePosition-ордер на
+        # пылевой остаток (не чаще раза в 5 минут).
+        self._dust_cleanup_ts: float = 0.0
         # Read-only кэши дорогих вызовов (balance / position info).
         self._balance_cache = {"value": None, "free": None, "ts": 0.0, "mode": None}
         self._position_cache = {"value": None, "ts": 0.0, "symbol": None}
@@ -255,6 +276,29 @@ class OrderManager:
             except Exception as e:
                 self.log.debug(f"[LIVE] minNotional fetch failed: {e}")
         return float(self._min_notional or 0.0)
+
+    async def _is_dust_notional(
+        self, qty: float, price: float, factor: float = 0.98
+    ) -> bool:
+        """True, если notional позиции ниже биржевого MIN_NOTIONAL.
+
+        Такую позицию биржа не даёт ни защитить, ни закрыть обычным ордером:
+        reduceOnly отклоняется с -2022 («ReduceOnly Order is rejected»),
+        обычный MARKET — с -4164 («notional must be no smaller than N»).
+        Вызывающий код обязан пропустить TP/SL и убрать остаток через
+        close_dust(). factor=0.98 — запас на округление цены.
+        """
+        try:
+            qty = float(qty or 0.0)
+            price = float(price or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if self.cfg.mode != "live" or qty <= 0 or price <= 0:
+            return False
+        min_notional = await self._get_min_notional_usd()
+        if min_notional <= 0:
+            return False
+        return qty * price < min_notional * factor
 
     def _order_max_qty(self) -> Optional[float]:
         """Максимум qty на один ордер: MARKET_LOT_SIZE имеет приоритет над LOT_SIZE."""
@@ -329,8 +373,11 @@ class OrderManager:
             return round(price, 8)
         await self._get_symbol_filters()
         if self._tick_size:
-            precision = max(0, round(-math.log10(self._tick_size)))
-            return round(round(price / self._tick_size) * self._tick_size, precision)
+            # Decimal, а не math.log10: для не-степенных тиков (0.005, 2.5)
+            # старая формула брала неверное число знаков и портила цену.
+            tick = Decimal(str(self._tick_size))
+            steps = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_HALF_UP)
+            return float(steps * tick)
         return round(price, self._price_precision)
 
     # ------------------------------------------------------------------ #
@@ -722,6 +769,19 @@ class OrderManager:
         tp2_qty = await self._adjust_qty(total_qty - tp1_qty, mode="live")
         self.log.info(f"[ORDER] Placing all orders | sl_qty={total_qty} tp1_qty={tp1_qty} tp2_qty={tp2_qty}")
 
+        # Пыль (< MIN_NOTIONAL) защитить нельзя: биржа отклонит reduceOnly TP
+        # с -2022. Не пытаемся — убираем остаток и выходим, иначе каждая свеча
+        # и каждый рестарт повторяют одну и ту же ошибку.
+        if await self._is_dust_notional(total_qty, tp1_price):
+            min_notional = await self._get_min_notional_usd()
+            self.log.warning(
+                f"[ORDER] Dust position | qty={total_qty} "
+                f"notional≈${total_qty * (tp1_price or 0):.4f} "
+                f"< minNotional=${min_notional:.2f} — TP/SL impossible, closing residual"
+            )
+            await self.close_dust(direction)
+            return
+
         await self._place_sl(direction, sl_price, qty=total_qty)
         try:
             await self._place_tp_limit(direction, tp1_price, tp1_qty)
@@ -732,9 +792,19 @@ class OrderManager:
                 )
             else:
                 await self._place_tp_limit(direction, tp2_price, tp2_qty)
+        except BinanceAPIException as e:
+            # -2022 = reduceOnly отклонён (нет позиции, встречный reduceOnly,
+            # notional ниже минимума). Это НЕ повод прерывать весь свечной
+            # цикл: позиция остаётся под виртуальным SL и биржевым backstop.
+            if e.code == -2022:
+                self.log.warning(
+                    f"[ORDER] TP rejected (-2022 ReduceOnly) | qty={total_qty} "
+                    f"— position stays SL-only: {e.message}"
+                )
+            else:
+                self.log.error(f"[ORDER] Failed to place TP orders: {e}", exc_info=True)
         except Exception as e:
             self.log.error(f"[ORDER] Failed to place TP orders: {e}", exc_info=True)
-            raise
 
         # Широкий биржевой safety-net поверх виртуального SL (reverse-логика не
         # затрагивается: _place_sl остаётся no-op). Ставим последним, чтобы при
@@ -951,6 +1021,10 @@ class OrderManager:
         """
         if mode is None:
             mode = self.cfg.mode
+
+        # Причина, по которой реверс сознательно не открыт (например "dust").
+        # main.py читает её, чтобы не делать бессмысленные retry 1/3..3/3.
+        self.last_reverse_skip_reason = None
 
         # Единый fee/profit-aware сайзинг используется И для 1-го reverse, И для
         # шагов цепочки, когда доступны данные книги цикла. Для 1-го reverse
@@ -1387,6 +1461,20 @@ class OrderManager:
             self.log.warning(f"[REVERSE] chain qty={qty} <= 0 — no new leg")
             return None
 
+        # Хедж меньше MIN_NOTIONAL биржа не примет (обычный ордер -4164,
+        # reduceOnly -2022). Реверс на пыли невозможен — закрываем остаток,
+        # а не долбим биржу тремя попытками с трейсбеками.
+        if await self._is_dust_notional(qty, P):
+            min_notional = await self._get_min_notional_usd()
+            self.log.warning(
+                f"[REVERSE] hedge below minNotional — reversing impossible | "
+                f"qty={qty} price={P} notional≈${qty * P:.4f} "
+                f"< minNotional=${min_notional:.2f}; closing residual instead"
+            )
+            self.last_reverse_skip_reason = "dust"
+            await self.close_dust(original_direction, mode=mode)
+            return None
+
         signed_qty = qty if q > 0 else -qty
 
         # MARKET-ордер нового плеча. Если объём больше биржевого maxQty на один
@@ -1814,6 +1902,21 @@ class OrderManager:
                 # Use actual qty from exchange
                 qty = real_qty
                 entry_price = await self._get_real_position_entry(signal.direction) or entry_price
+
+            # Вход меньше MIN_NOTIONAL защитить/закрыть обычными ордерами нельзя
+            # (-2022 на reduceOnly, -4164 на market). Не заводим такую позицию
+            # в трекере: убираем остаток и выходим, иначе каждая свеча будет
+            # повторять ошибку TP.
+            if await self._is_dust_notional(qty, entry_price):
+                min_notional = await self._get_min_notional_usd()
+                self.log.warning(
+                    f"[LIVE] Entry below minNotional | qty={qty} "
+                    f"notional≈${qty * entry_price:.4f} "
+                    f"< minNotional=${min_notional:.2f} — closing residual instead of tracking"
+                )
+                await self.close_dust(signal.direction)
+                return None
+
             if is_recovery:
                 # Recalculate TP to cover target profit
                 # target_profit = qty * price_move → price_move = target_profit / qty
@@ -1890,37 +1993,142 @@ class OrderManager:
             return True
 
     async def close_dust(self, direction: str, mode: Optional[str] = None) -> bool:
-        """Закрывает пылевую позицию (notional < $1) маркет-ордером."""
+        """Убирает пылевой остаток (< MIN_NOTIONAL) с биржи.
+
+        Пыль нельзя закрыть обычными ордерами: reduceOnly биржа отклоняет с
+        -2022, а обычный MARKET — с -4164 («notional must be no smaller than N»).
+        Единственный принимаемый путь — STOP_MARKET с closePosition=true: у него
+        нет quantity, поэтому проверка notional не применяется. Ставим триггер в
+        0.2% от цены; он срабатывает на ближайшем движении и закрывает остаток.
+
+        Возвращает True только если позиция реально стала нулевой. False —
+        «сейчас не закрылась»: трекер не должен считать остаток закрытым.
+        """
         if mode is None:
             mode = self.cfg.mode
-        if mode != "live":
+        if mode != "live" or self.client is None:
             return False
         try:
             real_qty = await self._get_real_position_qty(direction)
-            if real_qty <= 0:
-                return False
+        except Exception as e:
+            self.log.debug(f"[DUST] position check failed: {e}")
+            return False
+        if real_qty <= 0:
+            return False
+
+        try:
             ticker = await self.client.futures_symbol_ticker(symbol=self.cfg.symbol)
-            price = float(ticker.get("price", 0))
-            notional = real_qty * price
-            if notional > 1.0:
-                return False
-            side = SIDE_SELL if direction == "LONG" else SIDE_BUY
-            # Use minimum stepSize to ensure order is accepted by Binance
-            step_size = self._step_size if self._step_size else 0.001
-            min_qty = max(real_qty, step_size)
+            price = float(ticker.get("price", 0) or 0)
+        except Exception:
+            price = 0.0
+
+        min_notional = await self._get_min_notional_usd()
+        notional = real_qty * price
+        # Пыль = notional ниже MIN_NOTIONAL. Если фильтры ещё не получены,
+        # сохраняем исторический порог $1.
+        dust_limit = min_notional if min_notional > 0 else 1.0
+        if price > 0 and notional >= dust_limit * 0.98:
+            return False
+
+        # Троттлинг: пыль может висеть часами, а вызовы идут каждый тик.
+        # Не чаще одной попытки в 2 минуты на символ.
+        now = time.monotonic()
+        if now - getattr(self, "_dust_try_ts", 0.0) < 120.0:
+            return False
+        self._dust_try_ts = now
+
+        side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+
+        # 1) Прямое reduceOnly-закрытие. Для части аккаунтов/символов биржа
+        #    всё же принимает его — тогда позиция закрывается сразу.
+        try:
+            qty = _round_step(real_qty, self._step_size or 0.0)
+            if qty <= 0 or qty > real_qty + 1e-12:
+                qty = real_qty
             await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=min_qty,
+                quantity=qty,
                 reduceOnly=True,
             )
-            # Закрытие изменило позицию/баланс — кэши невалидны.
             self._invalidate_caches()
-            self.log.info(f"[LIVE] Dust closed | {direction} qty={min_qty} actual_qty={real_qty} notional=${notional:.4f}")
-            return True
+            self._invalidate_position_cache()
+            left = await self._get_real_position_qty(direction)
+            if left <= 0:
+                self.log.info(
+                    f"[DUST] Closed | {direction} qty={qty} notional=${notional:.4f}"
+                )
+                return True
+            self.log.warning(
+                f"[DUST] reduceOnly accepted but position still open | "
+                f"{direction} qty={left:.6f}"
+            )
+        except BinanceAPIException as e:
+            self.log.warning(
+                f"[DUST] Market close rejected ({e.code}) — falling back to "
+                f"closePosition stop | {direction} qty={real_qty} notional=${notional:.4f}"
+            )
         except Exception as e:
-            self.log.warning(f"[LIVE] Could not close dust: {e}")
+            self.log.warning(f"[DUST] Market close failed: {e}")
+
+        # 2) closePosition=true. Триггер чуть в стороне от рынка, чтобы биржа
+        #    не отклонила ордер как «сработал бы сразу» (-2021).
+        now = time.monotonic()
+        if now - getattr(self, "_dust_cleanup_ts", 0.0) < 300.0:
+            # Не спамим: один и тот же остаток не требует ордера каждую свечу.
+            return False
+        try:
+            mark = price
+            try:
+                ticker = await self.client.futures_mark_price(symbol=self.cfg.symbol)
+                mark = float(ticker.get("markPrice", price) or price)
+            except Exception:
+                pass
+            if direction == "LONG":
+                trigger_raw = mark * (1 - 0.002)
+            else:
+                trigger_raw = mark * (1 + 0.002)
+            trigger = await self._adjust_price(trigger_raw, mode="live")
+            client_algo_id = f"botdust_{self.cfg.symbol[:12].lower()}"
+            # Снимаем предыдущий dust-ордер, иначе clientAlgoId будет дублем.
+            try:
+                existing = await self.client.futures_get_open_algo_orders(symbol=self.cfg.symbol)
+                for order in existing or []:
+                    if str(order.get("clientAlgoId", "")).startswith("botdust_"):
+                        aid = order.get("algoId") or order.get("orderId")
+                        if aid:
+                            await self.client.futures_cancel_algo_order(
+                                symbol=self.cfg.symbol, algoId=aid
+                            )
+            except Exception as e:
+                self.log.debug(f"[DUST] cleanup of previous dust order failed: {e}")
+            await self.client.futures_create_algo_order(
+                algoType="CONDITIONAL",
+                symbol=self.cfg.symbol,
+                side=side,
+                type="STOP_MARKET",
+                triggerPrice=trigger,
+                closePosition="true",
+                workingType="MARK_PRICE",
+                clientAlgoId=client_algo_id,
+            )
+            self._dust_cleanup_ts = now
+            self.log.warning(
+                f"[DUST] Cleanup order placed | {direction} qty={real_qty} "
+                f"notional=${notional:.4f} trigger={trigger} "
+                f"(closes the position on the next 0.2% move)"
+            )
+            # Даём ордеру мгновение на исполнение, если цена уже прошла триггер.
+            await asyncio.sleep(2.0)
+            self._invalidate_position_cache()
+            left = await self._get_real_position_qty(direction)
+            return left <= 0
+        except BinanceAPIException as e:
+            self.log.warning(f"[DUST] closePosition order rejected ({e.code}): {e.message}")
+            return False
+        except Exception as e:
+            self.log.warning(f"[DUST] Could not place cleanup order: {e}")
             return False
 
     async def close_position_market(self, direction: str, mode: Optional[str] = None) -> bool:

@@ -1154,6 +1154,38 @@ async def _sync_position_on_start(
         log.warning(f"[SYNC] Position found but entryPrice=0, skipping")
         return
 
+    # Пыль (< MIN_NOTIONAL) защитить нельзя: reduceOnly TP биржа отклоняет с
+    # -2022, обычный MARKET — с -4164. Не заводим остаток в трекер и не создаём
+    # под него сделку (иначе каждый рестарт повторяет ошибку), а убираем его.
+    if await order_mgr._is_dust_notional(exchange_qty, entry_price):
+        min_notional = await order_mgr._get_min_notional_usd()
+        log.warning(
+            f"[SYNC] Dust position on exchange | {direction} qty={exchange_qty} "
+            f"notional≈${exchange_qty * entry_price:.4f} "
+            f"< minNotional=${min_notional:.2f} — closing residual, not adopting it"
+        )
+        try:
+            await order_mgr.cancel_all_tp_sl(direction)
+        except Exception as e:
+            log.debug(f"[SYNC] dust cleanup: cancel orders failed: {e}")
+        closed_now = await order_mgr.close_dust(direction)
+        order_mgr.backstop_algo_id = None
+        tracker.position = None
+        tracker._clear_state()
+        if closed_now:
+            # Позиция стала нулевой. Прогоняем штатную ветку «позиции нет»:
+            # она закроет незакрытую сделку в БД и освободит recovery-цепочку.
+            await _sync_position_on_start(
+                cfg, client, tracker, order_mgr, log,
+                recovery=recovery, notifier=notifier,
+            )
+        else:
+            log.warning(
+                f"[SYNC] Dust residual is still on exchange | {direction} "
+                f"qty={exchange_qty} — cleanup order armed, tracker state cleared"
+            )
+        return
+
     try:
         await order_mgr._get_symbol_filters()
     except Exception as e:
@@ -2537,6 +2569,15 @@ async def _run_live_or_paper(
                         log.warning(f"[REVERSE] 1st-leg attempt {_attempt}/3 error: {_e}")
                         reverse_result = None
                     if reverse_result:
+                        break
+                    if getattr(order_mgr, "last_reverse_skip_reason", None) == "dust":
+                        # Хедж ниже MIN_NOTIONAL: биржа не примет ни market, ни
+                        # reduceOnly. Повторять бессмысленно — остаток уже
+                        # отправлен в close_dust(), выходим из цикла попыток.
+                        log.warning(
+                            "[REVERSE] dust position — reversing is impossible, "
+                            "residual queued for cleanup (no retry)"
+                        )
                         break
                     if _attempt < 3:
                         log.warning(
