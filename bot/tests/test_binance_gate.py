@@ -241,3 +241,35 @@ def test_wrap_client_records_ban(tmp_path):
     assert exc.value.code == -1003
     data = read_gate(gate._my_path())
     assert data["ban_until_ms"] == 99999999999
+
+
+def test_wrap_client_shares_ban_without_timestamp(tmp_path):
+    """-1003 без 'banned until' (как на testnet) -> общее окно на BAN_FALLBACK_SEC.
+
+    Иначе забаненный IP продолжают долбить остальные боты: бан продлевается.
+    """
+    import time as _time
+    from binance_gate import BAN_FALLBACK_SEC
+
+    p = tmp_path / "gate.json"
+    write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 0, "ts": _time.time()})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
+
+    class NoTimestampBanClient:
+        async def _request(self, method, uri, signed, force_params=False, **kwargs):
+            e = Exception("Too many requests")
+            e.code = -1003
+            e.status_code = 418
+            raise e
+
+    client = NoTimestampBanClient()
+    wrap_client(client, gate)
+    with pytest.raises(Exception) as exc:
+        run(client._request("GET", "/fapi/v1/ticker/price", signed=False, symbol="BTCUSDT"))
+    assert exc.value.code == -1003
+
+    data = read_gate(gate._my_path())
+    now_ms = int(_time.time() * 1000)
+    assert data["ban_until_ms"] > now_ms + int((BAN_FALLBACK_SEC - 5) * 1000)
+    assert data["ban_until_ms"] <= now_ms + int((BAN_FALLBACK_SEC + 5) * 1000)
+    assert gate.is_banned() is True

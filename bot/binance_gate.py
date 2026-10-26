@@ -30,6 +30,10 @@ STATS_INTERVAL_SEC = 60.0
 WRITE_INTERVAL_SEC = 1.0
 WEIGHT_TTL_SEC = 60.0
 RETRY_AFTER_DEFAULT_SEC = 10.0
+# Сколько держать общую паузу, если -1003 пришёл БЕЗ 'banned until' и без
+# Retry-After (типично для testnet). Бан общий на IP: без этого окна остальные
+# боты продолжают слать запросы и продлевают бан.
+BAN_FALLBACK_SEC = float(os.getenv("BINANCE_BAN_FALLBACK_SEC", "30"))
 
 
 def _now_ms() -> int:
@@ -387,10 +391,16 @@ def _wrap_client(client, gate: AccountGate):
             try:
                 resp = getattr(client, "response", None)
                 status = getattr(e, "status_code", None)
+                code = getattr(e, "code", None)
                 ban = _parse_ban_until(str(e))
-                if ban is None and status in (418, 429):
+                if ban is None and (status in (418, 429) or code in (-1003, -429)):
                     ra = _header(resp, "Retry-After")
-                    ban = _now_ms() + int(float(ra) * 1000 if ra else RETRY_AFTER_DEFAULT_SEC * 1000)
+                    if ra:
+                        ban = _now_ms() + int(float(ra) * 1000)
+                    elif code == -1003:
+                        ban = _now_ms() + int(BAN_FALLBACK_SEC * 1000)
+                    else:
+                        ban = _now_ms() + int(RETRY_AFTER_DEFAULT_SEC * 1000)
                 if ban:
                     gate.record_ban(ban)
             except Exception:

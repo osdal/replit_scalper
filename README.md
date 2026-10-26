@@ -1731,3 +1731,20 @@ quantity и попытки закрыть остаток, который бир�
   `[SYNC] Position poll failed — keeping saved state untouched`, стейт не меняется.
 - Регресс: `test_adopt_qty.py` — 5→4, совпадение, `tp1_hit` с сохранением `total`, `-1` и `pos=None`;
   все 6 без ордеров и записи на биржу.
+
+#### 26.8 `docker-compose.yml`, `bot/binance_gate.py` — включён общий шлюз rate-limit
+- **Причина.** Проверка банов за сутки: 3 эпизода `-1003` (25.10 10:45 ARB+SUI, 11:00 MTL,
+  20:30 FIL+TAO), у testnet-сообщений нет `banned until`, поэтому бот ждал только джиттер 1–3 с.
+  При этом `X-MBX-USED-WEIGHT-1M` на общем IP гуляет **900–3500** при лимите 2400/мин.
+- **Регрессия конфига.** Шлюз был включён для `api-testnet` ещё 17.10 (changelog 2026-10-17), но при
+  синхронизации compose с Oracle-рантаймом (`0e23cea`) переменные `BINANCE_GATE_*` потерялись —
+  в логах каждого бота было `[RATE_LIMIT] Gate OFF (BINANCE_GATE_ENABLED!=1)`.
+- **`docker-compose.yml` → `api-testnet`**: `BINANCE_GATE_ENABLED=1`, `BINANCE_WEIGHT_LIMIT_1M=2400`,
+  `BINANCE_SHED_AT=0.75`, `BINANCE_BAN_FALLBACK_SEC=30`. `api-live` не менялся (по умолчанию выключен).
+- **`binance_gate.py`: общая пауза на бан без таймстампа.** Раньше `-1003` без `banned until` и без
+  `Retry-After` не записывался в общий файл: один бот ждал 1–3 с, а остальные 39 продолжали слать
+  запросы и продлевали IP-бан. Теперь такой `-1003` пишет `ban_until_ms = now + BAN_FALLBACK_SEC`
+  (30 с), и все боты видят паузу через общий файл; критичные запросы тоже ждут — во время бана они
+  всё равно не пройдут.
+- Регресс: `test_wrap_client_shares_ban_without_timestamp` в `bot/tests/test_binance_gate.py`;
+  весь набор gate-тестов — 36 passed.

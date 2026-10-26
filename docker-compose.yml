@@ -90,6 +90,16 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Общий шлюз Binance rate-limit (bot/binance_gate.py). 40 ботов делят
+      # один IP: без шлюза вес доходит до ~3500/мин при лимите 2400 и ловит
+      # -1003. Второстепенные запросы сбрасываются при 75% веса; критичные
+      # (ордера, позиции, account, exchangeInfo, ticker/price, klines limit>=100)
+      # проходят всегда. BAN_FALLBACK_SEC — общая пауза, если -1003 пришёл без
+      # "banned until" (типично для testnet).
+      - BINANCE_GATE_ENABLED=1
+      - BINANCE_WEIGHT_LIMIT_1M=2400
+      - BINANCE_SHED_AT=0.75
+      - BINANCE_BAN_FALLBACK_SEC=30
 
   dashboard-testnet:
     <<: *dashboard-base
