@@ -297,6 +297,37 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 - При срабатывании TP1 SL автоматически переносится в breakeven (`entry_price`).
 - **Tick-based SL/TP**: фоновый таск каждые 5 секунд опрашивает тикер и проверяет hits по текущей цене, дополняя свечную проверку.
 
+### 3.2a Пыль (dust), MIN_NOTIONAL и округление quantity
+
+**Округление — только через Decimal.** `_round_step()` (`bot/order_manager.py`) делит
+`Decimal(value)` на `Decimal(step)` с `ROUND_FLOOR` вместо `math.floor(value / step) * step`.
+Старая float-версия для `qty=73.1, step=0.1` давала `floor(730.9999999999999) * 0.1 = 73.0`,
+то есть на один шаг **меньше** позиции: частичное закрытие закрывало 73.0 из 73.1 и оставляло
+на бирже остаток 0.1. `_adjust_price()` использует тот же Decimal-путь для цен (`PRICE_FILTER`).
+
+**Пыль — остаток, notional которого ниже биржевого `MIN_NOTIONAL`.** Его нельзя ни защитить,
+ни закрыть обычным ордером:
+
+| Попытка закрыть пыль | Ответ Binance |
+|---|---|
+| `MARKET` + `reduceOnly` | `-2022` «ReduceOnly Order is rejected» |
+| обычный `MARKET` | `-4164` «notional must be no smaller than N» |
+| `STOP_MARKET closePosition=true` | принимается, но на тестнете для остатка 0.1 биржа записала `quantity=80.8` и при триггере продала 80.8, открыв встречную позицию на ~$81 |
+
+Поэтому `close_dust()` **не выставляет ордера вообще**: пишет WARNING
+`[DUST] Residual below minNotional cannot be closed with an order ...` (не чаще раза в 30 минут)
+и всегда возвращает `False` — «позиция не закрыта». Остаток безопасен: его notional ниже
+`MIN_NOTIONAL` (маржа не расходуется), а в one-way режиме следующий вход неттится с ним и
+поглощает его.
+
+`_is_dust_notional(qty, price)` (запас `factor=0.98` на округление цены) работает как guard:
+
+- `open_position` — не ставит TP/SL на пылевую позицию;
+- reverse-нога — не открывается, если противоположная нога была бы пылью
+  (`last_reverse_skip_reason="dust"`, retry-цикл прерывается);
+- `_sync_position_on_start` — пыль на бирже не восстанавливается как позиция, висящие ордера снимаются;
+- pre-entry guard — «застрявшая» пыль в трекере не блокирует новый вход.
+
 ### 3.3 Recovery-ограничения
 
 - `recovery_max_pct` — макс. % депозита под recovery-сделку.
@@ -417,8 +448,11 @@ q       = S_total - N               # объём новой ноги
 | Ключ | По умолчанию | Смысл |
 |------|--------------|-------|
 | `reverse_sl_pct` | `1.0` | Виртуальный SL reverse-ноги, % |
-| `reverse_chain_max` | `2` | Максимум шагов reverse-цепочки |
-| `reverse_fee_buffer_pct` | `0.1` | Буфер на комиссии в целевой цене, % |
+| `reverse_chain_max` | `10` | Максимум шагов reverse-цепочки |
+| `reverse_fee_buffer_pct` | `0.0` | Буфер на комиссии в целевой цене, % |
+
+> Во всех боевых конфигах (`bot/configs/testnet/config_*.yaml`) явно стоит
+> `reverse_chain_max: 10`. LTCUSDT исторически имел `100` — снижен до 10 (см. changelog 2026-10-26).
 
 **Поведение при достижении лимита**: когда шаг доходит до `reverse_chain_max`, бот **принудительно
 закрывает позицию по рынку** и помечает цикл `REVERSE_CHAIN_STOP` (см. 3.6a).
@@ -808,6 +842,10 @@ adx_period: 14
 adx_threshold: 0.0          # 0 = отключён
 max_open_per_cycle: 0       # 0 = без лимита новых позиций за цикл
 signal_cooldown_min: 0      # кулдаун между сигналами (мин), 0 = выкл
+# ── Reverse-цепочка ───────────────────────────────────────
+reverse_sl_pct: 1.0         # виртуальный SL reverse-ноги, %
+reverse_chain_max: 10       # максимум шагов reverse-цепочки
+reverse_fee_buffer_pct: 0.0 # буфер на комиссии в целевой цене, %
 enabled_presets:            # активные пресеты (46 доступно)
   - ema_cross_long
   - ema_cross_short
@@ -1614,3 +1652,55 @@ ssh oracle-bot "cd /opt/trading-bot && curl -s http://localhost:5001/api/bots | 
 - `cd bot && python -m pytest tests/` — `128 passed`, 0 упавших.
 - Контейнер `replit_scalper-api-testnet` перезапущен, 39 ботов работают с новым кодом.
 - Изменения скопированы на сервер в `/opt/trading-bot/bot/` (main.py, config.py, configs/testnet/config_ltc.yaml, recovery_config.yaml).
+
+### 2026-10-26 (пыль ниже MIN_NOTIONAL: Decimal-округление, log-only close_dust, reverse_chain_max=10)
+
+Волна ошибок `-2022 ReduceOnly Order is rejected` на testnet. Корень — неверное округление
+quantity и попытки закрыть остаток, который биржа закрывать не даёт. Три коммита, все задеплоены
+на `main` в тот же день.
+
+#### 26.1 `bot/order_manager.py` — `_round_step()`/`_adjust_price()` на Decimal (`9729fcb`)
+- Было `math.floor(value / step) * step`: для `qty=73.1, step=0.1` деление даёт `730.9999999999999`,
+  floor → `730`, результат `73.0` — на шаг **меньше** позиции. Частичное закрытие (TP1/reduceOnly)
+  закрывало 73.0 из 73.1 и оставляло на бирже 0.1. Следующий TP/SL на этот остаток биржа отклоняла
+  с `-2022`.
+- Стало: `Decimal(str(value)) / Decimal(str(step))` с `ROUND_FLOOR`. `73.1 / 0.1 = 731` ровно.
+  Тот же путь для цен в `_adjust_price()` (шаг/тик из `PRICE_FILTER`).
+- Регресс: `test_round_step.py` и `test_round_step_random.py` — 200 000 точных кратных значений
+  без единого расхождения и 50 000 случайных диапазонов без нарушений шага.
+
+#### 26.2 `bot/order_manager.py` — `_is_dust_notional()` и защита в `open_position`
+- Новый хелпер: `qty * price < MIN_NOTIONAL * 0.98` (запас на округление цены) и только для `mode=live`.
+- `open_position` не выставляет TP/SL, если позиция пылевая; reverse-нога не открывается, если
+  противоположная нога была бы пылью (`last_reverse_skip_reason="dust"`).
+
+#### 26.3 `bot/order_manager.py` — `close_dust()` стал log-only (`40fc807`)
+- Проверено на testnet: пыль нельзя закрыть ничем — `MARKET reduceOnly` → `-2022`,
+  обычный `MARKET` → `-4164`, а `STOP_MARKET closePosition=true` принимается, но для остатка 0.1
+  биржа записала `quantity=80.8` и при триггере продала 80.8, открыв встречную позицию на ~$81
+  (DOTUSDT, 26.10.2026 06:28; guard закрыл её через минуту с +$0.048).
+- Теперь **никаких ордеров**: WARNING `[DUST] Residual below minNotional cannot be closed with an
+  order ...` не чаще раза в 30 минут и возврат `False`. Остаток игнорируется; в one-way режиме
+  следующий вход неттится с ним.
+- Регресс: `test_close_dust.py` — dust 0.1 и 4.87, нормальная позиция 5.0, троттлинг лога и флэт:
+  ни одного вызова `futures_create_order`.
+
+#### 26.4 `bot/main.py` — guard'ы против пыли
+- `_sync_position_on_start`: пыль на бирже не восстанавливается как позиция, висящие ордера снимаются.
+- Pre-entry guard: «застрявшая» пыль в трекере больше не блокирует новый вход.
+- Retry-цикл reverse: при `last_reverse_skip_reason == "dust"` попытки прекращаются (иначе бот
+  крутил бы реверс по кругу).
+
+#### 26.5 `bot/configs/testnet/config_ltc.yaml` — `reverse_chain_max: 100 → 10` (`867d95c`)
+- У остальных 39 ботов уже было 10. После правки у всех 40 `reverse_chain_max = 10`.
+- Дефолт в `config.py` — тоже 10; в README §3.6c таблица приведена в соответствие.
+
+#### 26.6 Деплой и состояние (2026-10-26, UTC)
+- `9729fcb` — 06:25:09, `40fc807` — 06:35:47, `867d95c` — 06:43:57. Деплой: `git fetch origin main`
+  → `git reset --hard FETCH_HEAD` → `docker compose restart api-testnet`.
+- После деплоя: testnet 40/40 запущено, heartbeats свежие, реальных ошибок (`-2022`/`-4164`/Traceback)
+  0, позиций — одна `UNIUSDT`; live 0/40, позиций нет, контейнер `api-live` не трогали.
+- При рестарте часть ботов пишет `Another bot instance already running` (гонка lock-файла);
+  API переспавнивает их, на выходе 40 уникальных процессов.
+- Остаток к сверке: `UNIUSDT` — трекер 5.0, биржа 4.0 (след ручной диагностики `reduceOnly` 1.0).
+- README дополнен разделом §3.2a (пыль, MIN_NOTIONAL, Decimal-округление).
