@@ -601,6 +601,39 @@ def _qty_tol(order_mgr, reference: float) -> float:
     return max(float(step) if step else 0.0, abs(reference) * 1e-4, 1e-9)
 
 
+def _adopt_exchange_qty(pos, exchange_qty, log=None) -> bool:
+    """Приводит объём сохранённой позиции к фактическому объёму на бирже.
+
+    Шаг лота бывает крупным (UNIUSDT: stepSize=1), поэтому
+    `_state_matches_exchange` считает state=5.0 и exchange=4.0 совпадающими:
+    один шаг попадает в `_qty_tol`. Такой рассинхрон появляется после ручного
+    reduceOnly или частичного филла и приводит к TP/закрытиям на несуществующий
+    объём (-2022 reduceOnly rejected). Подгоняем state под биржу.
+
+    При tp1_hit=True total_qty — исходный объём (уже частично закрыт), поэтому
+    его только увеличиваем, чтобы сохранить инвариант total >= remaining.
+    Возвращает True, если state изменён.
+    """
+    if pos is None or exchange_qty < 0:
+        return False
+    same_remaining = abs(pos.remaining_qty - exchange_qty) <= 1e-9
+    same_total = pos.tp1_hit or abs(pos.total_qty - exchange_qty) <= 1e-9
+    if same_remaining and same_total:
+        return False
+    old_total, old_remaining = pos.total_qty, pos.remaining_qty
+    if not pos.tp1_hit:
+        pos.total_qty = exchange_qty
+    else:
+        pos.total_qty = max(pos.total_qty, exchange_qty)
+    pos.remaining_qty = exchange_qty
+    if log is not None:
+        log.warning(
+            f"[SYNC] Qty desync | state total={old_total} remaining={old_remaining} "
+            f"exchange={exchange_qty} — adopting exchange qty"
+        )
+    return True
+
+
 def _state_matches_exchange(order_mgr, pos, direction, entry_price, exchange_qty):
     """Проверяет, соответствует ли сохранённая позиция биржевой.
 
@@ -1221,6 +1254,15 @@ async def _sync_position_on_start(
         order_mgr.backstop_algo_id = getattr(pos, "backstop_algo_id", None)
         try:
             real_qty = await order_mgr._get_real_position_qty(pos.direction)
+            if real_qty < 0:
+                # -1 = запрос позиций не удался. Это НЕ «позиции нет»: нельзя
+                # снимать state/backstop и закрывать сделку по сетевому сбою.
+                log.warning(
+                    f"[SYNC] Position poll failed — keeping saved state untouched | "
+                    f"state total={pos.total_qty} remaining={pos.remaining_qty} "
+                    f"tp1_hit={pos.tp1_hit}"
+                )
+                real_qty = pos.remaining_qty
             if real_qty < 0.000001:
                 log.warning(f"[SYNC] Exchange shows no position but state has open position — position closed externally (TP/SL), clearing state")
                 # Fetch real PnL and close DB trade
@@ -1266,6 +1308,11 @@ async def _sync_position_on_start(
                 tracker.position = None
                 tracker._clear_state()
                 return
+            # State мог отстать от биржи в пределах одного шага лота (UNIUSDT:
+            # stepSize=1 → state=5.0 «совпадал» с exchange=4.0 после ручного
+            # reduceOnly). Выравниваем объём до того, как выставлять TP/стоп.
+            if _adopt_exchange_qty(pos, real_qty, log):
+                tracker._save_state()
         except Exception as e:
             log.warning(f"[SYNC] Could not verify position on exchange: {e}")
 
