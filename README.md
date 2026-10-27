@@ -1837,15 +1837,19 @@ quantity и попытки закрыть остаток, который бир�
   * `close_position_market` при -2022 перечитывает объём и закрывает обычным `MARKET` без `reduceOnly`,
     после чего проверяет, что не перевернул позицию, и добивает случайную встречную ногу;
   * SYNC (`_ensure_exchange_protection`) и пересчёт TP (`_recalc_reverse_cycle_tp`) ищут/снимают условный
-    TP в algo-книге (`futures_get_open_algo_orders`), иначе на каждом старте появлялся бы дубликат цели.
+    TP в algo-книге (`futures_get_open_algo_orders`), иначе на каждом старте появлялся бы дубликат цели;
+  * биржа держит только один `closePosition`-ордер на направление (-4130): если условный TP уже стоит,
+    новый бэкстоп не выставится, поэтому приоритет у стопа — `_place_exchange_backstop` при -4130 снимает
+    условный TP и повторяет попытку; `_place_tp_limit` не ставит условный TP, если `closePosition`-стоп
+    уже висит (выход по TP отработает виртуальный триггер + рыночное закрытие).
 - **Регресс:** новые `bot/tests/test_reverse_tp_recalc.py` (формула LONG/SHORT, инвариант «PnL цикла
   = целевой профит», пересчёт со снятием старого лимита, идемпотентность, пропуск не-reverse),
   `bot/tests/test_cap_after_unclosed_sl.py` (cap только после `SL`, только для reverse-позиции,
   no-op при выключенном cap, ошибка проверки не ломает тик),
   `bot/tests/test_expired_profit_close.py` (молодой цикл не трогаем, плюс меньше комиссии выхода — ждём,
   порог с минимальным профитом, выключено при 0 ч, throttle, нет entry_time) и
-  `bot/tests/test_reduce_only_fallback.py` (TP → `closePosition`, частичный TP и «нет позиции» — без
-  fallback, чужие коды ошибок пробрасываются, закрытие обычным `MARKET` + ремонт переворота,
-  SYNC видит условный TP, пересчёт снимает его из algo-книги); весь набор
-  `cd bot && python -m pytest tests -q` — **167 passed**.
+  `bot/tests/test_reduce_only_fallback.py` (TP → `closePosition`, частичный TP / нет позиции / уже стоит
+  стоп — без fallback, чужие коды ошибок пробрасываются, закрытие обычным `MARKET` + ремонт переворота,
+  SYNC видит условный TP, пересчёт снимает его из algo-книги, -4130 на бэкстопе снимает условный TP);
+  весь набор `cd bot && python -m pytest tests -q` — **169 passed**.
 

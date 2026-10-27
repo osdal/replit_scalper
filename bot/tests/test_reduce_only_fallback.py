@@ -45,6 +45,7 @@ class FakeClient:
         self.after_plain_amt = after_plain_amt
         self.tp_error = tp_error
         self.calls = []
+        self.algo_orders = []
 
     async def futures_create_order(self, **kw):
         self.calls.append(kw)
@@ -64,7 +65,7 @@ class FakeClient:
         return None
 
     async def futures_get_open_algo_orders(self, **kw):
-        return []
+        return list(self.algo_orders)
 
     async def futures_cancel_algo_order(self, **kw):
         return None
@@ -154,6 +155,50 @@ def test_tp_fallback_skips_when_position_not_visible():
     assert om.exchange_tp_conditional is False
 
 
+def test_tp_fallback_skips_when_close_position_stop_exists():
+    """Биржа держит только один closePosition-ордер: стоп важнее TP."""
+    client = FakeClient()
+    client.algo_orders = [{"algoId": 900, "orderType": "STOP_MARKET",
+                           "side": "BUY", "closePosition": True,
+                           "triggerPrice": "9.006"}]
+    om = make_om(client)
+    run(om._place_tp_limit("SHORT", 8.716, 4.0))
+    assert [c["type"] for c in client.calls] == ["LIMIT"]
+    assert om.exchange_tp_conditional is False
+
+
+def test_backstop_4130_cancels_conditional_tp_and_retries():
+    class Algo4130Client(FakeClient):
+        def __init__(self):
+            super().__init__(position_amt=-4.0)
+            self.algo_calls = 0
+            self.cancelled = []
+            self.algo_orders = [{"algoId": 777, "orderType": "TAKE_PROFIT_MARKET",
+                                 "side": "BUY", "closePosition": True,
+                                 "triggerPrice": "8.657"}]
+
+        async def futures_create_algo_order(self, **kw):
+            self.algo_calls += 1
+            if self.algo_calls == 1:
+                raise api_error(-4130, "An open stop or take profit order is existing.")
+            return {"algoId": 901}
+
+        async def futures_get_open_algo_orders(self, **kw):
+            return list(self.algo_orders)
+
+        async def futures_cancel_algo_order(self, **kw):
+            self.cancelled.append(kw.get("algoId"))
+            return {}
+
+    client = Algo4130Client()
+    om = make_om(client)
+    algo_id = run(om._place_exchange_backstop("SHORT", 8.829, qty=4.0))
+    assert algo_id == 901
+    assert client.cancelled == [777]
+    assert client.algo_calls == 2
+    assert om.backstop_algo_id == 901
+
+
 # --------------------------------------------------------------------------- #
 #  Закрытие рынком
 # --------------------------------------------------------------------------- #
@@ -217,6 +262,8 @@ class AlgoClient(FakeClient):
 
     async def futures_cancel_algo_order(self, **kw):
         self.cancelled_algo.append(kw.get("algoId"))
+        self.algo_orders = [a for a in self.algo_orders
+                            if a.get("algoId") != kw.get("algoId")]
         return {}
 
     async def futures_cancel_order(self, **kw):
@@ -279,5 +326,6 @@ def test_recalc_cancels_conditional_tp_before_replacing():
     assert 555 in client.cancelled_algo
     new_tps = [c for c in client.calls if c.get("reduceOnly")]
     assert len(new_tps) == 1
+    assert om.exchange_tp_conditional is True
     assert pos.tp1_price == pytest.approx(om.exchange_tp_price)
 
