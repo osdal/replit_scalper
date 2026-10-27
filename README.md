@@ -1772,3 +1772,36 @@ quantity и попытки закрыть остаток, который бир�
     основная польза gate — общая пауза при `-1003`.
 - Регресс: `test_note_request_aggregates_and_logs` и проверки веса klines в `test_estimate_weight_account`;
   gate-тесты — 37 passed.
+
+#### 26.10 `bot/main.py`, `routes/trading.ts`, `docker-compose.yml` — TP reverse-цепи под фактический объём и «протухание» позиций
+- **Симптом.** `UNIUSDT`: цепочка планировала нетто ~15, но из-за потолка нотионала/ручного `reduceOnly`
+  на бирже осталось `LONG 4.0 @ 6.948`, а TP остался от планового объёма — `7.225` (+4% от триггера).
+  На этом TP цикл закрывался с убытком **≈ −2.4 USDT** по реализованному net `−3.70`, хотя лимит
+  cumulative loss cap — 5% депозита (≈ 5.22 USDT при equity ~104). То есть позиция закрывалась бы
+  в минус раньше разрешённого порога.
+- **`_reverse_cycle_tp_price()`** — целевой TP цикла под фактический нетто:
+  `nr + s*q*(T−A) − (fee+profit)*q*T = 0`, где `nr` — реализованный net закрытых ног, `q` — живой
+  объём, `A` — фактический вход, `s=+1` (LONG) / `−1` (SHORT). Для UNI (`q=4`, `A=6.948`,
+  `nr=−3.700102`, taker 0.05%, profit 0.1%) TP = **7.885** вместо 7.225; на нём цикл выходит
+  в +0.1% notional, а не в минус. SHORT-знаменатель `q*(1+fee+profit)` — асимметрия учтена.
+- **`_recalc_reverse_cycle_tp()`** — снимает старый reduceOnly LIMIT (backstop STOP_MARKET/algo
+  не трогается), ставит новый TP на фактический объём, обновляет `tp1_price/tp2_price/exchange_tp_price`
+  и state. Вызывается (а) на старте после `_adopt_exchange_qty`, (б) на тиках для reverse-позиций
+  не чаще `REVERSE_TP_RECALC_INTERVAL_SEC` (300 с). При ошибке постановки возвращает прежний TP.
+  Startup теперь также пишет живой объём в строку БД (`update_open_trade`) — в дашборде больше нет
+  `qty=5.0` при биржевых 4.0.
+- **«Протухание» позиции (`MAX_POSITIONS_IGNORE_AFTER_HOURS`).** В общем `bot/recovery_config.yaml`
+  по-прежнему `0` (выкл — так лимит `max_positions` строгий, см. 2026-10-08). Добавлен ENV-оверрайд
+  в `readConfig()` (`routes/trading.ts`), в `docker-compose.yml` у `api-testnet` —
+  `MAX_POSITIONS_IGNORE_AFTER_HOURS=2`. Позиция старше 2 ч не занимает слот `max_positions`,
+  но сама не закрывается — слот освобождается для нового сигнала. `api-live` остаётся 0.
+  Невалидное значение (`NaN`, `<0`) игнорируется и берётся yaml.
+- **Cumulative loss cap проверен** (не менялся): `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`
+  → порог = 5% от equity цикла (~5.22 USDT). Проверка идёт на каждом тике и на свече, закрытие —
+  market reduceOnly + финализация `REVERSE_CUM_LOSS_CAP`. Текущий цикл UNI: realized −3.70,
+  unrealized +0.45 → до порога ~2 USDT запаса; закрытия в минус ниже порога больше не будет,
+  т.к. TP пересчитан на безубыток+профит.
+- **Регресс:** новый `bot/tests/test_reverse_tp_recalc.py` (формула LONG/SHORT, инвариант «PnL цикла
+  = целевой профит», пересчёт со снятием старого лимита, идемпотентность, пропуск не-reverse);
+  весь набор `cd bot && python -m pytest tests -q` — **137 passed**.
+

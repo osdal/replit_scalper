@@ -90,6 +90,11 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # «Протухание» позиций: открытая дольше 2 ч позиция не занимает слот
+      # max_positions (сама не закрывается). В общем recovery_config.yaml стоит
+      # 0 (выкл) ради live; здесь включаем только на testnet, чтобы зависшая
+      # reverse-цепочка не блокировала новые входы навсегда.
+      - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
       # Общий шлюз Binance rate-limit (bot/binance_gate.py). 40 ботов делят
       # один IP: без шлюза вес доходит до ~3500/мин при лимите 2400 и ловит
       # -1003. Второстепенные запросы сбрасываются при 75% веса; критичные

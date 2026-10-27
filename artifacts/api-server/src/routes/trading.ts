@@ -27,6 +27,32 @@ const __dirname = path.dirname(__filename);
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(__dirname, "../../../../bot/recovery_config.yaml");
 
+function sanitizeIgnoreAfterHours(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
+/**
+ * ENV-оверрайды поверх yaml. Нужны, чтобы включить «протухание» позиций
+ * (MAX_POSITIONS_IGNORE_AFTER_HOURS) только на одном стеке: yaml общий для
+ * api-testnet и api-live, а менять поведение live нельзя.
+ */
+function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number }>(cfg: T): T {
+  const env_max = process.env.MAX_POSITIONS;
+  if (env_max !== undefined && env_max !== null && env_max !== "") {
+    // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
+    cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
+  }
+  const env_ignore = process.env.MAX_POSITIONS_IGNORE_AFTER_HOURS;
+  if (env_ignore !== undefined && env_ignore !== null && env_ignore !== "") {
+    cfg.max_positions_ignore_after_hours = sanitizeIgnoreAfterHours(
+      env_ignore, cfg.max_positions_ignore_after_hours,
+    );
+  }
+  return cfg;
+}
+
 function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
   const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
@@ -41,22 +67,12 @@ function readConfig(): { max_positions: number; loss_streak_trigger: number; los
         ? Number(raw.pause_timeout_minutes)
         : def.pause_timeout_minutes,
       max_positions_ignore_after_hours: raw.max_positions_ignore_after_hours !== undefined
-        ? Number(raw.max_positions_ignore_after_hours)
+        ? sanitizeIgnoreAfterHours(raw.max_positions_ignore_after_hours, def.max_positions_ignore_after_hours)
         : def.max_positions_ignore_after_hours,
     };
-    const env_max = process.env.MAX_POSITIONS;
-    if (env_max !== undefined && env_max !== null && env_max !== "") {
-      // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
-      cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
-    }
-    return cfg;
+    return applyEnvOverrides(cfg);
   } catch {
-    const def2 = { ...def };
-    const env_max = process.env.MAX_POSITIONS;
-    if (env_max !== undefined && env_max !== null && env_max !== "") {
-      def2.max_positions = sanitizeMaxPositions(env_max, def2.max_positions);
-    }
-    return def2;
+    return applyEnvOverrides({ ...def });
   }
 }
 

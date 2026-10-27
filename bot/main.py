@@ -115,6 +115,16 @@ _CUM_CAP = CumLossCap(
 # Защита от параллельного закрытия цикла из тика и из on_candle.
 _CUM_CAP_CLOSING: set = set()
 
+# Пересчёт TP reverse-цепи под ФАКТИЧЕСКИЙ объём/реализованный net. Нужен после
+# ручного reduceOnly/частичного филла: TP, посчитанный на плановый объём цепочки,
+# на меньшем факте закрывает цикл в минус (UNIUSDT: qty 15→4, TP 7.225 давал
+# ≈ −2.4 USDT). На тиках проверяем не чаще раза в N секунд (REST на позицию +
+# income history), на старте — сразу.
+_REVERSE_TP_RECALC_INTERVAL_SEC = float(
+    os.getenv("REVERSE_TP_RECALC_INTERVAL_SEC") or "300"
+)
+_reverse_tp_recalc_ts: dict = {}
+
 # Очередь симуляции исходов отклонённых сигналов.
 # Каждый элемент: {"trade_id": int, "direction": str, "entry": float, "sl": float,
 #                  "tp1": float, "candles": int} — закрыт по SL/TP1 либо истёк по времени.
@@ -634,6 +644,53 @@ def _adopt_exchange_qty(pos, exchange_qty, log=None) -> bool:
     return True
 
 
+def _reverse_cycle_tp_price(
+    direction: str,
+    qty: float,
+    entry: float,
+    net_realized: float,
+    fee_out_pct: float,
+    profit_pct: float,
+) -> float:
+    """TP, на котором суммарный результат reverse-цикла = p% от notional.
+
+    Цикл к моменту выхода по TP T:
+        net_realized                      — реализованный net закрытых ног (с комиссиями);
+        q*(T-A) (LONG) / q*(A-T) (SHORT)  — PnL текущей ноги;
+        fee_out*q*T                       — комиссия выхода;
+        profit*q*T                        — целевая прибыль сверх безубытка.
+    Приравниваем сумму к нулю:
+        LONG : T = (q*A - net_realized) / (q*(1 - fee_out - profit))
+        SHORT: T = (q*A + net_realized) / (q*(1 + fee_out + profit))
+
+    Именно такого уровня не хватало, когда цепочка сайзилась на больший объём,
+    чем реально встал на биржу (потолок нотионала / ручной reduceOnly): старый
+    TP закрывал цикл с убытком ниже лимита cumulative loss cap.
+    Возвращает 0.0, если посчитать нельзя (нет объёма/цены/депозита).
+    """
+    try:
+        q = abs(float(qty))
+        a = float(entry)
+        nr = float(net_realized)
+        fee = max(0.0, float(fee_out_pct)) / 100.0
+        prof = max(0.0, float(profit_pct)) / 100.0
+    except (TypeError, ValueError):
+        return 0.0
+    if q <= 0 or a <= 0:
+        return 0.0
+    # s = +1 (LONG) / -1 (SHORT). PnL цикла на T:
+    #   nr + s*q*(T - A) - (fee+prof)*q*T = 0
+    # => T = (s*q*A - nr) / (q*(s - fee - prof))
+    # Знаменатель у LONG (1-c), у SHORT -(1+c): для шорта рост цены — убыток,
+    # поэтому комиссия/профит на выходе увеличивают требуемое движение вниз.
+    s = 1.0 if str(direction).upper() == "LONG" else -1.0
+    denom = q * (s - fee - prof)
+    if abs(denom) < 1e-12:
+        return 0.0
+    tp = (s * q * a - nr) / denom
+    return tp if tp > 0 else 0.0
+
+
 def _state_matches_exchange(order_mgr, pos, direction, entry_price, exchange_qty):
     """Проверяет, соответствует ли сохранённая позиция биржевой.
 
@@ -821,6 +878,131 @@ async def _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=None) ->
             log.warning(f"[SYNC] Backstop algo could not be placed | sl={pos.sl_price}")
     if tracker is not None:
         tracker._save_state()
+
+
+async def _recalc_reverse_cycle_tp(order_mgr, tracker, pos, log) -> bool:
+    """Пересчитывает TP reverse-цикла под фактический объём и реализованный net.
+
+    Зачем: цепочка сайзится на объём, который выводит ВСЮ книгу в целевой профит,
+    но объём может быть урезан (потолок нотионала, maxQty) или уменьшен вручную
+    (reduceOnly). Старый TP, посчитанный на плановый объём, на фактическом
+    закрывает цикл в минус — ниже порога cumulative loss cap. Здесь TP
+    пересчитывается так, чтобы на нём цикл был ровно в нуле + `reverse_profit_pct`.
+
+    Вызывается на старте (после сверки объёма с биржей) и периодически на тиках
+    для reverse-позиций. Ничего не делает для paper, не-reverse позиций и когда
+    TP уже совпадает в пределах тика.
+    """
+    if order_mgr is None or getattr(order_mgr, "client", None) is None:
+        return False
+    if pos is None or not getattr(pos, "is_reverse", False):
+        return False
+    cfg_obj = getattr(order_mgr, "cfg", None)
+    if cfg_obj is None or (getattr(pos, "mode", None) or cfg_obj.mode) != "live":
+        return False
+    symbol = cfg_obj.symbol
+    try:
+        qty = await order_mgr._get_real_position_qty(pos.direction)
+    except Exception as e:
+        log.debug(f"[REVERSE] TP recalc qty poll failed: {e}")
+        return False
+    if qty < 0:
+        # -1 = запрос позиций не удался: не трогаем TP по сетевым данным.
+        return False
+    if qty < DUST_QTY:
+        return False
+    try:
+        net_realized, _, _ = await tracker.cycle_realized_net()
+    except Exception as e:
+        log.warning(f"[REVERSE] TP recalc net_realized failed: {e}")
+        return False
+    if net_realized is None:
+        log.warning(
+            f"[REVERSE] TP recalc skipped: cycle net_realized unavailable | "
+            f"dir={pos.direction} qty={qty}"
+        )
+        return False
+    target = _reverse_cycle_tp_price(
+        pos.direction, qty, pos.entry_price, float(net_realized),
+        getattr(cfg_obj, "taker_fee_pct", 0.05),
+        getattr(cfg_obj, "reverse_profit_pct", 0.1),
+    )
+    if target <= 0:
+        log.warning(
+            f"[REVERSE] TP recalc invalid target | dir={pos.direction} qty={qty} "
+            f"entry={pos.entry_price} net_realized={net_realized}"
+        )
+        return False
+    # Геометрия: TP обязан быть на прибыльной стороне от входа, иначе лимит
+    # сработает мгновенно по рынку. Небольшой сдвиг на тик — безопасно: филл
+    # всё равно не хуже цены лимита, т.е. не хуже безубытка.
+    tick = float(getattr(order_mgr, "_tick_size", None) or 0.0)
+    min_step = tick if tick > 0 else pos.entry_price * 1e-4
+    if pos.direction == "LONG" and target <= pos.entry_price:
+        target = pos.entry_price + min_step
+    elif pos.direction == "SHORT" and target >= pos.entry_price:
+        target = max(0.0, pos.entry_price - min_step)
+    target = await order_mgr._adjust_price(target, mode="live")
+    if target <= 0:
+        return False
+    current = float(pos.tp1_price or pos.tp2_price or 0.0)
+    tol = max(tick, pos.entry_price * 1e-4, 1e-9)
+    qty_synced = abs(float(pos.remaining_qty or 0.0) - qty) <= 1e-9
+    if current > 0 and qty_synced and abs(current - target) <= tol:
+        return False
+
+    # Снимаем старый reduceOnly LIMIT (TP). Backstop — STOP_MARKET/algo, его не
+    # трогаем: type != LIMIT.
+    close_side = "SELL" if pos.direction == "LONG" else "BUY"
+    cancelled = 0
+    try:
+        open_orders = await order_mgr.client.futures_get_open_orders(symbol=symbol)
+    except Exception as e:
+        log.warning(f"[REVERSE] TP recalc open orders read failed: {e}")
+        open_orders = []
+    for o in open_orders or []:
+        if ((o.get("type") or "").upper() != "LIMIT"
+                or (o.get("side") or "").upper() != close_side
+                or not _is_reduce_only(o)):
+            continue
+        try:
+            await order_mgr.client.futures_cancel_order(
+                symbol=symbol, orderId=o.get("orderId")
+            )
+            cancelled += 1
+        except Exception as e:
+            log.warning(f"[REVERSE] TP recalc cancel failed | orderId={o.get('orderId')}: {e}")
+    try:
+        await order_mgr._place_tp_limit(pos.direction, target, qty)
+    except Exception as e:
+        log.error(f"[REVERSE] TP recalc re-place failed | tp={target} qty={qty}: {e}")
+        # Старый TP уже снят — возвращаем его, чтобы позиция не осталась без цели.
+        if current > 0:
+            try:
+                await order_mgr._place_tp_limit(pos.direction, current, qty)
+                log.warning(
+                    f"[REVERSE] TP recalc failed — restored previous TP | "
+                    f"tp={current} qty={qty}"
+                )
+            except Exception as e2:
+                log.error(f"[REVERSE] TP restore failed | tp={current}: {e2}")
+        return False
+    actual_tp = float(getattr(order_mgr, "exchange_tp_price", 0.0) or target)
+    pos.tp1_price = actual_tp
+    pos.tp2_price = actual_tp
+    pos.exchange_tp_price = actual_tp
+    if getattr(pos, "tp1_hit", False):
+        pos.total_qty = max(float(pos.total_qty or 0.0), qty)
+    else:
+        pos.total_qty = qty
+    pos.remaining_qty = qty
+    tracker._save_state()
+    log.warning(
+        f"[REVERSE] TP recalculated to actual qty | dir={pos.direction} qty={qty} "
+        f"entry={pos.entry_price} net_realized={float(net_realized):+.4f} "
+        f"old_tp={current} new_tp={actual_tp} cancelled={cancelled}"
+    )
+    return True
 
 
 def _stale_close_entry_ms(entry_time) -> int:
@@ -1313,8 +1495,25 @@ async def _sync_position_on_start(
             # reduceOnly). Выравниваем объём до того, как выставлять TP/стоп.
             if _adopt_exchange_qty(pos, real_qty, log):
                 tracker._save_state()
+                # Строка БД (дашборд/статистика) тоже должна отражать живой объём:
+                # после ручного reduceOnly в ней остаётся плановый qty цепочки.
+                try:
+                    await tracker.update_open_trade(
+                        pos.direction, pos.entry_price, pos.remaining_qty
+                    )
+                except Exception as e:
+                    log.debug(f"[SYNC] DB qty sync failed: {e}")
         except Exception as e:
             log.warning(f"[SYNC] Could not verify position on exchange: {e}")
+
+        # Цепочка могла оставить TP от ПЛАНОВОГО (большего) объёма: на фактическом
+        # он закрывает цикл в минус ниже порога cumulative loss cap. Пересчитываем
+        # TP под живой нетто ДО досоздания биржевой защиты.
+        if getattr(pos, "is_reverse", False):
+            try:
+                await _recalc_reverse_cycle_tp(order_mgr, tracker, pos, log)
+            except Exception as e:
+                log.warning(f"[SYNC] Reverse TP recalc failed: {e}")
 
         log.info(
             f"[SYNC] Restored saved levels from state | "
@@ -4250,6 +4449,22 @@ async def _run_live_or_paper(
                     last_tick_hb_ts = now_ts
                     await reporter.report_heartbeat(current_price)
                 hit = tracker.check(current_price)
+                if not hit and tracker.position is not None \
+                        and getattr(tracker.position, "is_reverse", False) \
+                        and cfg.mode == "live":
+                    # TP мог быть посчитан на плановый объём цепочки, а живой
+                    # нетто меньше (reduceOnly/частичный филл) — периодически
+                    # пересчитываем, чтобы TP не закрыл цикл в минус ниже cap.
+                    _now_mono = time.monotonic()
+                    if (_now_mono - _reverse_tp_recalc_ts.get(cfg.symbol, 0.0)
+                            >= _REVERSE_TP_RECALC_INTERVAL_SEC):
+                        _reverse_tp_recalc_ts[cfg.symbol] = _now_mono
+                        try:
+                            await _recalc_reverse_cycle_tp(
+                                order_mgr, tracker, tracker.position, log
+                            )
+                        except Exception as e:
+                            log.debug(f"[TICK_SL_TP] reverse TP recalc error: {e}")
                 if not hit and _CUM_CAP.enabled and tracker.position is not None \
                         and tracker.position.is_reverse:
                     # Cumulative loss cap на КАЖДОМ тике (а не раз в свечу): суммарный
