@@ -799,6 +799,31 @@ async def _ensure_exchange_protection(order_mgr, cfg, pos, log, tracker=None) ->
             )
             break
     if not tp_present and target_tp and target_tp > 0:
+        # Условный closePosition TP (fallback при -2022 на reduceOnly) живёт в
+        # algo-книге, а не в openOrders: без этой проверки на каждом старте
+        # ставился бы дубликат цели.
+        try:
+            algo_orders = await order_mgr.client.futures_get_open_algo_orders(symbol=symbol)
+        except Exception as e:
+            log.debug(f"[SYNC] Could not read algo orders: {e}")
+            algo_orders = []
+        for a in algo_orders or []:
+            if ((a.get("orderType") or "").upper() != "TAKE_PROFIT_MARKET"
+                    or (a.get("side") or "").upper() != expected_side
+                    or not a.get("closePosition")):
+                continue
+            try:
+                trig = float(a.get("triggerPrice") or 0)
+            except (TypeError, ValueError):
+                continue
+            if trig > 0 and target_tp > 0 and abs(trig - target_tp) <= tp_tol:
+                tp_present = True
+                log.info(
+                    f"[SYNC] conditional TP already present | side={expected_side} "
+                    f"trigger={trig} (closePosition=true)"
+                )
+                break
+    if not tp_present and target_tp and target_tp > 0:
         try:
             await order_mgr._place_tp_limit(pos.direction, target_tp, pos.remaining_qty)
             log.info(
@@ -984,6 +1009,28 @@ async def _recalc_reverse_cycle_tp(order_mgr, tracker, pos, log) -> bool:
             cancelled += 1
         except Exception as e:
             log.warning(f"[REVERSE] TP recalc cancel failed | orderId={o.get('orderId')}: {e}")
+    # Условный TP (TAKE_PROFIT_MARKET closePosition) живёт в algo-книге: снимаем
+    # и его, иначе после пересчёта останутся две цели и сработает старая.
+    try:
+        algo_orders = await order_mgr.client.futures_get_open_algo_orders(symbol=symbol)
+    except Exception as e:
+        log.debug(f"[REVERSE] TP recalc algo read failed: {e}")
+        algo_orders = []
+    for a in algo_orders or []:
+        if ((a.get("orderType") or "").upper() != "TAKE_PROFIT_MARKET"
+                or (a.get("side") or "").upper() != close_side
+                or not a.get("closePosition")):
+            continue
+        try:
+            await order_mgr.client.futures_cancel_algo_order(
+                symbol=symbol, algoId=a.get("algoId")
+            )
+            cancelled += 1
+        except Exception as e:
+            log.warning(
+                f"[REVERSE] TP recalc algo cancel failed | "
+                f"algoId={a.get('algoId')}: {e}"
+            )
     try:
         await order_mgr._place_tp_limit(pos.direction, target, qty)
     except Exception as e:

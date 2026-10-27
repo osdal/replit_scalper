@@ -206,6 +206,9 @@ class OrderManager:
         # отличить выход по TP от необъяснимого stale_close, если уровни
         # разошлись. Персистится через Position.exchange_tp_price.
         self.exchange_tp_price: float = 0.0
+        # True, если TP стоит не reduceOnly-лимитом, а условным
+        # TAKE_PROFIT_MARKET closePosition (fallback при -2022 от биржи).
+        self.exchange_tp_conditional: bool = False
         # Причина, по которой реверс сознательно не открыт в прошлой попытке
         # ("dust" — хедж ниже MIN_NOTIONAL). main.py не делает retry в этом случае.
         self.last_reverse_skip_reason: Optional[str] = None
@@ -740,15 +743,81 @@ class OrderManager:
         if qty <= 0:
             self.log.warning(f"[LIVE] TP limit qty={qty} <= 0, skipping")
             return
-        await self.client.futures_create_order(
-            symbol=self.cfg.symbol,
-            side=side,
-            type=ORDER_TYPE_LIMIT,
-            price=price,
-            quantity=qty,
-            timeInForce=TIME_IN_FORCE_GTC,
-            reduceOnly=True,
-        )
+        try:
+            await self.client.futures_create_order(
+                symbol=self.cfg.symbol,
+                side=side,
+                type=ORDER_TYPE_LIMIT,
+                price=price,
+                quantity=qty,
+                timeInForce=TIME_IN_FORCE_GTC,
+                reduceOnly=True,
+            )
+            self.exchange_tp_conditional = False
+        except BinanceAPIException as e:
+            if getattr(e, "code", None) != -2022:
+                raise
+            # -2022 при ЖИВОЙ позиции — не «нет позиции», а рассинхрон состояния
+            # биржи: testnet оставляет «фантомные» объёмы в bidNotional/
+            # askNotional после отмены/переворота позиции, и ЛЮБОЙ reduceOnly
+            # ордер отклоняется (27.10 AVAXUSDT: bidNotional=77.2 при нуле
+            # открытых ордеров). Защита всё равно нужна: условный
+            # closePosition-ордер биржа принимает и закрывает позицию рынком при
+            # достижении цены TP (цена хуже лимита только на проскальзывание).
+            self.log.warning(
+                f"[LIVE] TP reduceOnly rejected (-2022) | {direction} qty={qty} "
+                f"price={price} — placing TAKE_PROFIT_MARKET closePosition"
+            )
+            # closePosition закрывает ВСЮ позицию. Для частичного TP (TP1 < 100%)
+            # объём был бы неверным, а обычный LIMIT без reduceOnly мог бы открыть
+            # встречную позицию — в этих случаях оставляем только backstop.
+            try:
+                real_qty = await self._get_real_position_qty(direction)
+            except Exception as e:
+                self.log.debug(f"[LIVE] TP fallback position check failed: {e}")
+                real_qty = -1.0
+            tol = max(float(self._step_size or 0.0), qty * 1e-4)
+            if 0 <= real_qty <= tol:
+                self.log.warning(
+                    f"[LIVE] TP closePosition skipped: no live {direction} position "
+                    f"(qty={qty}) — will retry on next sync"
+                )
+                return
+            if real_qty > 0 and qty + tol < real_qty:
+                self.log.error(
+                    f"[LIVE] TP closePosition skipped: partial TP qty={qty} "
+                    f"< position={real_qty} would close the whole position"
+                )
+                return
+            try:
+                await self.client.futures_create_order(
+                    symbol=self.cfg.symbol,
+                    side=side,
+                    type="TAKE_PROFIT_MARKET",
+                    stopPrice=price,
+                    closePosition="true",
+                    workingType="MARK_PRICE",
+                )
+            except BinanceAPIException as e2:
+                if getattr(e2, "code", None) == -2021:
+                    # Цена уже достигнута: условный ордер отклонён как
+                    # «сработал бы сразу». Ставить нечего — позиция на целевом
+                    # уровне, выход закроет ближайший тик/рыночное закрытие.
+                    self.log.warning(
+                        f"[LIVE] TP closePosition would trigger immediately | "
+                        f"{direction} price={price} — position is at TP level"
+                    )
+                    return
+                raise
+            self.exchange_tp_conditional = True
+            self.exchange_tp_price = price
+            self.log.info(
+                f"[LIVE] TP conditional placed | side={side} trigger={price} "
+                f"qty={qty} (closePosition=true)"
+            )
+            _audit("tp_conditional", symbol=self.cfg.symbol, side=side,
+                   price=price, qty=qty)
+            return
         # Запоминаем ФАКТИЧЕСКУЮ цену биржевого TP-ордера (после _adjust_price).
         # Она может отличаться от внутреннего TP1 трекера, и тогда реконсилятор
         # не смог бы опознать выход по TP: выход по этому уровню закрывался бы
@@ -2047,7 +2116,12 @@ class OrderManager:
         return False
 
     async def close_position_market(self, direction: str, mode: Optional[str] = None) -> bool:
-        """Закрывает позицию рыночным ордером (reduceOnly)."""
+        """Закрывает позицию рыночным ордером (reduceOnly).
+
+        Если биржа отклоняет reduceOnly с -2022 при живой позиции (рассинхрон
+        testnet: «фантомные» bidNotional/askNotional), закрываем обычным MARKET
+        ровно на объём позиции и проверяем, что не перевернули её.
+        """
         if mode is None:
             mode = self.cfg.mode
         if mode != "live" or not self.client:
@@ -2061,13 +2135,50 @@ class OrderManager:
             side = SIDE_SELL if direction == "LONG" else SIDE_BUY
             step_size = self._step_size if self._step_size else 0.001
             qty = _round_step(real_qty, step_size)
-            await self.client.futures_create_order(
-                symbol=self.cfg.symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly=True,
-            )
+            try:
+                await self.client.futures_create_order(
+                    symbol=self.cfg.symbol,
+                    side=side,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=qty,
+                    reduceOnly=True,
+                )
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) != -2022:
+                    raise
+                self.log.warning(
+                    f"[LIVE] reduceOnly close rejected (-2022) | {direction} "
+                    f"qty={qty} — falling back to plain MARKET"
+                )
+                self._invalidate_position_cache()
+                real_now = await self._get_real_position_qty(direction)
+                if real_now <= 0.000001:
+                    return False
+                qty = _round_step(real_now, step_size)
+                await self.client.futures_create_order(
+                    symbol=self.cfg.symbol,
+                    side=side,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=qty,
+                )
+                # Обычный MARKET не защищён reduceOnly: если позицию успели
+                # закрыть между чтением и отправкой, мы открыли встречную ногу.
+                self._invalidate_position_cache()
+                opposite = "SHORT" if direction == "LONG" else "LONG"
+                flipped = await self._get_real_position_qty(opposite)
+                if flipped > 0.000001:
+                    self.log.error(
+                        f"[LIVE] plain MARKET close flipped position | "
+                        f"{direction} -> {opposite} qty={flipped} — closing the "
+                        f"accidental leg"
+                    )
+                    await self.client.futures_create_order(
+                        symbol=self.cfg.symbol,
+                        side=SIDE_BUY if side == SIDE_SELL else SIDE_SELL,
+                        type=ORDER_TYPE_MARKET,
+                        quantity=_round_step(flipped, step_size),
+                    )
+                    self._invalidate_position_cache()
             _audit("close_market", symbol=self.cfg.symbol, direction=direction, qty=qty)
             # Закрытие изменило позицию/баланс — кэши невалидны.
             self._invalidate_caches()

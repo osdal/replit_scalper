@@ -1825,11 +1825,27 @@ quantity и попытки закрыть остаток, который бир�
   market reduceOnly + финализация `REVERSE_CUM_LOSS_CAP`. Текущий цикл UNI: realized −3.70,
   unrealized +0.45 → до порога ~2 USDT запаса; закрытия в минус ниже порога больше не будет,
   т.к. TP пересчитан на безубыток+профит.
+- **`-2022 ReduceOnly` от биржи: TP и закрытие переходят на `closePosition` (`bot/order_manager.py`).**
+  27.10 AVAXUSDT: позиция `SHORT 4` жива, открытых ордеров ноль, но биржа отдавала `bidNotional=77.2`
+  («фантомные» объёмы после отмены/переворота) и отклоняла **любой** `reduceOnly` с -2022 — и TP-лимит,
+  и закрытие рынком. Итог: цепочка без TP, а cum-loss cap и новое правило «протухшей» цепочки физически
+  не могли её закрыть (закрытие шло `MARKET reduceOnly`). Теперь:
+  * `_place_tp_limit` при -2022 (и живой позиции) ставит `TAKE_PROFIT_MARKET` + `closePosition=true`
+    по той же цене (`workingType=MARK_PRICE`) — выход рынком по триггеру, цена хуже лимита только на
+    проскальзывание; `-2021` («сработал бы сразу») не ошибка: позиция уже на целевом уровне;
+    для частичного TP (TP1 < 100%) fallback запрещён (закрыл бы всю позицию) — остаётся backstop;
+  * `close_position_market` при -2022 перечитывает объём и закрывает обычным `MARKET` без `reduceOnly`,
+    после чего проверяет, что не перевернул позицию, и добивает случайную встречную ногу;
+  * SYNC (`_ensure_exchange_protection`) и пересчёт TP (`_recalc_reverse_cycle_tp`) ищут/снимают условный
+    TP в algo-книге (`futures_get_open_algo_orders`), иначе на каждом старте появлялся бы дубликат цели.
 - **Регресс:** новые `bot/tests/test_reverse_tp_recalc.py` (формула LONG/SHORT, инвариант «PnL цикла
   = целевой профит», пересчёт со снятием старого лимита, идемпотентность, пропуск не-reverse),
   `bot/tests/test_cap_after_unclosed_sl.py` (cap только после `SL`, только для reverse-позиции,
-  no-op при выключенном cap, ошибка проверки не ломает тик) и `bot/tests/test_expired_profit_close.py`
-  (молодой цикл не трогаем, плюс меньше комиссии выхода — ждём, порог с минимальным профитом,
-  выключено при 0 ч, throttle, нет entry_time); весь набор
-  `cd bot && python -m pytest tests -q` — **155 passed**.
+  no-op при выключенном cap, ошибка проверки не ломает тик),
+  `bot/tests/test_expired_profit_close.py` (молодой цикл не трогаем, плюс меньше комиссии выхода — ждём,
+  порог с минимальным профитом, выключено при 0 ч, throttle, нет entry_time) и
+  `bot/tests/test_reduce_only_fallback.py` (TP → `closePosition`, частичный TP и «нет позиции» — без
+  fallback, чужие коды ошибок пробрасываются, закрытие обычным `MARKET` + ремонт переворота,
+  SYNC видит условный TP, пересчёт снимает его из algo-книги); весь набор
+  `cd bot && python -m pytest tests -q` — **167 passed**.
 
