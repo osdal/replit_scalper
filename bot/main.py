@@ -1230,6 +1230,34 @@ async def _check_reverse_cum_loss(
     return True
 
 
+async def _cap_after_unclosed_sl(
+    hit, symbol: str, order_mgr: OrderManager, tracker: PositionTracker, log
+) -> bool:
+    """True, если после SL-хита позиция осталась открытой и cap требует закрытия.
+
+    Тиковая проверка cap выполняется только когда тик НЕ является SL/TP-хитом
+    (`if not hit`). Если на SL реверс-нога не открылась (блок `max_positions` на
+    сервере, слот занят свежим символом, отказ биржи), каждый следующий тик снова
+    даёт `hit == "SL"`, и cap больше не проверяется — цикл уезжает до биржевого
+    backstop вместо закрытия на разрешённом минусе. Здесь добираем проверку после
+    неудавшегося SL.
+
+    Возвращает False, если хитом была не SL, позиция закрылась, она не reverse
+    или cap выключен. Троттлинг (не чаще `REVERSE_CUM_LOSS_INTERVAL_SEC`) и
+    защита от параллельного закрытия — внутри `_CUM_CAP`.
+    """
+    if str(hit or "") != "SL" or not _CUM_CAP.enabled:
+        return False
+    pos = tracker.position
+    if pos is None or not getattr(pos, "is_reverse", False):
+        return False
+    try:
+        return await _check_reverse_cum_loss(symbol, order_mgr, tracker, log)
+    except Exception as e:
+        log.debug(f"[CUM_CAP] after-SL check failed: {e}")
+        return False
+
+
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
     order_mgr: OrderManager, log, recovery=None, notifier=None,
@@ -4483,6 +4511,15 @@ async def _run_live_or_paper(
                         if _CUM_CAP.is_in_chain(cfg.symbol):
                             _CUM_CAP.mark_chain_ended(cfg.symbol)
                             _CUM_CAP.reset(cfg.symbol)
+                    elif await _cap_after_unclosed_sl(
+                        hit, cfg.symbol, order_mgr, tracker, log
+                    ):
+                        # Реверс-нога не открылась, позиция жива, суммарный убыток
+                        # цикла дошёл до cap — закрываем цикл, не дожидаясь свечи
+                        # и биржевого backstop.
+                        await process_hit(
+                            "CUM_LOSS_CAP", current_price, int(time.time() * 1000)
+                        )
             except Exception as e:
                 log.debug(f"[TICK_SL_TP] error: {e}")
 

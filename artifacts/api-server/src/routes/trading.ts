@@ -170,6 +170,28 @@ async function loadOccupiedSymbols(ignoreAfterHours: number): Promise<string[]> 
   return fromExchange ? [...new Set([...fromDb, ...fromExchange])] : fromDb;
 }
 
+// Точечная проверка «есть ли позиция по символу на бирже». Нужна только когда
+// слот уже занят и запрос информационный (reverse-нога). Кэш на символ, чтобы
+// ретраи заблокированной цепочки (раз в тик) не жгли weight.
+const SYM_POS_TTL_MS = 5000;
+const symPosCache = new Map<string, { ts: number; has: boolean }>();
+
+async function exchangeHasPosition(symbol: string): Promise<boolean> {
+  const cached = symPosCache.get(symbol);
+  if (cached && Date.now() - cached.ts < SYM_POS_TTL_MS) return cached.has;
+  try {
+    const raw = await binanceRequest("GET", "/fapi/v2/positionRisk", { symbol });
+    const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const has = list.some((p) => Math.abs(Number(p?.positionAmt ?? 0) || 0) > 1e-12);
+    symPosCache.set(symbol, { ts: Date.now(), has });
+    return has;
+  } catch (e) {
+    // Не смогли спросить биржу — считаем «нет»: лимит остаётся строгим.
+    console.warn(`[trading] own-slot exchange check failed for ${symbol}:`, String(e));
+    return false;
+  }
+}
+
 /** Сумма убытков (pnl < 0) по закрытым сделкам за текущий UTC-день. Положительное число. */
 async function getDailyLoss(): Promise<number> {
   const startToday = new Date();
@@ -246,12 +268,22 @@ router.post("/check", async (req, res) => {
     // иначе синхронные сигналы многих ботов видят один и тот же счётчик (race).
     // Символ, который уже занимает слот (открытая позиция/резерв), лимитом не
     // блокируется — это добор reverse-ноги в уже открытую цепочку, а не новая позиция.
-    const slot = await slots.check(
+    let slot = await slots.check(
       symbol,
       cfg.max_positions,
       () => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours),
       wantReserve,
     );
+    // «Протухшая» позиция (старше max_positions_ignore_after_hours) исключена из
+    // occupied и потому не опознаётся как own по БД. Из-за этого следующая
+    // reverse-нога такого символа упиралась в max_positions, если слот занял
+    // свежий символ, хотя на бирже позиция ЕСТЬ — это добор, а не новый вход.
+    // Спрашиваем биржу. Только для информационных запросов (reserve=false):
+    // настоящий новый вход (reserve=true) проверяется строго, без поблажек.
+    if (!slot.allowed && !wantReserve && symbol && !EXCHANGE_CHECK
+        && await exchangeHasPosition(symbol)) {
+      slot = { ...slot, allowed: true, own: true };
+    }
     if (!slot.allowed) {
       return res.json({
         allowed: false,
