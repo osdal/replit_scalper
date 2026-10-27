@@ -681,6 +681,11 @@ class OrderManager:
 
             client_algo_id = f"botsl_{self.cfg.symbol[:10]}_{key}"
 
+            # Биржа держит только один closePosition-ордер на направление
+            # (-4130). Убираем «осиротевший» стоп/условный TP, оставшийся от
+            # прошлого запуска или ручной постановки, иначе свой стоп не встанет.
+            await self._cancel_close_position_orders(side)
+
             async def _create_backstop():
                 return await self.client.futures_create_algo_order(
                     algoType="CONDITIONAL",
@@ -699,15 +704,14 @@ class OrderManager:
                 if getattr(e, "code", None) != -4130:
                     raise
                 # Биржа разрешает только один условный closePosition-ордер на
-                # направление. Если это наш TP-fallback (-2022 на reduceOnly) —
-                # снимаем его: стоп важнее TP, а выход по TP отработает
-                # виртуальный триггер + рыночное закрытие.
-                removed = await self._cancel_conditional_tp(side)
+                # направление. Снимаем все такие ордера по стороне (стоп важнее
+                # TP, а выход по TP отработает виртуальный триггер + рынок).
+                removed = await self._cancel_close_position_orders(side)
                 if not removed:
                     raise
                 self.log.warning(
-                    f"[BACKSTOP] -4130: conditional TP cancelled to make room for "
-                    f"the stop | {direction} trigger={trigger_price}"
+                    f"[BACKSTOP] -4130: closePosition orders cancelled to make room "
+                    f"for the stop | {direction} trigger={trigger_price}"
                 )
                 resp = await _create_backstop()
             algo_id = None
@@ -732,26 +736,6 @@ class OrderManager:
             self.log.error(f"[BACKSTOP] Failed to place exchange stop: {e}", exc_info=True)
             return None
 
-    async def _conditional_tp_orders(self, side: str) -> list:
-        """Живые условные TP (`TAKE_PROFIT_MARKET closePosition`) по стороне."""
-        if self.client is None or self.cfg.mode != "live":
-            return []
-        try:
-            algo_orders = await self.client.futures_get_open_algo_orders(
-                symbol=self.cfg.symbol
-            )
-        except Exception as e:
-            self.log.debug(f"[TP] algo orders read failed: {e}")
-            return []
-        found = []
-        for a in algo_orders or []:
-            if ((a.get("orderType") or "").upper() != "TAKE_PROFIT_MARKET"
-                    or (a.get("side") or "").upper() != side
-                    or not a.get("closePosition")):
-                continue
-            found.append(a)
-        return found
-
     async def _has_close_position_order(self, side: str) -> bool:
         """True, если по стороне уже висит любой closePosition-ордер (стоп/TP).
 
@@ -773,18 +757,41 @@ class OrderManager:
                 return True
         return False
 
-    async def _cancel_conditional_tp(self, side: str) -> int:
-        """Снимает условные TP по стороне. Возвращает число снятых."""
+    async def _cancel_close_position_orders(self, side: str) -> int:
+        """Снимает ВСЕ closePosition-ордера по стороне (стопы и условные TP).
+
+        Биржа (testnet) держит только один такой ордер на направление и отвечает
+        -4130 на второй. Перед установкой своего стопа надо убрать «осиротевший»
+        стоп, оставшийся от прошлого запуска/ручной постановки: символ обслуживает
+        один бот, чужих ордеров здесь нет.
+        """
+        if self.client is None or self.cfg.mode != "live":
+            return 0
+        try:
+            algo_orders = await self.client.futures_get_open_algo_orders(
+                symbol=self.cfg.symbol
+            )
+        except Exception as e:
+            self.log.debug(f"[BACKSTOP] algo orders read failed: {e}")
+            return 0
         cancelled = 0
-        for a in await self._conditional_tp_orders(side):
+        for a in algo_orders or []:
+            if ((a.get("side") or "").upper() != side
+                    or not a.get("closePosition")):
+                continue
             try:
                 await self.client.futures_cancel_algo_order(
                     symbol=self.cfg.symbol, algoId=a.get("algoId")
                 )
                 cancelled += 1
+                self.log.info(
+                    f"[BACKSTOP] stale closePosition order cancelled | "
+                    f"algoId={a.get('algoId')} type={a.get('orderType')}"
+                )
             except Exception as e:
                 self.log.warning(
-                    f"[TP] conditional cancel failed | algoId={a.get('algoId')}: {e}"
+                    f"[BACKSTOP] could not cancel closePosition order "
+                    f"{a.get('algoId')}: {e}"
                 )
         if cancelled:
             self.exchange_tp_conditional = False

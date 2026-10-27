@@ -167,36 +167,43 @@ def test_tp_fallback_skips_when_close_position_stop_exists():
     assert om.exchange_tp_conditional is False
 
 
-def test_backstop_4130_cancels_conditional_tp_and_retries():
-    class Algo4130Client(FakeClient):
+def test_backstop_removes_stale_close_position_before_placing():
+    """Осиротевший closePosition-стоп не должен блокировать новый (-4130)."""
+    class OrphanClient(FakeClient):
         def __init__(self):
             super().__init__(position_amt=-4.0)
             self.algo_calls = 0
             self.cancelled = []
-            self.algo_orders = [{"algoId": 777, "orderType": "TAKE_PROFIT_MARKET",
+            self.algo_orders = [{"algoId": 777, "orderType": "STOP_MARKET",
                                  "side": "BUY", "closePosition": True,
-                                 "triggerPrice": "8.657"}]
+                                 "triggerPrice": "9.006"}]
 
         async def futures_create_algo_order(self, **kw):
             self.algo_calls += 1
-            if self.algo_calls == 1:
-                raise api_error(-4130, "An open stop or take profit order is existing.")
             return {"algoId": 901}
-
-        async def futures_get_open_algo_orders(self, **kw):
-            return list(self.algo_orders)
 
         async def futures_cancel_algo_order(self, **kw):
             self.cancelled.append(kw.get("algoId"))
+            self.algo_orders = [a for a in self.algo_orders
+                                if a.get("algoId") != kw.get("algoId")]
             return {}
 
-    client = Algo4130Client()
+    client = OrphanClient()
     om = make_om(client)
     algo_id = run(om._place_exchange_backstop("SHORT", 8.829, qty=4.0))
     assert algo_id == 901
     assert client.cancelled == [777]
-    assert client.algo_calls == 2
+    assert client.algo_calls == 1
     assert om.backstop_algo_id == 901
+
+
+def test_backstop_4130_without_anything_to_cancel_returns_none():
+    class StuckClient(FakeClient):
+        async def futures_create_algo_order(self, **kw):
+            raise api_error(-4130, "An open stop or take profit order is existing.")
+
+    om = make_om(StuckClient())
+    assert run(om._place_exchange_backstop("SHORT", 8.829, qty=4.0)) is None
 
 
 # --------------------------------------------------------------------------- #
