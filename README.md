@@ -1796,6 +1796,9 @@ quantity и попытки закрыть остаток, который бир�
   `MAX_POSITIONS_IGNORE_AFTER_HOURS=2`. Позиция старше 2 ч не занимает слот `max_positions`,
   но сама не закрывается — слот освобождается для нового сигнала. `api-live` остаётся 0.
   Невалидное значение (`NaN`, `<0`) игнорируется и берётся yaml.
+  Побочный эффект: если слот занят свежей позицией, у «просроченной» reverse-позиции новая нога
+  может быть отклонена `/trading/check` (`max_positions`) — она ждёт освобождения слота, а её
+  аварийный выход остаётся за cumulative loss cap / биржевым backstop.
 - **Cumulative loss cap проверен** (не менялся): `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`
   → порог = 5% от equity цикла (~5.22 USDT). Проверка идёт на каждом тике и на свече, закрытие —
   market reduceOnly + финализация `REVERSE_CUM_LOSS_CAP`. Текущий цикл UNI: realized −3.70,
