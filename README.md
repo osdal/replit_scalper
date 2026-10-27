@@ -1809,14 +1809,27 @@ quantity и попытки закрыть остаток, который бир�
   до биржевого backstop. Добавлен `_cap_after_unclosed_sl()`: если после SL-хита позиция осталась открытой
   и она reverse — проверка cap добирается тем же тиком, закрытие идёт через `process_hit("CUM_LOSS_CAP")`
   (троттлинг и защита от двойного закрытия — внутри `_CUM_CAP`).
+- **Протухшая цепочка закрывается в минимальный плюс, не дожидаясь TP (`bot/main.py`).** «Протухание»
+  освобождало слот, но старые цепочки копились: 27.10 в 13:40 на бирже было 4 живых цепочки (UNI step 5,
+  FET step 3, POL step 3, AVAX step 1) при `max_positions=1`, т.к. три из них старше 2 ч не считались.
+  Теперь `_expired_cycle_profit_snapshot()` на тиках (троттлинг `EXPIRED_CLOSE_INTERVAL_SEC=10`) для
+  reverse-позиции старше `MAX_POSITIONS_IGNORE_AFTER_HOURS` считает net цикла (реализованный net закрытых
+  ног + плавающий) и, если он покрывает **комиссию выхода рынком + `EXPIRED_CLOSE_MIN_PROFIT_USD` (0.02)**,
+  закрывает весь цикл рынком через `process_hit("EXPIRED_PROFIT")` → `_close_cycle_by_cum_loss_cap("expired_profit")`.
+  Метки: `exit_reason=REVERSE_EXPIRED_PROFIT`, `cycle_close_reason=expired_profit`. TP/SL снимаются,
+  остаток добивается, строка финализируется по полному окну цикла. Возраст считается от первого филла
+  цикла (как и в слот-лимите), поэтому «протухшая» цепочка не ждёт своего TP бесконечно; в минусе она
+  по-прежнему ждёт (закрытие только в плюс) либо срабатывает cum-loss cap.
 - **Cumulative loss cap проверен** (не менялся): `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`
   → порог = 5% от equity цикла (~5.22 USDT). Проверка идёт на каждом тике и на свече, закрытие —
   market reduceOnly + финализация `REVERSE_CUM_LOSS_CAP`. Текущий цикл UNI: realized −3.70,
   unrealized +0.45 → до порога ~2 USDT запаса; закрытия в минус ниже порога больше не будет,
   т.к. TP пересчитан на безубыток+профит.
-- **Регресс:** новый `bot/tests/test_reverse_tp_recalc.py` (формула LONG/SHORT, инвариант «PnL цикла
-  = целевой профит», пересчёт со снятием старого лимита, идемпотентность, пропуск не-reverse) и
+- **Регресс:** новые `bot/tests/test_reverse_tp_recalc.py` (формула LONG/SHORT, инвариант «PnL цикла
+  = целевой профит», пересчёт со снятием старого лимита, идемпотентность, пропуск не-reverse),
   `bot/tests/test_cap_after_unclosed_sl.py` (cap только после `SL`, только для reverse-позиции,
-  no-op при выключенном cap, ошибка проверки не ломает тик); весь набор
-  `cd bot && python -m pytest tests -q` — **147 passed**.
+  no-op при выключенном cap, ошибка проверки не ломает тик) и `bot/tests/test_expired_profit_close.py`
+  (молодой цикл не трогаем, плюс меньше комиссии выхода — ждём, порог с минимальным профитом,
+  выключено при 0 ч, throttle, нет entry_time); весь набор
+  `cd bot && python -m pytest tests -q` — **155 passed**.
 

@@ -660,6 +660,8 @@ class PositionTracker:
             return "REVERSE_CHAIN_STOP"
         if closed_by == "cum_loss_cap":
             return "REVERSE_CUM_LOSS_CAP"
+        if closed_by == "expired_profit":
+            return "REVERSE_EXPIRED_PROFIT"
         if closed_by == "backstop":
             return "REVERSE_BACKSTOP"
         if closed_by == "tp":
@@ -688,6 +690,8 @@ class PositionTracker:
             return "chain_max"
         if closed_by == "cum_loss_cap":
             return "cum_loss_cap"
+        if closed_by == "expired_profit":
+            return "expired_profit"
         if closed_by == "chain_failed":
             return "chain_failed"
         return "chain_market"

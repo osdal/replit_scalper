@@ -93,6 +93,7 @@ _REVERSE_CLOSED_BY_REASON = {
     "market": "REVERSE_MARKET",
     "chain_stop": "REVERSE_CHAIN_STOP",
     "cum_loss_cap": "REVERSE_CUM_LOSS_CAP",
+    "expired_profit": "REVERSE_EXPIRED_PROFIT",
 }
 
 # Глобальные переменные для отслеживания recovery-состояния
@@ -124,6 +125,17 @@ _REVERSE_TP_RECALC_INTERVAL_SEC = float(
     os.getenv("REVERSE_TP_RECALC_INTERVAL_SEC") or "300"
 )
 _reverse_tp_recalc_ts: dict = {}
+
+# «Протухание» позиции: старше N часов она больше не занимает слот max_positions
+# (routes/trading.ts). Чтобы старые цепочки не копились и не грузили депозит,
+# такую позицию закрываем РЫНКОМ, как только цикл выходит в минимальный плюс
+# (net по всем ногам >= комиссия выхода + EXPIRED_CLOSE_MIN_PROFIT_USD), не
+# дожидаясь TP. 0 часов = выкл (в live env не задан).
+_EXPIRED_CLOSE_HOURS = float(os.getenv("MAX_POSITIONS_IGNORE_AFTER_HOURS") or "0")
+# Минимальный плюс сверх комиссии выхода (USD): 0 = закрывать ровно в безубыток.
+_EXPIRED_CLOSE_MIN_PROFIT_USD = float(os.getenv("EXPIRED_CLOSE_MIN_PROFIT_USD") or "0.02")
+_EXPIRED_CLOSE_INTERVAL_SEC = float(os.getenv("EXPIRED_CLOSE_INTERVAL_SEC") or "10")
+_expired_close_ts: dict = {}
 
 # Очередь симуляции исходов отклонённых сигналов.
 # Каждый элемент: {"trade_id": int, "direction": str, "entry": float, "sl": float,
@@ -1258,6 +1270,64 @@ async def _cap_after_unclosed_sl(
         return False
 
 
+async def _expired_cycle_profit_snapshot(symbol, order_mgr, tracker, log):
+    """Снимок цикла, если «протухшую» позицию пора закрыть в минимальный плюс.
+
+    Правило: позиция, открытая дольше `MAX_POSITIONS_IGNORE_AFTER_HOURS`, больше
+    не занимает слот `max_positions` — значит её нельзя держать «до своего TP»
+    бесконечно, иначе старые цепочки копятся и грузят депозит. Как только
+    суммарный net цикла (реализованный по закрытым ногам + плавающий) покрывает
+    комиссию выхода и минимальный плюс — закрываем рынком, не дожидаясь TP.
+
+    Возвращает `CapSnapshot` (net >= порога), иначе None: фича выключена,
+    позиция не reverse/live, цикл ещё молодой, не хватает данных или net ниже
+    порога. Троттлинг — `EXPIRED_CLOSE_INTERVAL_SEC`, чтобы не дёргать REST
+    каждую секунду.
+    """
+    if _EXPIRED_CLOSE_HOURS <= 0:
+        return None
+    pos = tracker.position
+    if pos is None or not getattr(pos, "is_reverse", False):
+        return None
+    if (getattr(pos, "mode", None) or order_mgr.cfg.mode) != "live":
+        return None
+    now_mono = time.monotonic()
+    if (now_mono - _expired_close_ts.get(symbol, 0.0)) < _EXPIRED_CLOSE_INTERVAL_SEC:
+        return None
+    _expired_close_ts[symbol] = now_mono
+    try:
+        entry_ms = await tracker._entry_time_ms(
+            getattr(tracker, "_trade_id", None), prefer_db=True
+        )
+    except Exception as e:
+        log.debug(f"[EXPIRED] entry time failed: {e}")
+        return None
+    if entry_ms <= 0:
+        return None
+    age_h = (time.time() * 1000 - entry_ms) / 3_600_000.0
+    if age_h < _EXPIRED_CLOSE_HOURS:
+        return None
+    snap = await _CUM_CAP.evaluate(symbol, order_mgr, tracker, log)
+    if snap is None:
+        return None
+    # Порог = комиссия выхода рынком + минимальный плюс. Unrealized с биржи
+    # комиссию выхода НЕ учитывает, поэтому без неё «плюс» после закрытия
+    # превратился бы в минус на размер тейкера.
+    qty = abs(float(pos.remaining_qty or 0.0))
+    fee_pct = float(getattr(order_mgr.cfg, "taker_fee_pct", 0.05) or 0.0) / 100.0
+    exit_fee = qty * float(pos.entry_price or 0.0) * fee_pct
+    required = exit_fee + max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD)
+    if snap.total_pnl < required:
+        return None
+    log.warning(
+        f"[EXPIRED] cycle in profit after {age_h:.1f}h — closing without waiting TP | "
+        f"symbol={symbol} net={snap.total_pnl:+.4f} required={required:.4f} "
+        f"(exit_fee={exit_fee:.4f} min_profit={max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD):.4f}) "
+        f"realized={snap.realized_pnl:+.4f} unrealized={snap.unrealized_pnl:+.4f}"
+    )
+    return snap
+
+
 async def _sync_position_on_start(
     cfg, client: AsyncClient, tracker: PositionTracker,
     order_mgr: OrderManager, log, recovery=None, notifier=None,
@@ -2063,7 +2133,9 @@ async def _run_live_or_paper(
             if report:
                 await recovery.report_result(pnl)
 
-        async def _close_cycle_by_cum_loss_cap() -> Optional[float]:
+        async def _close_cycle_by_cum_loss_cap(
+            exit_reason: str = "cum_loss_cap",
+        ) -> Optional[float]:
             """Принудительно закрывает reverse-цикл по cumulative loss cap.
 
             Раньше cap только снимал TP/SL и помечал позицию закрытой в трекере,
@@ -2071,6 +2143,10 @@ async def _run_live_or_paper(
             REVERSE_CHAIN_STOP: market reduceOnly → подтверждение флэта → финализация.
             Возвращает PnL цикла либо None, если позицию закрыть не удалось
             (тогда трекер не трогаем — попытка повторится на следующем тике).
+
+            exit_reason — метка причины закрытия: "cum_loss_cap" (по умолчанию)
+            или "expired_profit" (протухшая позиция закрыта в минимальный плюс,
+            не дожидаясь TP). Имя функции оставлено ради истории/ссылок.
             """
             leg = tracker.position
             if leg is None or cfg.symbol in _CUM_CAP_CLOSING:
@@ -2107,17 +2183,22 @@ async def _run_live_or_paper(
                         log.error(f"[REVERSE] cum-loss cap force-close failed: {e} — will retry")
                         return None
                 pnl = await tracker.apply_hit_async(
-                    "SL", current_price, candle_time_ms, closed_by="cum_loss_cap"
+                    "SL", current_price, candle_time_ms, closed_by=exit_reason
                 )
                 if preset_before and tracker.position is None:
                     _on_position_closed(preset_before)
+                label = (
+                    "REVERSE_EXPIRED_PROFIT"
+                    if exit_reason == "expired_profit"
+                    else "REVERSE_CUM_LOSS_CAP"
+                )
                 if is_live_close:
-                    await _force_flat_after_reverse(direction, "cum_loss_cap")
+                    await _force_flat_after_reverse(direction, exit_reason)
                 else:
-                    await tracker.refinalize_cycle_after_flat("REVERSE_CUM_LOSS_CAP")
+                    await tracker.refinalize_cycle_after_flat(label)
                 events.warning(
-                    f"[REVERSE] cumulative loss cap hit | symbol={cfg.symbol} "
-                    f"pnl={pnl:.4f} — cycle force-closed"
+                    f"[REVERSE] cycle force-closed | reason={label} symbol={cfg.symbol} "
+                    f"pnl={pnl:.4f}"
                 )
                 _CUM_CAP.reset(cfg.symbol)
                 if not bool(getattr(leg, "reject_reason", None)):
@@ -2136,6 +2217,20 @@ async def _run_live_or_paper(
                 if await _close_cycle_by_cum_loss_cap() is not None:
                     _consecutive_losses += 1
                     _last_loss_time = time.time()
+            return
+        if hit == "EXPIRED_PROFIT":
+            # Синтетический hit: «протухшая» (старше MAX_POSITIONS_IGNORE_AFTER_HOURS)
+            # reverse-позиция вышла в минимальный плюс по всем ногам — закрываем
+            # цикл рынком, не дожидаясь TP и не занимая депозит дальше.
+            if pos is not None and tracker.has_open_position():
+                pnl = await _close_cycle_by_cum_loss_cap("expired_profit")
+                if pnl is not None:
+                    if pnl >= 0:
+                        _consecutive_losses = 0
+                        _last_loss_time = 0.0
+                    else:
+                        _consecutive_losses += 1
+                        _last_loss_time = time.time()
             return
         if hit == "TP1" and not pos.is_recovery:
             events.info(f"TP1_HIT | price={current_price} total_qty={pos.total_qty} remaining_qty={pos.remaining_qty} old_sl={pos.sl_price}")
@@ -4501,6 +4596,18 @@ async def _run_live_or_paper(
                     if await _check_reverse_cum_loss(cfg.symbol, order_mgr, tracker, log):
                         await process_hit(
                             "CUM_LOSS_CAP", current_price, int(time.time() * 1000)
+                        )
+                        continue
+                if not hit and tracker.position is not None \
+                        and getattr(tracker.position, "is_reverse", False):
+                    # «Протухшая» позиция не должна висеть до своего TP: как только
+                    # цикл (все ноги) выходит в минимальный плюс — закрываем рынком.
+                    # Проверка внутри троттлится EXPIRED_CLOSE_INTERVAL_SEC.
+                    if await _expired_cycle_profit_snapshot(
+                        cfg.symbol, order_mgr, tracker, log
+                    ) is not None:
+                        await process_hit(
+                            "EXPIRED_PROFIT", current_price, int(time.time() * 1000)
                         )
                         continue
                 if hit:
