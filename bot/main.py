@@ -2173,6 +2173,24 @@ async def _run_live_or_paper(
             pnl = await tracker.apply_hit_async(
                 "SL", price, candle_ms, closed_by="market"
             )
+            # Патчим trade с правильной причиной закрытия ЦИКЛА (не ноги).
+            # apply_hit_async пишет exit_reason="REVERSE_MARKET" (через classify),
+            # но cycle_close_reason остаётся None, т.к. в момент вызова
+            # tracker.position — это исходная нога (is_reverse=False).
+            if tracker.reporter and getattr(tracker, "_trade_id", None):
+                reason_map = {
+                    "nothing_to_hedge": "chain_market",
+                    "risk_block": "chain_failed",
+                    "max_steps": "chain_max",
+                    "error": "chain_failed",
+                }
+                cycle_reason = reason_map.get(reason, "chain_market")
+                try:
+                    await tracker.reporter.patch_trade(tracker._trade_id, {
+                        "cycle_close_reason": cycle_reason
+                    })
+                except Exception as e:
+                    log.debug(f"[REVERSE] patch cycle_close_reason failed: {e}")
             if preset_before and tracker.position is None:
                 _on_position_closed(preset_before)
             events.info(f"SL_CLOSE | reverse skipped ({reason}); pnl={pnl}")
