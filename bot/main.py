@@ -2399,9 +2399,12 @@ async def _run_live_or_paper(
                         rev_entry, rev_qty, rev_tp = reverse_result
                         _REVERSE_CHAIN_FAILS.pop(cfg.symbol, None)
                         if rev_qty <= 0:
-                            await _finalize_skipped_reverse(
-                                pos.direction, "nothing to hedge", preset_before,
-                                current_price, candle_time_ms, not is_rejected,
+                            # Книга уже выходит в ноль на T либо хеджировать нечего.
+                            # Не закрываем цикл принудительно — оставляем его открытым.
+                            log.info(
+                                f"[REVERSE] nothing to hedge (rev_qty<=0) on TP1 — "
+                                f"cycle left open, will retry on next tick | "
+                                f"symbol={cfg.symbol} step={chain_step_next}"
                             )
                             return
                         if N > 0:
@@ -2686,12 +2689,16 @@ async def _run_live_or_paper(
                     rev_entry, rev_qty, rev_tp = reverse_result
                     _REVERSE_CHAIN_FAILS.pop(cfg.symbol, None)
                     if rev_qty <= 0:
-                        # FIX 1/2: нога не добавлена (книга уже выходит в ноль
-                        # на T либо хеджировать нечего) — не открываем
-                        # фантомную reverse-ногу и не перефинализируем строку.
-                        await _finalize_skipped_reverse(
-                            pos.direction, "nothing to hedge", preset_before,
-                            current_price, candle_time_ms, not is_rejected,
+                        # Книга уже выходит в ноль на T либо хеджировать нечего.
+                        # Не закрываем цикл принудительно — оставляем его открытым.
+                        # На следующем тике виртуальный SL сработает снова,
+                        # но так как позиция на бирже уже во флэте (нетто = 0),
+                        # синхронизация старта / трекера аккуратно закроет сделку
+                        # по нормальной логике (REVERSE_BE / REVERSE_MARKET).
+                        log.info(
+                            f"[REVERSE] nothing to hedge (rev_qty<=0) — "
+                            f"cycle left open, will retry on next tick | "
+                            f"symbol={cfg.symbol} step={chain_step}"
                         )
                         return
                     if N > 0:
