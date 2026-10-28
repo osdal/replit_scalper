@@ -70,7 +70,7 @@ htf_ema_fast: 12
 htf_ema_slow: 51
 htf_enabled: false
 htf_timeframe: 1h
-leverage: 150
+leverage: 20
 llm_api_key: ''
 llm_backoff_sec: 60.0
 llm_calls_per_min: 20
@@ -108,3 +108,4 @@ tp2_pct: 1.0
 use_fixed_tp_sl: false
 volume_ma_period: 20
 volume_multiplier: 1.8
+max_position_notional_usd: 0
