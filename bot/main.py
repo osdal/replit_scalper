@@ -3097,16 +3097,19 @@ async def _run_live_or_paper(
                     )
             else:
                 # Reverse не открыт (recovery/rejected/нулевой объём/ошибка) —
-                # закрываем исходную позицию как обычный SL, чтобы не зависнуть.
-                # Снимаем биржевой backstop/TP, чтобы не осталось висячих ордеров.
+                # закрываем цикл как неудавшийся реверс (chain_failed), а не как
+                # обычный SL. Иначе в БД уходит exit_reason="SL", cycle_close_reason=None
+                # и дашборд показывает неверную причину.
                 try:
                     await order_mgr.cancel_all_tp_sl(orig_direction, mode=pos_mode)
                 except Exception as e:
                     log.debug(f"[REVERSE] cancel original orders failed: {e}")
-                pnl = await tracker.apply_hit_async("SL", current_price, candle_time_ms)
+                pnl = await tracker.apply_hit_async(
+                    "SL", current_price, candle_time_ms, closed_by="chain_failed"
+                )
                 if preset_before and tracker.position is None:
                     _on_position_closed(preset_before)
-                events.info(f"SL_CLOSE | no reverse opened; pnl={pnl}")
+                events.info(f"SL_CLOSE | first reverse failed (chain_failed); pnl={pnl}")
 
         if hit == "SL" and not is_rejected:
             _consecutive_losses += 1
