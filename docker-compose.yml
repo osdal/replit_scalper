@@ -108,6 +108,8 @@ services:
       - BINANCE_WEIGHT_LIMIT_1M=2400
       - BINANCE_SHED_AT=0.75
       - BINANCE_BAN_FALLBACK_SEC=30
+      # Grid engine (server-side): включить движок сеток.
+      - GRID_ENGINE_ENABLED=true
 
   dashboard-testnet:
     <<: *dashboard-base
