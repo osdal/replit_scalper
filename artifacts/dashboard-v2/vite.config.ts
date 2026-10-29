@@ -12,7 +12,7 @@ export default defineConfig({
     port: 5175,
     proxy: {
       "/api": {
-        target: "http://localhost:5000",
+        target: "http://api-testnet:5000",
         changeOrigin: true,
         secure: false,
       },
