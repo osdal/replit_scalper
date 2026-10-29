@@ -112,3 +112,4 @@ trade_mode: manual
 use_fixed_tp_sl: false
 volume_ma_period: 20
 volume_multiplier: 1.5
+reverse_profit_pct: 1.0

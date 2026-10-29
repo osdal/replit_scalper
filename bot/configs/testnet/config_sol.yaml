@@ -110,3 +110,4 @@ tp2_pct: 1.0
 use_fixed_tp_sl: false
 volume_ma_period: 20
 volume_multiplier: 1.6
+reverse_profit_pct: 1.0
