@@ -1,10 +1,16 @@
-let API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+// По умолчанию ходим на ОТНОСИТЕЛЬНЫЙ /api: запрос уходит на тот же vite-сервер,
+// который отдаёт дашборд, и проксируется в нужный API (см. vite.config.ts).
+// Абсолютный http://localhost:5000/api ломал дашборд, открытый через SSH-туннель.
+let API = import.meta.env.VITE_API_URL || "/api";
 
-if (typeof window !== "undefined") {
-  const host = window.location.hostname;
-  if (host && host !== "localhost" && host !== "127.0.0.1") {
-    API = `http://${host}:5000/api`;
-  }
+// `new URL()` без базового адреса бросает TypeError, когда API относительный
+// ("/api"). Поэтому строим URL от текущего origin — иначе fetchPairs и другие
+// методы падали, и дашборд показывал "No pairs found".
+const URL_BASE =
+  typeof window !== "undefined" ? window.location.origin : "http://localhost";
+
+function apiUrl(path: string): URL {
+  return new URL(`${API}${path}`, URL_BASE);
 }
 
 async function apiFetch(url: string, options?: RequestInit) {
@@ -37,7 +43,7 @@ export interface Trade {
 }
 
 export async function fetchTrades(symbol?: string, limit = 50): Promise<{ trades: Trade[]; total?: number }> {
-  const url = new URL(`${API}/trades`);
+  const url = apiUrl("/trades");
   if (symbol) url.searchParams.set("symbol", symbol);
   url.searchParams.set("limit", String(limit));
   return apiFetch(url);
@@ -121,13 +127,13 @@ export async function clearRecoveryChains(): Promise<{ deleted: number }> {
 }
 
 export async function fetchPairs(): Promise<string[]> {
-  const url = new URL(`${API}/pairs`);
+  const url = apiUrl("/pairs");
   url.searchParams.set("_ts", String(Date.now()));
   return apiFetch(url.toString());
 }
 
 export async function fetchHistory(symbol: string, interval = "1d"): Promise<{ source: string; data: { t: number; o: string; h: string; l: string; c: string; v: string }[] }> {
-  const url = new URL(`${API}/history/${encodeURIComponent(symbol)}`);
+  const url = apiUrl(`/history/${encodeURIComponent(symbol)}`);
   url.searchParams.set("interval", interval);
   url.searchParams.set("_ts", String(Date.now()));
   return apiFetch(url.toString());
@@ -135,7 +141,7 @@ export async function fetchHistory(symbol: string, interval = "1d"): Promise<{ s
 
 export async function fetchLastPrice(symbol: string): Promise<number | null> {
   try {
-    const url = new URL(`${API}/ticker/price/${encodeURIComponent(symbol)}`);
+    const url = apiUrl(`/ticker/price/${encodeURIComponent(symbol)}`);
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString());
     if (!r.ok) return null;
@@ -149,7 +155,7 @@ export async function fetchLastPrice(symbol: string): Promise<number | null> {
 
 export async function fetchAdx(): Promise<Record<string, { adx: number | null; gate: number; ok: boolean }>> {
   try {
-    const url = new URL(`${API}/adx`);
+    const url = apiUrl("/adx");
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString());
     if (!r.ok) return {};
@@ -162,7 +168,7 @@ export async function fetchAdx(): Promise<Record<string, { adx: number | null; g
 
 export async function fetchBotsStatus(): Promise<Record<string, { is_running: boolean; position: any; current_price: number | null; last_heartbeat: string }>> {
   try {
-    const url = new URL(`${API}/bots`);
+    const url = apiUrl("/bots");
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString());
     if (!r.ok) return {};
@@ -191,7 +197,7 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 
 async function postTelegram(payload: Record<string, unknown>): Promise<boolean> {
   try {
-    const url = new URL(`${API}/notify/telegram`);
+    const url = apiUrl("/notify/telegram");
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString(), {
       method: "POST",
@@ -264,7 +270,7 @@ export async function saveGridResult(payload: {
 
 export async function fetchGridHistory(limit = 200): Promise<any[]> {
   try {
-    const url = new URL(`${API}/grid-history`);
+    const url = apiUrl("/grid-history");
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString());
@@ -402,7 +408,7 @@ export interface OpenAlgoOrder {
 // защиту по её clientAlgoId (gridsl_*/gridtp_* + _long/_short).
 export async function fetchOpenAlgo(symbol: string): Promise<{ ok: boolean; orders: OpenAlgoOrder[]; error?: string }> {
   try {
-    const url = new URL(`${API}/grid-orders/open-algo`);
+    const url = apiUrl("/grid-orders/open-algo");
     url.searchParams.set("symbol", symbol);
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString(), { headers: authHeaders() });
@@ -653,7 +659,7 @@ export async function fetchGridResetStatus(): Promise<{ ok: boolean; resetAt?: n
 // GET /api/grids открыт; import/patch/delete защищены notifyTokenGuard.
 
 export async function fetchServerGrids(): Promise<{ results: any[]; total?: number }> {
-  const url = new URL(`${API}/grids`);
+  const url = apiUrl("/grids");
   url.searchParams.set("_ts", String(Date.now()));
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => ({}));
@@ -708,7 +714,7 @@ export async function deleteAllGrids(
   phase?: "waiting" | "active" | "done" | "stopped",
 ): Promise<{ ok: boolean; deleted?: number; error?: string }> {
   try {
-    const url = new URL(`${API}/grids`);
+    const url = apiUrl("/grids");
     if (phase) url.searchParams.set("phase", phase);
     const r = await fetch(url.toString(), {
       method: "DELETE",
@@ -753,7 +759,7 @@ export async function fetchGridEngineConfig(): Promise<{
   [key: string]: any;
 }> {
   try {
-    const url = new URL(`${API}/grid-engine/config`);
+    const url = apiUrl("/grid-engine/config");
     url.searchParams.set("_ts", String(Date.now()));
     const r = await fetch(url.toString(), { headers: authHeaders() });
     const data = await r.json().catch(() => ({}));
