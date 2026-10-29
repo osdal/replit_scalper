@@ -278,9 +278,10 @@ router.post("/check", async (req, res) => {
     // occupied и потому не опознаётся как own по БД. Из-за этого следующая
     // reverse-нога такого символа упиралась в max_positions, если слот занял
     // свежий символ, хотя на бирже позиция ЕСТЬ — это добор, а не новый вход.
-    // Спрашиваем биржу. Только для информационных запросов (reserve=false):
-    // настоящий новый вход (reserve=true) проверяется строго, без поблажек.
-    if (!slot.allowed && !wantReserve && symbol && !EXCHANGE_CHECK
+    // Спрашиваем биржу. Для информационных запросов (reserve=false) — всегда.
+    // Для резервирования (reserve=true) — тоже, если на бирже есть живая позиция
+    // (реверс-нога в существующей цепочке не должна конкурировать за слот).
+    if (!slot.allowed && symbol && !EXCHANGE_CHECK
         && await exchangeHasPosition(symbol)) {
       slot = { ...slot, allowed: true, own: true };
     }
