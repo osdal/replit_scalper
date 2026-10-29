@@ -722,6 +722,8 @@ export default function Dashboard() {
   const [autoSavedFlash, setAutoSavedFlash] = useState(false);
   const [autoApplyError, setAutoApplyError] = useState<string | null>(null);
   const autoDraftsSeededRef = useRef(false);
+  // Один раз автовыбираем пару после первой загрузки списка пар.
+  const autoPairPickedRef = useRef(false);
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
@@ -828,7 +830,10 @@ export default function Dashboard() {
       try {
         const res = await fetchGridEngineConfig();
         if (cancelled || !res.ok) return;
-        const cfg = res.config ?? null;
+        // GET /api/grid-engine/config отдаёт конфиг «плоским» объектом (без
+        // обёртки config), POST — в поле config. Поддерживаем оба варианта,
+        // иначе черновики Auto defaults оставались пустыми.
+        const cfg = (res.config ?? res) as GridEngineConfig;
         setServerEngineConfig(cfg);
         if (typeof cfg?.autoEnabled === "boolean") {
           setTradeMode(cfg.autoEnabled ? "auto" : "manual");
@@ -2441,7 +2446,14 @@ export default function Dashboard() {
     try {
       const data = await fetchPairs();
       const list = Array.isArray(data) ? data : [];
-      setPairs([...new Set(list)]);
+      const unique = [...new Set(list)];
+      setPairs(unique);
+      // Первый заход: сразу открываем пару, иначе на экране только список пар,
+      // а вкладки Statistics/History/Trades видны лишь при выбранной паре.
+      if (!autoPairPickedRef.current && unique.length > 0) {
+        autoPairPickedRef.current = true;
+        setSelectedPair((prev) => prev ?? (unique.includes("BTCUSDT") ? "BTCUSDT" : unique[0]));
+      }
     } catch {
       // ignore errors, keep empty list
     } finally {
