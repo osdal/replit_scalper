@@ -109,4 +109,6 @@ use_fixed_tp_sl: false
 volume_ma_period: 20
 volume_multiplier: 1.4
 max_position_notional_usd: 0
-reverse_profit_pct: 1.0
+reverse_profit_pct: 0.5
+reverse_breakeven_pct: 1.5
+reverse_fee_buffer_pct: 0.0
