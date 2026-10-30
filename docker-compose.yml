@@ -168,6 +168,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./lib:/app/lib
       - ./.env.live:/app/.env.live:ro
     environment:
       # env.ts читает .env.live (BINANCE_TESTNET=false, реальные ключи,
