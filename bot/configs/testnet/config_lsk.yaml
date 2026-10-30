@@ -59,7 +59,7 @@ exchange_sl_backstop_enabled: true
 exchange_sl_backstop_pct: 2.0
 fixed_notional_usd: 0
 fixed_qty: 0.0
-fixed_risk_usd: 0.175
+fixed_risk_usd: 0.1
 htf2_ema_fast: 12
 htf2_ema_slow: 26
 htf2_enabled: false
@@ -90,9 +90,9 @@ max_open_per_cycle: 0
 max_position_pct_equity: 100
 mode: live
 name: LSK
-paper_balance: 1000.0
-position_size_pct: 1
-risk_pct: 3.0
+paper_balance: 10.0
+position_size_pct: 2.0
+risk_pct: 1.0
 rsi_high: 70
 rsi_low: 30
 rsi_period: 14
@@ -107,7 +107,8 @@ tp2_pct: 1.0
 use_fixed_tp_sl: false
 volume_ma_period: 20
 volume_multiplier: 1.0
-max_position_notional_usd: 0
+max_position_notional_usd: 50.0
 reverse_profit_pct: 0.5
 reverse_breakeven_pct: 1.5
-reverse_fee_buffer_pct: 0.0
+reverse_fee_buffer_pct: 0.1
+reverse_chain_max: 3
