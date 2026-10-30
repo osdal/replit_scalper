@@ -63,6 +63,23 @@ def _direction_to_side(direction: str) -> str:
     return SIDE_BUY if direction == "LONG" else SIDE_SELL
 
 
+def _position_upnl(p: dict) -> float:
+    """Unrealized PnL позиции (USDT).
+
+    Binance /fapi/v3/positionRisk отдаёт ключ `unRealizedProfit` (заглавная R);
+    исторический `unrealizedProfit` принимаем для совместимости. Раньше читался
+    только lowercase-ключ, из-за чего плавающий PnL всегда был 0 — cum-loss cap
+    и EXPIRED не видели текущий результат цикла.
+    """
+    try:
+        value = p.get("unRealizedProfit")
+        if value is None:
+            value = p.get("unrealizedProfit", 0)
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _opposite_side(direction: str) -> str:
     return SIDE_SELL if direction == "LONG" else SIDE_BUY
 
@@ -460,7 +477,7 @@ class OrderManager:
         for p in positions:
             try:
                 if abs(float(p.get("positionAmt", 0) or 0)) > 0:
-                    total += float(p.get("unrealizedProfit", 0) or 0)
+                    total += _position_upnl(p)
             except (TypeError, ValueError):
                 continue
         return total
@@ -479,7 +496,7 @@ class OrderManager:
                 return {
                     "qty": abs(amt),
                     "entry_price": float(p.get("entryPrice", 0)),
-                    "unrealized_pnl": float(p.get("unrealizedProfit", 0)),
+                    "unrealized_pnl": _position_upnl(p),
                     "direction": "LONG" if amt > 0 else "SHORT",
                 }
         return None

@@ -194,7 +194,8 @@ async def analyze(client: AsyncClient, symbol: str, pos: dict, args) -> dict:
 
     amt = float(pos.get("positionAmt") or 0)
     entry_price = float(pos.get("entryPrice") or 0)
-    upnl = float(pos.get("unrealizedProfit") or 0)
+    # Binance отдаёт `unRealizedProfit` (заглавная R).
+    upnl = float(pos.get("unRealizedProfit") or pos.get("unrealizedProfit") or 0)
     mark_price = float(pos.get("markPrice") or 0) or entry_price
     qty = abs(amt)
 
