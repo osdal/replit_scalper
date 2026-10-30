@@ -76,6 +76,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./lib:/app/lib
       - ./.env:/app/.env:ro
     environment:
       - BOT_ENV=testnet
