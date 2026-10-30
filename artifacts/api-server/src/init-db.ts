@@ -66,6 +66,10 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
 
 // Миграция: добавляем колонку llm_status, если её ещё нет (старые БД)
 await db.run(sql`ALTER TABLE bots ADD COLUMN llm_status TEXT`).catch(() => { /* уже есть */ });
+// Миграция: новые колонки для лимитов позиций
+await db.run(sql`ALTER TABLE bots ADD COLUMN expired_after_minutes INTEGER NOT NULL DEFAULT 120`).catch(() => { /* уже есть */ });
+await db.run(sql`ALTER TABLE bots ADD COLUMN max_positions INTEGER NOT NULL DEFAULT 1`).catch(() => { /* уже есть */ });
+await db.run(sql`ALTER TABLE bots ADD COLUMN max_positions_with_expired INTEGER NOT NULL DEFAULT 3`).catch(() => { /* уже есть */ });
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
