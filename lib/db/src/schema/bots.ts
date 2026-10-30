@@ -40,6 +40,10 @@ export const botsTable = sqliteTable("bots", {
   // Потолки нотионала позиции: абсолютный USD и % от equity (0 = выкл).
   max_position_notional_usd: real("max_position_notional_usd").notNull().default(0),
   max_position_pct_equity:   real("max_position_pct_equity").notNull().default(0),
+  // Лимиты позиций (per-bot, настраиваются через дашборд без перезапуска контейнера):
+  expired_after_minutes: integer("expired_after_minutes").notNull().default(120),
+  max_positions:           integer("max_positions").notNull().default(1),
+  max_positions_with_expired: integer("max_positions_with_expired").notNull().default(3),
   // Live arm-gate: торговля разрешена только при armed=1. В testnet по умолчанию 1.
   armed:              integer("armed", { mode: "boolean" }).notNull().default(true),
   // Причина последней самоостановки бота (напр. "watchdog_no_candles"); null если нет.
