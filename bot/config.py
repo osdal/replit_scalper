@@ -52,6 +52,10 @@ class Config:
     adx_threshold: float = 0.0        # ADX порог: сигналы при adx >= threshold (0 = фильтр отключён; тип. 20–25)
     time_profit_close_hours: float = 0.0  # Принудительно закрыть прибыльную позицию старше N часов (0 = выкл)
     max_open_per_cycle: int = 1       # Макс. новых позиций за цикл (0 = без лимита)
+    # Лимиты позиций (per-bot, работают без перезапуска контейнера через дашборд):
+    expired_after_minutes: int = 120  # Время протухания позиции в минутах (0 = выкл). Позиция старше этого времени не занимает слот max_positions.
+    max_positions: int = 1            # Макс. одновременно открытых позиций (включая recovery). 0 = без лимита.
+    max_positions_with_expired: int = 3  # Макс. открытых позиций включая протухшие (0 = без лимита).
     signal_cooldown_min: int = 0      # Кулдаун между сигналами на один символ в минутах (0 = выкл)
     rsi_period: int = 14              # RSI период (0 = выкл)
     rsi_low: int = 30                 # RSI low threshold для LONG

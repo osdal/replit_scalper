@@ -1,0 +1,1922 @@
+FROM node:20-slim AS base
+# procps нужен и api-серверу (перечисление PID ботов через `ps`), и боту
+# (проверка «жив ли процесс, держущий lock-файл»).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip sqlite3 procps && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+WORKDIR /app
+
+# Полная установка workspace-зависимостей ВНУТРИ образа (Linux-бинарники).
+# .dockerignore исключает node_modules, поэтому в образ попадает чистое дерево
+# исходников. Благодаря этому контейнеры НЕ трогают node_modules на хосте:
+# монтируем только bot/, data/, logs/ и .env* — без node_modules.
+FROM base AS deps
+COPY . .
+# Без BuildKit cache mount — обычная установка (работает везде).
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+
+# dev-образ: образ deps + Python-зависимости ботов. Они нужны api-серверу,
+# потому что он сам спавнит ботов (кнопка Start в дашборде) для обоих
+# окружений — testnet и live.
+FROM deps AS dev
+RUN pip install --break-system-packages --no-cache-dir -r bot/requirements.txt
+# testnet API/dashboard + live API/dashboard
+EXPOSE 5000 5001 5173 5176
+
+# Production builders
+FROM base AS api-builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm install -g pnpm && pnpm --filter @workspace/api-server run build
+
+FROM base AS dashboard-builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm install -g pnpm && pnpm --filter @workspace/dashboard run build
+
+# Runtime
+FROM base AS runtime
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=api-builder /app/artifacts/api-server/dist ./artifacts/api-server/dist
+COPY --from=dashboard-builder /app/artifacts/dashboard/dist ./artifacts/dashboard/dist
+COPY . .
+# testnet API/dashboard + live API/dashboard
+EXPOSE 5000 5001 5173 5176
+# ============================================================
+#  Два независимых стека: TESTNET и LIVE.
+#
+#    стек      API     dashboard   БД                конфиги ботов
+#    testnet   :5000   :5173       ./data/bot.db     bot/configs/testnet
+#    live      :5001   :5176       ./data/bot_live.db  bot/configs/live
+#
+#  Каждый стек самодостаточен: боты запускаются кнопкой Start в своём
+#  дашборде, api-сервер спавнит python-процесс ВНУТРИ своего контейнера.
+#  Поэтому DASHBOARD_API_URL из .env / .env.live (localhost:500X) работает
+#  без правок — бот и API живут в одном контейнере.
+#
+#  ВАЖНО про образы: api-testnet и api-live используют ОДИН образ
+#  replit_scalper-api, а dashboard-* — один replit_scalper-dashboard.
+#  Build не может быть у обоих сразу: параллельная сборка падает с
+#  "image ... already exists". Поэтому build указан только у первого сервиса
+#  в паре, второй просто переиспользует тот же тег.
+#  Сборка выполняется один раз: docker compose build (или docker compose up -d --build).
+#
+#  Запуск:
+#    docker compose up -d                 # оба стека
+#    docker compose up -d api-testnet dashboard-testnet     # только testnet
+#    docker compose up -d api-live dashboard-live           # только live
+#    docker compose logs -f api-live
+#    docker compose down                  # остановить оба
+#
+#  restart: unless-stopped — контейнеры поднимаются сами после ребута хоста
+#  и после «простоя» инстанса в Oracle Cloud (бесплатный A1 могут остановить).
+# ============================================================
+
+x-api-base: &api-base
+  image: replit_scalper-api
+  working_dir: /app
+  restart: unless-stopped
+  volumes:
+    # Только данные и код бота + исходники api-сервера (чтобы правки API
+    # применялись перезапуском контейнера, без docker-compose build).
+    # node_modules НЕ монтируются: они живут в образе (Linux), иначе
+    # контейнер переустановил бы их в общий каталог на хосте.
+    - ./bot:/app/bot
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - ./artifacts/api-server/src:/app/artifacts/api-server/src
+  # init-db идемпотентный (CREATE TABLE IF NOT EXISTS) и создаёт БД + карточки
+  # ботов из bot/configs/<BOT_ENV>/, если их ещё нет.
+  command: sh -c "pnpm run init-db && pnpm --filter @workspace/api-server run dev"
+
+x-dashboard-base: &dashboard-base
+  image: replit_scalper-dashboard
+  working_dir: /app
+  restart: unless-stopped
+  volumes:
+    # Только исходники для hot-reload + конфиг vite и env-файлы.
+    # node_modules — в образе. vite.config.ts нужен здесь, потому что в нём
+    # задаётся адрес API для прокси /api.
+    - ./artifacts/dashboard/src:/app/artifacts/dashboard/src
+    - ./artifacts/dashboard/index.html:/app/artifacts/dashboard/index.html
+    - ./artifacts/dashboard/vite.config.ts:/app/artifacts/dashboard/vite.config.ts
+    - ./artifacts/dashboard/tsconfig.json:/app/artifacts/dashboard/tsconfig.json
+    - ./artifacts/dashboard/.env:/app/artifacts/dashboard/.env:ro
+    - ./artifacts/dashboard/.env.live:/app/artifacts/dashboard/.env.live:ro
+
+services:
+  # ------------------------------ TESTNET ------------------------------
+  api-testnet:
+    <<: *api-base
+    container_name: replit_scalper-api-testnet
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./bot:/app/bot
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./.env:/app/.env:ro
+    environment:
+      - BOT_ENV=testnet
+      - PORT=5000
+      - BOT_DIR=./bot
+      - DATABASE_PATH=./data/bot.db
+      - BINANCE_TESTNET=true
+      # Боты спавнятся внутри этого контейнера -> localhost:5000 = свой API.
+      - DASHBOARD_API_URL=http://localhost:5000/api
+      # Релей сигналов testnet -> live уходит на соседний контейнер.
+      - SIGNAL_RELAY_URL=http://api-live:5000/api
+      # Cumulative loss cap для reverse-цепочки (0 = выкл).
+      - REVERSE_CUM_LOSS_PCT=5
+      - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Лимит позиций только для live.
+      - BINANCE_GATE_ENABLED=1
+
+  dashboard-testnet:
+    <<: *dashboard-base
+    container_name: replit_scalper-dashboard-testnet
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "5173:5173"
+    # Клиент ходит на /api, vite проксирует в API-контейнер (внутри контейнера
+    # localhost — это сам дашборд, поэтому тут имя сервиса).
+    environment:
+      - DASHBOARD_API_TARGET=http://api-testnet:5000
+    # vite --mode development читает artifacts/dashboard/.env:
+    #   VITE_API_URL=http://localhost:5000/api  (тема обычная, не красная)
+    command: pnpm --filter @workspace/dashboard run dev
+    depends_on:
+      - api-testnet
+
+  # -------------------------------- LIVE -------------------------------
+  api-live:
+    <<: *api-base
+    container_name: replit_scalper-api-live
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./bot:/app/bot
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts/api-server/src:/app/artifacts/api-server/src
+      - ./.env.live:/app/.env.live:ro
+    environment:
+      # env.ts читает .env.live (BINANCE_TESTNET=false, реальные ключи,
+      # PORT=5001, DATABASE_PATH=./data/bot_live.db) с override и падает,
+      # если файла нет или ключи пустые.
+      - BOT_ENV=live
+      - PORT=5001
+      - BINANCE_TESTNET=false
+      # Лимит позиций для live: 3 (из .env.live)
+      - MAX_POSITIONS=3
+      - DASHBOARD_API_URL=http://localhost:5001/api
+      # Cumulative loss cap для reverse-цепочки (0 = выкл).
+      - REVERSE_CUM_LOSS_PCT=5
+      - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Ворота rate-limit на live выключены (обкатываются на testnet).
+      - BINANCE_GATE_ENABLED=0
+
+  dashboard-live:
+    <<: *dashboard-base
+    container_name: replit_scalper-dashboard-live
+    ports:
+      - "5176:5176"
+    # vite --mode live читает artifacts/dashboard/.env.live:
+    #   VITE_API_URL=http://localhost:5001/api, VITE_THEME=live
+    #   -> красный интерфейс и вкладка LIVE.
+    command: pnpm --filter @workspace/dashboard exec vite --host 0.0.0.0 --port 5176 --mode live
+    environment:
+      - DASHBOARD_API_TARGET=http://api-live:5001
+    depends_on:
+      - api-live
+#!/bin/bash
+# Запуск обоих стеков (testnet + live) в Docker.
+# Соответствует docker-compose.yml: testnet 5000/5173, live 5001/5176.
+set -e
+
+echo "=== Starting both stacks in Docker ==="
+
+# Check if docker is running
+if ! docker info > /dev/null 2>&1; then
+    echo "Error: Docker is not running. Please start Docker Desktop first."
+    exit 1
+fi
+
+docker-compose up -d "$@"
+
+echo "Waiting for services to start..."
+sleep 15
+
+echo ""
+echo "=== Service Status ==="
+docker-compose ps
+
+echo ""
+echo "=== URLs ==="
+echo "TESTNET API:       http://localhost:5000"
+echo "TESTNET dashboard: http://localhost:5173"
+echo "LIVE API:          http://localhost:5001"
+echo "LIVE dashboard:    http://localhost:5176"
+echo ""
+echo "Bots start with the Start button in the matching dashboard."
+echo "In live press Arm first (REQUIRE_ARM=true)."
+echo ""
+echo "To view logs: docker-compose logs -f api-live"
+echo "To stop:      docker-compose down"
+# ============================================
+# Общий .env файл для всех сервисов
+# При изменении ключей — измените только здесь
+# ============================================
+
+# Binance API Keys
+BINANCE_API_KEY=YOUR_API_KEY_HERE
+BINANCE_API_SECRET=YOUR_API_SECRET_HERE
+
+# Разрешает серверные grid-роуты (/api/grid-orders/*); включать только вместе с тестнетом.
+GRID_ORDERS_ENABLED=false
+
+# Необязательный allowlist символов для grid-ордеров (через запятую, напр. BTCUSDT,ETHUSDT).
+# Пусто = без ограничений. Символы вне списка отклоняются с 409.
+GRID_SYMBOLS=
+
+# Серверный grid-движок (фазы 2a/2b: активация, филлы, защита, закрытие/финализация).
+# INERT по умолчанию — включать только осознанно (работает лишь со строками engine='server').
+# GRID_ENGINE_ENABLED=false
+# Интервал tick-цикла движка в мс (по умолчанию 15000).
+# GRID_ENGINE_INTERVAL_MS=15000
+# Сколько минут active-сетка может держать tracked entry-ордера при positionAmt=0
+# и пустых fillEntries, прежде чем движок залогирует предупреждение (по умолчанию 120).
+# GRID_STALE_ACTIVE_MINUTES=120
+
+# Auto-mode серверного grid-движка (создание waiting-сеток из символов ботов).
+# По умолчанию выключен; имеет эффект только при GRID_ENGINE_ENABLED=true.
+# GRID_AUTO_ENABLED=false
+# TP новой авто-сетки в % (по умолчанию 10, диапазон 0.1..50).
+# GRID_AUTO_TP_PCT=10
+# SL новой авто-сетки в % (по умолчанию 2, диапазон 0.1..50).
+# GRID_AUTO_SL_PCT=2
+# Отступ края (edge) новой авто-сетки в % (по умолчанию 2, диапазон 0.1..50).
+# GRID_AUTO_EDGE_PCT=2
+# Порог ADX для отбора символа в auto-mode (по умолчанию 15, диапазон 1..100).
+# GRID_AUTO_GATE=15
+# Максимум новых сеток за один tick (по умолчанию 3).
+# GRID_AUTO_MAX=3
+# Общий потолок одновременно active/waiting сеток (по умолчанию 10).
+# GRID_AUTO_TOTAL_MAX=10
+# Размер одного ордера авто-сетки в USD (по умолчанию 10).
+# GRID_AUTO_ORDER_USD=10
+# Плечо авто-сеток (по умолчанию 50; при выставке ограничивается биржей).
+# GRID_AUTO_LEVERAGE=50
+
+# API Server
+PORT=5000
+BOT_DIR=./bot
+DATABASE_PATH=./data/bot.db
+# Явный путь к Python, в котором установлены зависимости бота (pandas, python-binance и т.д.).
+# Используется API сервером при запуске ботов через дашборд. На Windows может быть нужно
+# указать полный путь, если 'python' из PATH указывает на другой интерпретатор без зависимостей.
+# Пример: BOT_PYTHON=C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe
+BOT_PYTHON=
+
+# Авто-рестарт ботов при старте api-server: если бот был is_running=1, но его
+# процесс не выжил (рестарт/падение grid-stack), он поднимается заново
+# (не более 3 попыток на символ). Значение "false" (без учёта регистра) отключает.
+AUTO_RESTART_BOTS=true
+
+# Поведение watchdog при пропаже свечей (WS/REST недоступны). По умолчанию бот
+# НЕ самоостанавливается: остаётся жив, переподключается и продолжает, когда
+# данные вернутся (ручной перезапуск не нужен). "true" возвращает старое
+# поведение — самоостановку с stop_reason=watchdog_no_candles.
+# WATCHDOG_SHUTDOWN=false
+
+# Support Telegram bot
+SUPPORT_BOT_TOKEN=your_support_bot_token_from_BotFather
+SUPPORT_CHAT_ID=your_chat_id
+SUPPORT_BOT_MASTER_KEY=base64_32_bytes
+SUPPORT_BOT_DB=./support-bot/data/support_bot.db
+# Trading Bot — документация
+
+Краткое описание: автоматический торговый бот для Binance Futures (USDT-M) и KuCoin Futures, реализующий мультипресетную стратегию (46 пресетов: EMA/SMA кроссы, RSI, MACD, Bollinger, Stochastic, VWAP, ATR, Supertrend, ADX, Ichimoku, свечные паттерны) с HTF-трендом, опциональным LLM-фильтром сигналов (Groq/Gemini/OpenRouter), защитой от серии убытков и скриптом анализа результатов. Поддерживает три режима работы (live, paper, backtest), систему компенсации убытков (recovery), оптимизацию параметров и веб-дашборд.
+
+---
+
+## 1. Архитектура проекта
+
+```
+replit_scalper/
+├── bot/                          # Основной код бота (Binance Futures)
+│   ├── main.py                   # Точка входа, главный цикл, on_candle
+│   ├── config.py                 # Config dataclass + YAML load/validation
+│   ├── market_data.py            # Загрузка свечей (REST polling каждые 10с)
+│   ├── strategy.py               # Signal + индикаторы + 46 пресетов
+│   ├── preset_config.py          # Per-preset TP/SL/лимиты (fallback-логика)
+│   ├── signal_handler.py         # Подтверждение сигналов (auto/semi-auto)
+│   ├── order_manager.py          # Расчёт qty, размещение ордеров, SL/TP, PnL sync
+│   ├── position_tracker.py       # Состояние позиции, хиты SL/TP, persistence
+│   ├── llm_client.py             # Опциональный LLM-фильтр (Groq/Gemini/OpenRouter)
+│   ├── analyze_trades.py         # Скрипт анализа результатов (ANALYTICS.md)
+│   ├── recovery_client.py        # HTTP клиент к recovery API (aiohttp)
+│   ├── backtester.py             # Движок бэктеста
+│   ├── optimizer.py              # Optuna-оптимизация параметров
+│   ├── logger.py                 # Двойной логгер (trade-only + events)
+│   ├── db_reporter.py            # HTTP репортёр trades/heartbeat в API
+│   ├── notifier.py               # Telegram уведомления (PNG-карточки)
+│   ├── config_<symbol>.yaml      # Per-symbol конфиги
+│   ├── recovery_config.yaml      # Recovery-параметры
+│   ├── requirements.txt
+│   └── logs/
+├── kucoin/                       # KuCoin Futures (отдельный скрипт-тест)
+│   ├── main_kucoin.py
+│   ├── kucoin_client.py
+│   ├── kucoin_config.py
+│   └── .env
+├── artifacts/
+│   ├── api-server/               # Express API (порт 5000)
+│   │   └── src/
+│   │       ├── routes/           # bots, trades, backtest, recovery, optimizer
+│   │       └── init-db.ts        # Инициализация БД из config_*.yaml
+│   └── dashboard/                # React/Vite дашборд (порт 5173)
+│       └── src/
+│           ├── Dashboard.tsx
+│           ├── hooks/useApi.ts
+│           ├── OptimizerTab.tsx
+│           ├── RecoveryTab.tsx
+│           └── components/ui/
+├── data/
+│   └── bot.db                    # SQLite (bots, trades, recovery_chains)
+├── config/
+│   ├── binance/                  # Binance per-symbol YAML (альтернативная папка)
+│   └── kucoin/                   # KuCoin per-symbol YAML
+├── support-bot/                  # Telegram support-bot
+├── .env.example                  # Пример переменных окружения
+├── pyproject.toml                # Python зависимости
+├── package.json                  # Node зависимости (dashboard/api)
+├── start-all.ps1 / .bat / .sh    # Скрипты запуска
+└── README.md
+```
+
+### Взаимодействие компонентов
+
+1. `main.py` загружает `config_<symbol>.yaml`, создаёт `AsyncClient` (python-binance).
+2. `market_data.start_kline_polling` REST-опрашивает Binance Futures каждые 10 секунд.
+3. На закрытой свече вызывается `on_candle` → `strategy.get_signal` (EMA + volume + HTF + ADX).
+4. `signal_handler.confirm` — подтверждение сигнала (auto/semi-auto).
+5. `recovery_client.claim` — атомарный захват долга через API сервер.
+6. `order_manager.open_position` — расчёт qty, MARKET-ордер, SL/TP.
+7. `position_tracker` отслеживает hits (SL/TP1/TP2), обновляет состояние, пишет в БД через `db_reporter`.
+8. `notifier` отправляет PNG-карточки в Telegram.
+9. Dashboard (React) подключается к API серверу (Express) на порту 5000.
+
+---
+
+## 1a. Быстрый старт: открыть дашборд в Oracle Cloud
+
+Основной стек живёт на VM в Oracle Cloud (`92.5.180.72`, регион Frankfurt, Ubuntu
+24.04, A1 2 OCPU / 12 GB). Наружу открыт только SSH (22), поэтому браузер
+обращается к дашборду через SSH-туннель.
+
+### После перезагрузки компьютера — одна команда
+
+Откройте PowerShell в папке проекта:
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+ssh oracle-bot
+```
+
+Оставьте окно открытым — это туннель. Дальше в браузере:
+
+| Что | Адрес | Стек |
+|---|---|---|
+| **Live-дашборд** (реальные деньги) | **http://localhost:5176** | Oracle |
+| Testnet-дашборд | http://localhost:15173 | Oracle |
+| Live API | http://localhost:5001/api | Oracle |
+| Testnet API | http://localhost:15000/api | Oracle |
+
+Проброс портов уже настроен в `~/.ssh/config` (алиас `oracle-bot`), отдельно
+ничего указывать не нужно.
+
+> Если `ssh oracle-bot` не найден — проверьте, что в `~/.ssh/config` есть блок
+> `Host oracle-bot` с `LocalForward 5001/5176/15000/15001/15173/15176`.
+> Если изменяли файл — перезапустите туннель (закройте окно и откройте снова).
+
+### Если ничего не открывается
+
+```powershell
+ssh oracle-bot "sudo docker compose -f /opt/trading-bot/docker-compose.yml ps"
+```
+
+| Симптом | Причина и что делать |
+|---|---|
+| `Connection refused` на 5176 | На VM не запущены контейнеры: `ssh oracle-bot "cd /opt/trading-bot && sudo docker compose up -d"` |
+| Туннель не поднимается | Порт занят на Windows — закройте лишние `ssh -N oracle-bot` (Диспетчер задач) |
+| Дашборд есть, ботов нет | Контейнеры поднялись, но боты не запущены (см. ниже) |
+
+### Боты после перезагрузки самой VM
+
+У контейнеров `restart: unless-stopped`, поэтому после ребута VM они поднимаются
+сами. **Боты — нет:** в `.env.live` `AUTO_RESTART_BOTS=false` намеренно, чтобы
+реальные деньги не поехали торговать без явного действия оператора.
+
+**Правило по умолчанию:** live-ботов не запускаю автоматически при деплое,
+рестарте стека, редеплое или любом другом изменении кода. Запускаю только по
+явному запросу оператора.
+
+Запустить ботов можно двумя способами:
+
+```bash
+# из PowerShell, по SSH
+ssh oracle-bot "cd /opt/trading-bot && ./stack.sh"
+
+# или прямо в браузере: Arm, затем Start у нужного бота
+```
+
+### Если Oracle остановил инстанс как «простой»
+
+Инстанс считается idle за 7 дней (CPU/сеть/память < 20%) и может быть отключён.
+Тогда в консоли OCI нажмите **Start**, затем:
+
+```bash
+ssh oracle-bot "cd /opt/trading-bot && ./stack.sh"
+```
+
+Защита от этого — keepalive в cron, см. `ORACLE_MIGRATION.md` §8 и
+`deploy/oci/keepalive.sh`.
+
+### Что помнить
+
+- **Порт 5001 на Windows должен быть свободен** — он пробрасывается на Oracle.
+  Если на Windows поднят локальный live-стек, туннель не стартует, и дашборд
+  покажет данные локального стека вместо Oracle.
+- **Локальный testnet-стек** (`:5173`) этому не мешает: его порты 5000/5173
+  проброшены со сдвигом на 15000/15173.
+- Дашборд ходит в API по относительному пути `/api` через vite-прокси, поэтому
+  корректен на любом порту и не может случайно показать чужой стек.
+
+Полная инструкция по переезду — в [ORACLE_MIGRATION.md](ORACLE_MIGRATION.md).
+
+---
+
+## 2. Ключевые торговые стратегии
+
+### 2.1 Основной сигнал (EMA Cross + Volume)
+
+Бот использует **EMA-кроссов** на закрытой свече с подтверждением объёмом.
+
+**Условие LONG:**
+```
+prev.ema_fast <= prev.ema_slow  AND  curr.ema_fast > curr.ema_slow
+AND curr.volume >= curr.volume_ma * volume_multiplier
+```
+
+**Условие SHORT:**
+```
+prev.ema_fast >= prev.ema_slow  AND  curr.ema_fast < curr.ema_slow
+AND curr.volume >= curr.volume_ma * volume_multiplier
+```
+
+Параметры по умолчанию: `ema_fast=12`, `ema_slow=26`, `volume_ma_period=20`, `volume_multiplier=1.5`.
+
+### 2.2 HTF-фильтр (Higher Timeframe)
+
+При `htf_enabled=True` сигналы против тренда старшего ТФ блокируются.
+- HTF EMA fast/slow (по умолчанию 12/51 на **1h**)
+- Тренд: `LONG` если `htf_ema_fast > htf_ema_slow`, иначе `SHORT`
+- Сигнал допускается только если `signal.direction == htf_trend`
+
+### 2.2a Двойной HTF-фильтр
+
+При `htf2_enabled=True` сигнал допускается **только если оба** старших ТФ показывают одинаковый тренд.
+- HTF2 EMA fast/slow (по умолчанию 12/26 на **15m**)
+- Если HTF1 = LONG, а HTF2 = SHORT → сигнал отклоняется
+- Если оба LONG → сигнал допускается
+- Если включён только один из фильтров → работает как одиночный
+
+### 2.3 ADX-фильтр
+
+При `adx_threshold > 0` сигналы допускаются только если `curr.adx >= adx_threshold` (по умолчанию 0 = отключён).
+
+### 2.4 Расчёт уровней SL/TP
+
+```
+entry = curr["close"]
+sl_dist  = entry * sl_pct  / 100
+tp1_dist = entry * tp1_pct / 100
+tp2_dist = entry * tp2_pct / 100
+
+LONG:  SL = entry - sl_dist,  TP1 = entry + tp1_dist,  TP2 = entry + tp2_dist
+SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
+```
+
+### 2.5 Recovery-режим
+
+При `recovery_enabled=True` бот координируется через центральный API сервер:
+- Перед входом `recovery.claim()` захватывает свободный долг (chain).
+- Qty рассчитывается так, чтобы TP1 покрыл `debt * (1 + bonus_pct/100)`.
+- При закрытии `recovery.report(pnl)` обновляет долг; при убытке долг растёт.
+- При SL recovery-цепи бот освобождает chain и создаёт новый долг.
+
+### 2.6 Резжимы работы
+
+- **live** — реальная торговля на Binance Futures (USDT-M perpetual).
+- **paper** — симуляция без реальных ордеров (используется `paper_balance`).
+- **backtest** — прогон на исторических данных через `backtester.py`.
+
+> **Telegram:** уведомления отправляются только для **live** сделок. Paper-сделки не шлют сигналы/события/TP1/TP2/SL в Telegram.
+
+### 2.7 Мультипресетная система
+
+Каждый бот может использовать **несколько пресетов** одновременно. Пресет — это независимая торговая стратегия со своими TP/SL и лимитами.
+
+- Список пресетов задаётся в `enabled_presets` в `config_<symbol>.yaml`.
+- Конфигурация пресетов — в `preset_config.py` (`PRESET_CONFIG`), всего **46 пресетов**:
+  - `ema_cross_long/short`, `sma_cross_long/short`
+  - `rsi_bounce_long/short`, `rsi_divergence_long/short`
+  - `macd_momentum_long/short`, `macd_hist_trend_long/short`
+  - `bb_bounce_long/short`, `bb_squeeze_breakout_long/short`
+  - `stoch_bounce_long/short`, `stoch_obos_long/short`
+  - `vwap_return_long/short`, `vwap_band_long/short`
+  - `atr_breakout_long/short`, `atr_trailing_long/short`
+  - `volume_spike_long/short`, `volume_trend_long/short`
+  - `supertrend_long/short`, `supertrend_reentry_long/short`
+  - `adx_trend_long/short`, `ichimoku_long/short`, `ichimoku_tk_cross_long/short`
+  - `morning_star`, `evening_star`, `engulfing_long/short`
+- `get_preset_config(name)` ищет конфиг: точное совпадение → fallback `name+_long/_short` → глобальные дефолты.
+- На каждой свече бот выбирает лучший сработавший пресет (по score), применяет его TP/SL.
+
+**Режим пресета (`mode`)** — опциональный ключ в конфиге конкретного пресета:
+
+```python
+"macd_hist_trend_long": {"tp": 1.0, "sl": 0.5, "max_per_preset": 0, "mode": "live"},  # торговать этим пресетом live
+"stoch_bounce_long":     {"tp": 0.7, "sl": 0.35, "max_per_preset": 0},                  # наследует режим бота (cfg.mode)
+```
+
+- `"mode": "paper"` / `"mode": "live"` — переопределяет режим торговли для этого пресета.
+- **Приоритет выше, чем у конфига**: если пресет `live`, а бот в `paper` — сделка по этому пресету открывается live. И наоборот.
+- Если ключ отсутствует — пресет наследует режим бота из `config_<symbol>.yaml` (`mode: paper|live`).
+- Возможно смешивание: например бот в `paper`, но часть пресетов помечена как `live` — такие сделки открываются реальными ордерами, остальные симулируются (бумажные).
+- **Внимание**: для live-пресета требуются валидные `BINANCE_API_KEY`/`BINANCE_API_SECRET`; иначе ордер упадёт с ошибкой авторизации (безопасно — реальные сделки не будут открыты).
+
+### 2.8 LLM-фильтр сигналов (опционально)
+
+При `llm_enabled: true` каждый сигнал перед подтверждением отправляется на проверку LLM.
+
+- **Провайдеры** (в порядке приоритета): Groq → Gemini → OpenRouter (с fallback-моделями).
+- **Circuit breaker**: после 429/ошибки провайдер блокируется на `llm_backoff_sec` (60с) или `llm_short_backoff_sec` (5с для 429).
+- **Rate limiter**: глобальный `llm_calls_per_min` (20/мин).
+- **Per-symbol cooldown**: `llm_per_symbol_cooldown_min` (5 мин) — не дёргать LLM по одной паре чаще.
+- **Mock-режим**: `llm_mock: true` всегда возвращает `approve`.
+- Результат: `True` — сигнал одобрен, `False` — отклонён (записывается как `rejected` с `reject_reason=llm_reject`), `None` — пропуск (провайдеры недоступны/cooldown), сигнал проходит.
+- Ошибки LLM не роняют бота — логируются, сигнал пропускается.
+
+---
+
+## 3. Управление рисками
+
+### 3.1 Размер позиции
+
+Бот поддерживает 4 режима расчёта qty (приоритет сверху вниз):
+
+1. `margin_pct > 0` — % от депозита на маржу: `margin = round(balance * pct / 100, 1)`, `qty = margin * leverage / entry`
+2. `fixed_notional_usd > 0` — фиксированная маржа в USD: `qty = fixed_notional_usd * leverage / entry`
+3. `fixed_qty > 0` — фиксированное количество монет
+4. `fixed_risk_usd > 0` — фиксированный риск в USD: `qty = fixed_risk_usd / (entry * sl_pct%)`
+5. Иначе — `risk_pct%` от баланса: `risk_amount = balance * risk_pct / 100`, `qty = risk_amount / (entry * sl_pct/100)`
+
+> **Важно:** leverage влияет только на маржу, не на размер позиции в монетах.
+
+### 3.2 Stop-Loss и Take-Profit
+
+- **SL** размещается как `STOP_MARKET` (reduceOnly=True, priceProtect=True).
+- **TP1** — `LIMIT` (reduceOnly=True, GTC), закрывает `tp1_close_pct%` позиции (по умолчанию 50%).
+- **TP2** — `LIMIT` (reduceOnly=True, GTC), закрывает остаток.
+- При срабатывании TP1 SL автоматически переносится в breakeven (`entry_price`).
+- **Tick-based SL/TP**: фоновый таск каждые 5 секунд опрашивает тикер и проверяет hits по текущей цене, дополняя свечную проверку.
+
+### 3.3 Recovery-ограничения
+
+- `recovery_max_pct` — макс. % депозита под recovery-сделку.
+- `max_positions` — глобальный лимит открытых позиций (через API). Live: `1` (`MAX_POSITIONS=1` в `docker-compose.yml`). Testnet: `10` (`bot/recovery_config.yaml`). Лимит считается по **символам**: слот занимает символ с открытой принятой позицией; reverse-нога в уже открытую позицию слот не занимает и лимитом не блокируется. Слот занимается атомарно резервом непосредственно перед ордером (см. changelog 2026-10-08).
+- `loss_streak_trigger` — после N убытков подряд включается пауза на `loss_pause_signals` сигналов.
+- `daily_loss_limit_usd` — дневной лимит убытков (USDT).
+- `max_free_debt_usd` — потолок долга recovery (новые claim запрещены при превышении).
+
+### 3.3a Защита от серии убытков (loss streak)
+
+При последовательных убытках бот **не останавливается**, а отклоняет следующие сигналы с записью причины в БД (`skip:loss_streak_3/5/7`). Это позволяет видеть в аналитике, сколько сигналов было потеряно из-за защиты.
+
+Пороги:
+- **3 убытка подряд** — сигнал отклоняется, причина `skip:loss_streak_3`
+- **5 убытков подряд** — сигнал отклоняется, причина `skip:loss_streak_5`
+- **7 убытков подряд** — сигнал отклоняется, причина `skip:loss_streak_7`
+
+Счётчик сбрасывается при любом TP1/TP2.
+
+**Cooldown**: после достижения порога (3/5/7) счётчик автоматически сбрасывается через 1 час без новых убытков. Это предотвращает бесконечное отклонение сигналов после одной серии убытков.
+
+В `analyze_trades.py` добавлены две версии статистики:
+- **Stats WITHOUT rejected trades** — только закрытые сделки (классическая статистика)
+- **Stats WITH rejected trades** — закрытые + отклонённые сигналы (считаются как 0 PnL)
+
+Это позволяет оценить, сколько потенциальной прибыли было потеряно из-за защиты.
+
+### 3.4 Синхронизация позиции
+
+При старте бота (`_sync_position_on_start`):
+1. Запрашивает позиции с биржи.
+2. Если позиция есть, а стейта нет — восстанавливает `Position`, пересчитывает SL/TP из конфига.
+3. Если стейт есть, а биржи нет — считает позицию закрытой внешне, чистит состояние.
+4. Частичное закрытие / пылевая позиция — авто-детект.
+
+### 3.4a Восстановление из state-файла (stop / restart)
+
+Остановка бота (Stop в дашборде) **не удаляет** state-файл — состояние сохраняется. При старте бот
+**предпочитает сохранённый стейт**, если он совпадает с позицией на бирже (направление / entry / qty
+в пределах tick/step), и восстанавливает `sl_price`, `tp1_price`, `tp2_price`, `tp1_hit`,
+`remaining_qty`, `realized_pnl`, `entry_fill_ms`, `backstop_algo_id`.
+
+- Пересчёт уровней из конфига — **только при расхождении** стейта и позиции.
+- Если восстановленный SL уже пробит, бот **не закрывает позицию по рынку принудительно** —
+  срабатывает обычный SL / reverse-поток.
+- Отсутствующая биржевая защита досоздаётся: TP-limit + `botsl_*` backstop.
+
+### 3.5 Защита от дублирования
+
+- Lock-файл `bot.lock.<symbol>` предотвращает запуск двух инстансов одного символа.
+- Если при сигнале позиция уже открыта — новый сигнал пропускается.
+
+### 3.6 Reverse-цикл (break-even hedge)
+
+Reverse-цикл — это **безубыточный хедж**: вход по индикаторам, на бирже стоит только TP
+(виртуальный SL). При достижении виртуального SL выставляется **обратная рыночная нога** такого
+размера, чтобы суммарный PnL на break-even цене был ровно ноль.
+
+**Плановый размер обратной ноги** (E — entry, S — виртуальный SL, Qo — исходный qty, pct — SL в долях):
+
+```
+P3_plan   = S * (1 ∓ pct)
+held_plan = Qo * |E - S| / |S - P3_plan|
+send_qty  = held_plan + Qo
+```
+
+(`∓`: `-` для LONG, `+` для SHORT.)
+
+**Точная цель выхода** от фактического reverse-филла `E_rev` (`Qh` — фактический net reverse qty):
+
+```
+P* = E_rev ∓ Qo * |E - E_rev| / Qh
+```
+
+Так цикл `REVERSE_BE` закрывается в ≈0 минус комиссии.
+
+### 3.6a Метки выхода (`trades.exit_reason`)
+
+- `TP1` / `TP2` — тейк-профиты.
+- `SL` — стоп-лосс.
+- `REVERSE_BE` — reverse-цикл закрыт по плановой break-even цели (≈0 минус комиссии), т.е. TP-лимит обратной ноги реально исполнился.
+- `REVERSE_BACKSTOP` — reverse-нога закрыта биржевым backstop-ордером; метка ставится **только** если backstop действительно исполнился (непустой `actualOrderId`, статус `TRIGGERED`/`FINISHED`), а не просто отменён.
+- `REVERSE_MARKET` — reverse-нога закрыта ботом по рынку/агрессивным marketable-лимитом, вручную или по гэпу (без исполнения планового TP-лимита и без срабатывания backstop).
+- `REVERSE_CHAIN_STOP` — достигнут лимит reverse-цепочки (`reverse_chain_max`), бот принудительно закрыл позицию по рынку (см. 3.6c).
+- `REVERSE` — legacy-метка старых reverse-сделок.
+
+### 3.6b Комиссии reverse-цикла (важно)
+
+- Reverse-цикл платит **три ноги**: исходный вход + обратная рыночная нога + закрывающий TP.
+  Обратная нога кратна базовому размеру, поэтому оборот ≈ **2.5–3.5×** позиции.
+- На Binance USDⓈ-M (taker 0.05% / maker 0.02%) «безубыточный» цикл всё равно стоит
+  ≈ **0.04–0.1% от оборота**.
+
+| Нога | Qty | Цена | Тип | Комиссия |
+|------|-----|------|-----|----------|
+| Вход | 79 | 0.44 | taker | 0.0174 |
+| Reverse | 307 | 0.4333 | taker | 0.0665 |
+| TP | 228 | 0.4310 | maker | 0.0197 |
+| **Итого** | | | | **0.1036** на ~$266 оборота |
+
+### 3.6c Ограниченная reverse-цепочка (2-й разворот)
+
+Если **первый разворот не удался** (рынок «пилит» обратно в сторону исходного направления), бот может
+открыть **второй разворот** обратно на исходную сторону. Размер второй ноги считается так, чтобы
+**весь** ордербук (плюс уже реализованный PnL цикла, минус комиссии) вышел в ноль на целевой цене.
+
+**Формулы** (`P` — текущая цена, `N` — текущий знаковый нетто-объём; `w` — в долях):
+
+```
+w       = reverse_breakeven_pct + reverse_fee_buffer_pct
+T       = P * (1 ± w)               # цель: - для LONG, + для SHORT
+S_total = -net_realized / (T - P)   # суммарный требуемый размер книги
+q       = S_total - N               # объём новой ноги
+```
+
+**Новые ключи конфига** (значения по умолчанию):
+
+| Ключ | По умолчанию | Смысл |
+|------|--------------|-------|
+| `reverse_sl_pct` | `1.0` | Виртуальный SL reverse-ноги, % |
+| `reverse_chain_max` | `2` | Максимум шагов reverse-цепочки |
+| `reverse_fee_buffer_pct` | `0.1` | Буфер на комиссии в целевой цене, % |
+
+**Поведение при достижении лимита**: когда шаг доходит до `reverse_chain_max`, бот **принудительно
+закрывает позицию по рынку** и помечает цикл `REVERSE_CHAIN_STOP` (см. 3.6a).
+
+**Риск (важно)**: требуемый размер **растёт с каждым неудачным разворотом** (martingale-подобно; вторая
+нога может быть ≈**2–3×** первой). Поэтому цепочка ограничена, а худший сценарий — **сильный тренд без
+откатов** (tail-риск). При этом `reverse_sl_pct=1%` заставляет бота действовать **раньше** биржевого
+backstop `2%` — уже это само по себе снижает убыток от пилы.
+
+---
+
+## 4. Работа с API Binance
+
+### 4.1 Клиент
+
+Используется `python-binance` (`AsyncClient`) — асинхронный клиент Binance Futures.
+
+### 4.2 Источники данных
+
+| Тип данных | Endpoint / Метод | Назначение |
+|------------|------------------|------------|
+| Свечи (klines) | `futures_klines` / `futures_historical_klines` | OHLCV для стратегии и бэктеста |
+| Позиции | `futures_position_information` | Контроль позиции, синхронизация |
+| Баланс | `futures_account_balance` | Расчёт размера позиции (live) |
+| Ордера | `futures_create_order`, `futures_cancel_all_open_orders` | Вход, SL/TP, выход |
+| Информация о символе | `futures_exchange_info` | LOT_SIZE, PRICE_FILTER (шаги округления) |
+| Тикер | `futures_symbol_ticker` | Текущая цена (для dust, syncing) |
+| PnL | `futures_income_history` + `futures_account_trades` | Реальный PnL после закрытия |
+| Algo-ордера | `futures_get_open_algo_orders`, `futures_cancel_algo_order` | Очистка algo-ордеров при SL move |
+
+### 4.3 Обработка ошибок и реконнекты
+
+- **Polling**: REST-запрос каждые 10 секунд, `last_seen` защита от дубликатов.
+- **Ретраи**: `db_reporter` и `recovery_client` делают 3 попытки с `aiohttp.ClientTimeout(total=5)`.
+- **SL placement retry**: 3 попытки с задержкой 1.5с при переносе SL в breakeven.
+- **Позиция после входа**: 3 попытки по 1с verify позицию на бирже.
+- **Graceful shutdown**: `SIGTERM`/`SIGINT` → `shutdown_event.set()` → очистка lock-файла, закрытие соединений.
+
+### 4.4 Ограничения Binance
+
+- `futures_income_history` хранит данные ~7 дней (fallback на `futures_account_trades` для старых сделок).
+- priceProtect=True для STOP_MARKET защищает от всплесков цены.
+- `reduceOnly=True` для всех защитных ордеров.
+
+---
+
+## 5. Переменные окружения (ENV)
+
+Создайте файл `.env` в корне проекта на основе `.env.example`:
+
+```env
+# ============================================
+# Binance API
+# ============================================
+BINANCE_API_KEY=YOUR_API_KEY_HERE
+BINANCE_API_SECRET=YOUR_API_SECRET_HERE
+
+# ============================================
+# API Server (Express)
+# ============================================
+PORT=5000
+BOT_DIR=./bot
+DATABASE_PATH=./data/bot.db
+BOT_PYTHON=
+# Полный путь к Python с установленными зависимостями бота (pandas, python-binance ...).
+# Используется при запуске ботов из дашборда. Если пустой — API сервер ищет 'python' в PATH
+# и проверяет, что у него есть нужные пакеты. На Windows часто требуется явный путь,
+# потому что 'python' может указывать на другой интерпретатор без зависимостей.
+# Пример: BOT_PYTHON=C:/Users/osdal/AppData/Local/Programs/Python/Python311/python.exe
+# AUTO_RESTART_BOTS=true (по умолчанию): если при старте api-server бот был
+# is_running=1, но его процесс не выжил (рестарт/падение grid-stack), бот
+# поднимается заново (до 3 попыток на символ). "false" отключает авто-рестарт.
+
+# ============================================
+# Grid engine (phase 2a/2b)
+# ============================================
+# Серверный grid-движок: активация, филлы, защита + закрытие/финализация.
+# INERT по умолчанию; работает только со строками grids.engine='server'.
+# GRID_ENGINE_ENABLED=false
+# GRID_ENGINE_INTERVAL_MS=15000
+# Сколько минут active-сетка может держать tracked entry-ордера при positionAmt=0
+# и пустых fillEntries, прежде чем движок залогирует предупреждение (по умолчанию 120).
+# GRID_STALE_ACTIVE_MINUTES=120
+# Auto-mode (создание waiting-сеток из символов ботов): по умолчанию выключен.
+# GRID_AUTO_ENABLED=false
+# Дефолты, применяемые к НОВЫМ сеткам auto-mode (существующие сетки сохраняют свои значения):
+# GRID_AUTO_TP_PCT=10
+# GRID_AUTO_SL_PCT=2
+# GRID_AUTO_EDGE_PCT=2
+# GRID_AUTO_GATE=15
+# GRID_AUTO_MAX=3
+# GRID_AUTO_TOTAL_MAX=10
+# GRID_AUTO_ORDER_USD=10
+# GRID_AUTO_LEVERAGE=50
+
+# ============================================
+# Dashboard / Recovery
+# ============================================
+DASHBOARD_API_URL=http://localhost:5000/api
+RECOVERY_CONFIG_PATH=bot/recovery_config.yaml
+
+# ============================================
+# Telegram Notifications (опционально)
+# ============================================
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+TELEGRAM_CONNECT_URL=https://t.me/your_bot?start=connect
+TELEGRAM_SUPPORT_USERNAME=your_support_username
+
+# ============================================
+# Support Bot (опционально)
+# ============================================
+SUPPORT_BOT_TOKEN=your_support_bot_token_from_BotFather
+SUPPORT_CHAT_ID=your_chat_id
+SUPPORT_BOT_MASTER_KEY=base64_32_bytes
+SUPPORT_BOT_DB=./support-bot/data/support_bot.db
+```
+
+### 5.1 Серверный grid-движок (phase 2a/2b)
+
+Состояние grid-сеток вынесено из localStorage браузера на сервер: таблица `grids` (lazy DDL)
+и REST `/api/grids` (list / import / upsert / patch / delete). Движок
+(`artifacts/api-server/src/grid-engine.ts`) по умолчанию **INERT**: без
+`GRID_ENGINE_ENABLED=true` он не стартует и ничего не трогает, а при включении работает
+**только со строками `grids.engine='server'`** — браузерные сетки (`engine='browser'`)
+и Python-бот не затрагиваются.
+
+Что делает движок:
+- **2a** — активация `waiting`-сетки по касанию середины, опрос филлов активных сеток,
+  синхронизация защитных STOP/TP-ордеров;
+- **2b** — триггер TP/SL по марк-цене и закрытие стороны по рынку общим close-хелпером
+  (`grid-orders-lib.ts`), финализация (`phase='done'|'stopped'`, realized PnL, запись в
+  `grid_history`), реконсиляция сработавшей на бирже защиты (`positionAmt === 0` при
+  наличии филлов), авто-создание `waiting`-сеток (auto-mode).
+
+Переменные: `GRID_ENGINE_ENABLED` (по умолчанию `false`), `GRID_ENGINE_INTERVAL_MS`
+(15000 мс), `GRID_AUTO_ENABLED` (`false`), `GRID_AUTO_MAX` (3 новых сетки за tick),
+`GRID_AUTO_TOTAL_MAX` (10 active/waiting), `GRID_AUTO_ORDER_USD` (10), `GRID_AUTO_LEVERAGE` (50),
+`GRID_STALE_ACTIVE_MINUTES` (120 — порог лога о «зависшей» active-сетке; движок только
+логирует и не аннулирует её автоматически).
+
+Дефолты, применяемые к **новым** сеткам, создаваемым auto-mode: `GRID_AUTO_TP_PCT` (10,
+диапазон 0.1..50), `GRID_AUTO_SL_PCT` (2, 0.1..50), `GRID_AUTO_EDGE_PCT` (2, 0.1..50),
+`GRID_AUTO_GATE` (15, 1..100). Движок читает их на каждом tick через `envNumber()`/`envInt()`,
+поэтому значения можно менять без рестарта; существующие сетки сохраняют собственные
+`tpPct`/`slPct`/`edgePct`/`gate`.
+
+Runtime-конфиг auto-mode (без рестарта api-server):
+
+- `GET /api/grid-engine/config` — эффективный конфиг:
+  `{ engineEnabled, autoEnabled, autoTpPct, autoSlPct, autoEdgePct, autoGate, autoOrderUsd, autoLeverage, autoMax, autoTotalMax, intervalMs, staleActiveMinutes, restartRequired }`.
+- `POST /api/grid-engine/config` — partial body `{ autoEnabled?, autoTpPct?, autoSlPct?, autoEdgePct?, autoGate?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`
+  (`autoEnabled` — boolean; `autoTpPct`/`autoSlPct`/`autoEdgePct` 0.1..50, `autoGate` 1..100,
+  `autoMax` 0..20, `autoTotalMax` 0..100, `autoOrderUsd` (0..10000],
+  `autoLeverage` 1..125; неизвестные поля → 400). Ответ: `{ ok: true, config, applied, restartRequired }`.
+- Оба роута защищены `notifyTokenGuard` (заголовок `x-notify-token`, как у `/api/grids`).
+- Принятые значения сразу зеркалятся в `process.env` (`GRID_AUTO_ENABLED`, `GRID_AUTO_TP_PCT`,
+  `GRID_AUTO_SL_PCT`, `GRID_AUTO_EDGE_PCT`, `GRID_AUTO_GATE`, `GRID_AUTO_MAX`,
+  `GRID_AUTO_TOTAL_MAX`, `GRID_AUTO_ORDER_USD`, `GRID_AUTO_LEVERAGE`) — движок читает их через
+  `envFlag()`/`envNumber()`/`envInt()` на каждом tick, поэтому изменение действует со следующего tick — и
+  персистятся в `data/grid-engine.json` (env-ключи). При старте движка файл подмешивается в
+  `process.env` до чтения флагов, поэтому конфиг переживает рестарт; битый/отсутствующий файл
+  не роняет старт (только warn).
+- `engineEnabled`, `intervalMs`, `staleActiveMinutes` читаются только при старте движка: они не
+  принимаются POST-ом и всегда перечислены в `restartRequired`.
+
+Также движок каждый tick делает **orphan sweep**: для `engine='server'` сеток в
+`waiting`/`active` читает открытые ордера символа и снимает лимитные ордера с
+`clientOrderId`, начинающимся на `grid_`, которых нет в `testnetOrderIds` (остатки
+прошлых циклов/удалений). Не более 10 отмен за tick; ошибка отмены не прерывает tick.
+Удаление сеток (`DELETE /api/grids/:uid` и `DELETE /api/grids[?phase=]`) сначала
+best-effort снимает entry-ордера (`cancelOrderIds`) и защитные STOP/TP
+(`cancelAlgoOrderIds`), а затем удаляет строки, возвращая `canceledOrders` и
+`cancelErrors`.
+
+---
+
+## 6. Установка и запуск
+
+### 6.1 Python-зависимости
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r bot\requirements.txt
+```
+
+### 6.2 Node-зависимости (dashboard + API server)
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+pnpm install
+```
+
+### 6.3 Инициализация БД
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+pnpm --filter @workspace/api-server run init-db
+```
+
+### 6.4 Запуск (Windows PowerShell)
+
+**Вариант A: Ручной запуск (3 консоли)**
+
+```powershell
+# Консоль 1: API сервер
+cd C:\DATA\bots\replit_scalper
+pnpm --filter @workspace/api-server run dev
+
+# Консоль 2: Дашборд
+cd C:\DATA\bots\replit_scalper
+pnpm --filter @workspace/dashboard run dev
+
+# Консоль 3: Бот (пример для BTC)
+cd C:\DATA\bots\replit_scalper\bot
+python main.py config_btc.yaml
+```
+
+**Вариант B: Автоматический запуск**
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+.\start-all.ps1
+```
+
+Откройте `http://localhost:5173` и нажмите **Start** на нужных ботах.
+
+### 6.5 Запуск ботов (через дашборд)
+
+После запуска API сервера и дашборда:
+1. Откройте `http://localhost:5173`
+2. Нажмите **Start** на карточке нужного бота.
+3. API сервер запустит `python main.py config_<symbol>.yaml` как отдельный процесс.
+
+### 6.6 Остановка
+
+```powershell
+# Остановить конкретного бота — кнопка Stop в дашборде
+# Остановить все боты — кнопка Stop All & Reload Configs
+# Или принудительно:
+Stop-Process -Name python -ErrorAction SilentlyContinue
+Stop-Process -Name node -ErrorAction SilentlyContinue
+```
+
+---
+
+## 7. Логирование
+
+### 7.1 Два логгера
+
+1. **Trade-логи** (`bot/logs/<symbol>.log`):
+   - Фильтр `TradeOnlyFilter` — пишет только ключевые события:
+     - `Position opened`, `TP1 hit`, `TP2 hit`, `SL hit`
+     - `SL moved to breakeven`
+     - `[LIVE] Market order placed`, `[PAPER] Would open`
+     - `[SYNC] Restored`, `[RECOVERY]`
+   - Ротация: 10 MB × 5 файлов (`RotatingFileHandler`).
+
+2. **Events-логи** (`bot/logs/events.log`):
+   - Пишет все `INFO+` события для дашборда.
+   - Формат: `%(asctime)s [%(symbol)s] %(message)s`.
+
+### 7.2 Уровни детализации
+
+- **Файл (trade)**: `DEBUG` (но фильтр оставляет только trade-события).
+- **Консоль (stream)**: `INFO`.
+- **Events**: `DEBUG` (все ключевые события).
+
+### 7.3 Пример лога
+
+```
+2026-07-21 14:32:01 [LIVE XRPUSDT] INFO Position opened | LONG | entry=0.6234 SL=0.6167 TP1=0.6301 TP2=0.6368 qty=1500.0
+2026-07-21 14:35:22 [LIVE XRPUSDT] INFO TP1 hit | price=0.6305 closed_qty=1050.0 remaining_qty=450.0 pnl=11.55 | SL moved to breakeven
+2026-07-21 14:41:08 [LIVE XRPUSDT] WARNING SL hit (SL level) | price=0.6167 qty=450.0 pnl=-3.03 total_pnl=8.52
+```
+
+---
+
+## 8. Известные проблемы / TODO
+
+### 8.1 Критические
+
+1. **`bot/main.py` строки 342-376 — частичное заполнение**  
+   При `real_qty < qty * 0.9` qty корректируется, но `signal.entry_price` не обновляется. TP/SL уровни остаются на основе исходного сигнала, что может привести к расхождению с реальными уровнями на бирже.
+
+2. **`bot/main.py` строки 339-342 — импорт requests внутри функции**  
+   `import requests` выполняется внутри `_sync_position_on_start` при каждом вызове. Лучше вынести на уровень модуля.
+
+3. **`bot/position_tracker.py` строка 299 — `_report_tp1` пустая**  
+   Метод заглушка (pass), TP1 не репортится в БД. Это может искажать статистику в дашборде, если позиция не доходит до полного закрытия.
+
+### 8.2 Средние
+
+4. **`bot/main.py` строки 1241 — `asyncio.run(main())`**  
+   При повторном запуске в том же процессе (например, в Jupyter/IDE) вызовет `RuntimeError: asyncio.run() cannot be called from a running event loop`.
+
+5. **`bot/order_manager.py` строки 558-589 — fallback на userTrades**  
+   Парсинг `futures_account_trades` для PnL может быть неточным при сложных сценариях (частичные закрытия,Funding). Рекомендуется полагаться на `futures_income_history` там, где возможно.
+
+6. **`bot/market_data.py` строки 145-148 — `_kline_to_series` не используется**  
+   Функция определена, но нигде не вызывается — можно удалить или использовать для WebSocket-адаптера.
+
+7. **`bot/signal_handler.py` строки 35-39 — `asyncio.wait_for` + `run_in_executor`**  
+   В Windows `input()` в executor может блокировать event loop при shutdown. Нужно добавить проверку `shutdown_event` внутри wait_for.
+
+### 8.3 Долгосрочные
+
+8. **Отсутствие WebSocket** — используется REST polling (10с). Для снижения задержки можно добавить WebSocket `kline` стрим.
+9. **Жёсткая привязка к Binance** — нет абстрактного интерфейса биржи, KuCoin версия (`kucoin/main_kucoin.py`) полностью отдельная.
+10. **`recovery_client.py` использует `aiohttp` как опциональную зависимость** — если библиотека не установлена, recovery молча отключается. Лучше явно указывать в requirements.
+
+---
+
+## 9. Зависимости
+
+### 9.1 Python (`bot/requirements.txt`)
+
+| Библиотека | Версия | Назначение |
+|------------|--------|------------|
+| `python-binance` | >=1.0.19 | Асинхронный клиент Binance Futures |
+| `pandas` | >=2.0.0 | Обработка свечей, индикаторы |
+| `pyyaml` | >=6.0 | Загрузка конфигов |
+| `python-dotenv` | >=1.0.0 | Переменные окружения |
+| `websockets` | >=12.0 | WebSocket клиент (задел) |
+| `optuna` | >=3.6.0 | Оптимизация параметров стратегии |
+| `python-telegram-bot` | >=21.0 | Telegram уведомления |
+
+### 9.2 Node.js (`package.json`)
+
+| Пакет | Назначение |
+|--------|-----------|
+| `express` | API сервер (порт 5000) |
+| `drizzle-orm` + `better-sqlite3` | ORM + SQLite |
+| `react` + `vite` + `tailwindcss` | Дашборд |
+| `recharts` | Графики PnL |
+| `lucide-react` | Иконки |
+| `js-yaml` | Парсинг config_*.yaml при init-db |
+
+### 9.3 Системные
+
+- Python >= 3.11
+- Node.js >= 18
+- SQLite (встроен в Python, для API используется `better-sqlite3`)
+- Windows: Arial шрифты для PNG-уведомлений (`C:/Windows/Fonts/arial.ttf`)
+
+---
+
+## 10. Конфигурация
+
+### 10.1 Основной конфиг (`bot/config_<symbol>.yaml`)
+
+```yaml
+symbol: "BTCUSDT"
+timeframe: "1m"              # основной таймфрейм (1m | 5m | 15m ...)
+leverage: 10
+risk_pct: 2.0
+sl_pct: 0.5                 # SL в % от entry (текущее значение)
+tp1_pct: 1.0                # TP1 в % от entry (текущее значение)
+tp1_close_pct: 100          # % позиции для закрытия на TP1
+tp2_pct: 1.0                # TP2 (>= tp1_pct)
+ema_fast: 12
+ema_slow: 26
+volume_ma_period: 20
+volume_multiplier: 1.5
+mode: "paper"               # live | paper | backtest
+auto_mode: true             # true = без подтверждения
+backtest_start: "2026-01-01"
+backtest_end: "2026-06-01"
+paper_balance: 1000.0
+log_file: "logs/bot.log"
+  htf_enabled: true
+  htf_timeframe: "1h"
+  htf_ema_fast: 12
+  htf_ema_slow: 51
+  htf2_enabled: true
+  htf2_timeframe: "15m"
+  htf2_ema_fast: 12
+  htf2_ema_slow: 26
+recovery_max_position_pct: 100.0
+fixed_qty: 0.0
+margin_pct: 0.0
+fixed_notional_usd: 0.0
+fixed_risk_usd: 0.0
+adx_period: 14
+adx_threshold: 0.0          # 0 = отключён
+max_open_per_cycle: 0       # 0 = без лимита новых позиций за цикл
+signal_cooldown_min: 0      # кулдаун между сигналами (мин), 0 = выкл
+enabled_presets:            # активные пресеты (46 доступно)
+  - ema_cross_long
+  - ema_cross_short
+  # ... остальные пресеты
+# ── LLM-фильтр (опционально) ──────────────────────────────
+llm_enabled: false          # включить проверку сигналов LLM
+llm_mock: false             # true = всегда approve (тест)
+llm_api_key: ""             # OpenRouter
+llm_model: "llama-3.1-70b-versatile"
+llm_fallback_models: ""
+llm_confidence_threshold: 0.7
+llm_calls_per_min: 20
+llm_per_symbol_cooldown_min: 5
+llm_backoff_sec: 60.0
+llm_short_backoff_sec: 5.0
+llm_provider_retry_delay_sec: 1.0
+  gemini_api_key: ""
+  gemini_model: "gemini-2.0-flash-exp"
+  groq_api_key: ""
+  groq_model: "groq/compound-mini"
+  commission_pct: 0.05       # комиссия биржи (%), вычитается из PnL
+```
+
+### 10.2 Recovery конфиг (`bot/recovery_config.yaml`)
+
+```yaml
+recovery_enabled: false     # текущее состояние
+recovery_bonus_pct: 50
+recovery_max_pct: 50
+max_positions: 10            # глобальный лимит открытых позиций по всем символам (live: 1 через env, testnet: 10)
+loss_streak_trigger: 35      # Число убытков подряд для паузы (глобально по всем монетам)
+loss_pause_signals: 5        # Сколько сигналов пропустить, пока активна пауза после серии убытков
+pause_timeout_minutes: 120
+max_free_debt_usd: 15.0
+daily_loss_limit_usd: 100000
+```
+
+**Защита от серии убытков (глобальная):**
+- Счётчик убытков ведётся **по всему портфелю** (все монеты суммируются).
+- Реальный убыток (SL) → `+1`; реальная прибыль (TP1/TP2) → сброс в `0` и снятие паузы.
+- При `loss_streak_trigger` убытков подряд включается пауза на `loss_pause_signals` сигналов — новые входы отклоняются с причиной `risk:loss_streak`.
+- Симуляция отклонённых сигналов (TP/SL) пишется только в аналитику и **не влияет** на паузу/счётчик.
+- Автосброс: через `pause_timeout_minutes` без сделок пауза и счётчик обнуляются.
+
+---
+
+## 11. Вопросы к автору для доработки
+
+1. **Алгоритм выбора монет** — бот торгует одной парой на процесс. Как вы планируете масштабировать на N пар: отдельные процессы, asyncio-луп с несколькими символами, или через дашборд-оркестрацию?
+2. **Частичное заполнение ордеров** — при `real_qty < qty * 0.9` бот корректирует qty, но не пересчитывает TP/SL. Как должен поступать бот в этом случае: пересчитывать уровни под реальный entry, или отменять сигнал?
+3. **Funding fee / комиссии** — в `get_realized_pnl` учитывается только `REALIZED_PNL + COMMISSION + FUNDING_FEE`. Нужно ли дополнительно учитывать комиссии за открытие/закрытие в `calc_quantity` (сейчас риск считается от entry * sl_pct без комиссий)?
+4. **Обработка ликвидаций** — при ликвидации `positionAmt` становится 0, но `get_realized_pnl` может вернуть `None` (если income history уже очищен). Как должен бот фиксировать такой исход: как SL, как отдельный `LIQUIDATION`, или игнорировать?
+5. **Сетевые разрывы** — при долгом отсутствии связи биржа может закрыть позицию по SL/TP, но бот не узнает об этом до следующей синхронизации (каждые 12 свечей / 1 час). Нужно ли добавить WebSocket для мгновенного отслеживания ордеров?
+6. **Глобальный risk-manager** — сейчас `recovery_client.can_open()` проверяет лимит позиций и паузу после убытков. Хотите ли вы расширить это до Portfolio-level VaR, максимального просадки за день, или ограничения по корреляции между парами?
+7. **Дублирование кода KuCoin** — `kucoin/main_kucoin.py` полностью отделён от основного бота. Планируете ли вы унифицировать архитектуру под CCXT, чтобы добавлять новые биржи через адаптер, или оставить KuCoin как отдельный pet-проект?
+
+---
+
+## 12. Ежедневная автоматическая оптимизация
+
+### 12.1 Скрипт `auto-optimize-daily.ps1`
+
+Запускает walk-forward оптимизацию для всех 24 пар и применяет лучшие параметры к `config_*.yaml`.
+
+- Период по умолчанию: 35 дней (`DaysBack=35`)
+- Оптимизация: 200 trials × 2 folds через Optuna
+- Batch: 2 пары параллельно, `jobs=1` (не грузить CPU живыми ботами)
+- После оптимизации: `/api/refresh` → перезапуск ботов на новых параметрах
+- Telegram-уведомления на английском: `COMPLETE`, `PARTIAL`, `FAILED`
+
+### 12.2 Walk-forward логика
+
+Период делится на 2 фолда:
+- Fold 1: train `[start .. mid]`, test `[mid .. end]`
+- Fold 2: train `[mid .. end]`, test `последний отрезок`
+
+Из каждого фолда выбирается лучший набор параметров по `test_pnl`. Затем проверяется на тестовых данных через `run_backtest`. Параметры применяются через `apply_params_to_config`.
+
+### 12.3 Мониторинг
+
+Скрипт пишет лог в `bot/logs/auto-opt_<дата>.log` и статус в `bot/logs/optimization_status.txt`:
+- `START` — начало
+- `OPT_DONE` — оптимизация завершена
+- `PARTIAL` — часть пар не оптимизирована
+- `FAILED` — аварийный сбой
+- `RESTART_OK` — боты перезапущены
+
+### 12.4 Известные ограничения
+
+- HBARUSDT/NEARUSDT часто падают по таймауту на этапе бэктеста (низкая ликвидность, Binance ограничивает запросы)
+- Если daily-скрипт упадёт до финального статуса — проверь `optimization_status.txt` и логи
+- Оптимизация не останавливает боты во время работы (они работают на старых параметрах)
+
+---
+
+## 13. Специальные механизмы
+
+### 13.1 Пропуск исторических свечей при старте (`skip_catchup`)
+
+В `bot/market_data.py` добавлен флаг `skip_catchup=True` (по умолчанию для live/paper режимов).
+
+При старте бот:
+1. Запрашивает последнюю закрытую свечу у Binance
+2. Устанавливает `last_seen` на **последнюю** закрытую свечу (не предпоследнюю)
+3. Пропускает все свечи между `last_seen` и текущим моментом
+4. Начинает торговлю с **следующей** закрытой свечи
+
+**Эффект:** бот стартует за ~47 секунд вместо 30 минут догоняющего цикла. Индикаторы прогреваются через `get_recent_klines` (200 свечей), поэтому пропуск не влияет на качество сигналов.
+
+### 13.2 Лимит позиций по возрасту
+
+В `artifacts/api-server/src/routes/trading.ts` функция `countOpenPositions()` теперь считает только позиции младше 2 часов:
+
+```ts
+const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+where(sql`is_open = 1 AND entry_time >= ${twoHoursAgo}`)
+```
+
+**Зачем:** если позиция висит дольше 2 часов — вероятно, рынок сменил тренд и сигналы от старой позиции блокируют новые. Бот начинает считать, что открыта 0 позиций, и может открыть новую.
+
+### 13.3 Фильтр логов `TradeOnlyFilter`
+
+В `bot/logger.py` включен фильтр, который пропускает в файл только сообщения, содержащие ключевые слова сделок:
+- `Position opened`
+- `TP1 hit`, `TP2 hit`, `SL hit`
+- `[RECOVERY]`
+- `[SYNC]`
+
+Остальные служебные сообщения (старт, конфиг, warming up) записываются только в консоль. Для диагностики можно временно отключить фильтр.
+
+### 13.4 Trades-таблицы в дашбордах (Gross / Fees / Net)
+
+Оба дашборда (`artifacts/dashboard` и `artifacts/dashboard-v2`) в таблице сделок показывают
+разложение PnL:
+
+- **Gross** — PnL только по цене: `gross = net + fees`; при `|gross| ≤ 0.005` — muted-пометка `≈0`.
+- **Fees** — комиссия сделки.
+- **Net** — `net = gross − fees`; при `|net| ≤ fees + 0.005` — пометка `≈0` (нетто в пределах комиссий).
+- Строка-сводка: `Σ gross · Σ fees · Σ net · breakdown` (BE / backstop / TP / SL).
+
+В grid-UI (`dashboard-v2`) сделки вынесены в отдельную вкладку **Trades**.
+
+---
+
+## 14. Вспомогательные скрипты
+
+### 14.1 `bot/analyze_trades.py`
+Скрипт анализа результатов: читает сделки из SQLite (`data/bot.db`) и генерирует отчёт в `ANALYTICS.md`.
+
+```powershell
+cd C:\DATA\bots\replit_scalper\bot
+python analyze_trades.py
+```
+
+Разделы отчёта:
+- **Overall Statistics** — Win Rate, PnL (Gross/Net), Profit Factor, Max Drawdown, consecutive wins/losses, Avg Hold Time, Avg Hold TP/SL
+- **Stats WITH rejected trades** — статистика включая отклонённые сигналы (loss streak protection, cooldown, cycle limit, preset limit)
+- **Stats WITHOUT rejected trades** — только закрытые сделки (классическая статистика)
+- **Loss Streaks** — распределение по длине, монеты, пресеты, часовой breakdown
+- **Position Sizing** — средний/мин/макс номинал, средний qty
+- **Per Coin Statistics** — по каждой монете: trades, wins, losses, win%, PnL, rejected
+- **Per Preset Statistics** — по каждому пресету: WR, PnL, avg win/loss, best/worst, avg hold, AvgHold TP/SL, TP/SL Ratio
+- **Day-of-Week Distribution** — производительность по дням недели
+- **ATR (Volatility) vs PnL** — корреляция ATR с PnL, buckets по ATR%, Commission % of Notional, Max Concurrent Open Positions
+- **Signal Funnel** — сколько сигналов прошло через все фильтры
+- **Hourly Distribution** и **Preset Performance by Hour** — производительность по часам
+- **LLM Statistics** — отклонения по пресетам
+
+Фильтры: `--hours N` (последние N часов), `--start`, `--end`, `--no-write` (только вывод).
+
+### 14.2 `monitor-opt.ps1`
+Мониторинг процесса оптимизации: проверяет, что `walk_forward_opt.py` запущен, и пишет статус.
+
+### 14.2a `monitor-bots.ps1`
+Мониторинг здоровья ботов каждые 6 часов с отчётом в Telegram:
+- Проверяет, что API (`/api/healthz`) доступен
+- Для каждой пары проверяет, что бот `is_running` и heartbeat свежий (≤15 мин)
+- **Проверяет поступление сигналов** за последние 6 часов через `/api/trades` (секция `[SIGNALS]` в отчёте)
+- **Обнаруживает зависшие боты**: сравнивает `current_price` бота с живой ценой Binance Futures (публичный API). Если цена заморожена или сильно отклоняется — бот `is_running`, но не обрабатывает свечи (секция `[Frozen price]`)
+- Scheduled task `MonitorBots`: ежедневно в 00:00, 06:00, 12:00, 18:00
+
+### 14.3 `bot/apply_wf_results.py`
+Применяет результаты walk-forward оптимизации к `config_*.yaml` вручную (если нужно обойти `auto-optimize-daily.ps1`).
+
+### 14.4 `bot/apply_all_opt.py`
+Массовое применение оптимизации ко всем парам.
+
+### 14.5 `bot/apply_margin_pct.py`
+Применяет `margin_pct` к конфигам.
+
+### 14.6 `scripts/check_positions.py`
+Проверяет открытые позиции на бирже и сравнивает с состоянием бота.
+
+### 14.6 `scripts/check_signals_now.py`
+Принудительно проверяет сигналы для всех пар прямо сейчас.
+
+### 14.7 `scripts/fake_channel_messages.py`
+Генерирует тестовые сообщения канала для проверки Telegram-уведомлений.
+
+### 14.8 `scripts/test_binance_api.py`
+Проверка подключения к Binance API.
+
+### 14.9 `scripts/test_support_bot.py`
+Тест support-bot.
+
+---
+
+## 15. Деплой
+
+### 15.1 Windows (PowerShell)
+
+```powershell
+# Запуск всех ботов
+.\start-all.ps1
+
+# Ежедневная оптимизация (04:00 по расписанию)
+.\auto-optimize-daily.ps1
+
+# Мониторинг оптимизации
+.\monitor-opt.ps1
+```
+
+### 15.2 Scheduled Task
+
+Daily-скрипт регистрируется в планировщике задач Windows:
+- Имя: `AutoOptimizeWalkForward`
+- Время: ежедневно в 04:00
+- Действие: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\auto-optimize-daily.ps1"`
+
+Мониторинг ботов регистрируется в планировщике задач Windows:
+- Имя: `MonitorBots`
+- Время: ежедневно в 00:00, 06:00, 12:00, 18:00
+- Действие: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\monitor-bots.ps1"`
+
+---
+
+## 16. Changelog
+
+### 2026-10-12 (скрытие rejected, деплой-инструменты, фикс фильтра symbol)
+
+- **Дашборд: rejected-сделки скрыты везде.** `artifacts/dashboard/src/Dashboard.tsx`: `filteredTrades` (два ветвления — «все» и по символу) и `setTrades` фильтруют `status !== "rejected"` плюс внутренние `skip:*` записи. Ранее отсекались только в отдельных местах (PnLChart, countReverses, `/trades/stats`), а таблица и экспорт CSV их показывали.
+- **BotCard больше не показывает позицию отклонённого сигнала.** Добавлено состояние `allTradesRaw` — сырой список всех сделок с API. Передаётся в `BotCard`, который перед рендером позиции проверяет, есть ли сделка этого символа с этим `entry_price` и `status === "rejected"`. Передавать отфильтрованный `trades` было бессмысленно: после `setTrades` rejected уже удалены, и проверка никогда не находила бы совпадение.
+- **КРИТИЧЕСКИЙ ФИКС: фильтр `symbol` в `GET /api/trades` не работал.** Два `.where()` подряд в drizzle-orm 0.45.2 теряют ПЕРВОЕ условие. Запрос `/trades?symbol=HBARUSDT&limit=10` возвращал сделки всех символов (`{HBAR:3, INJ:2, RENDER:4, TIA:1, ...}`). Последствие: бот в reconciler'е (`bot/main.py:1047`) запрашивал свои открытые сделки, получал чужие и закрывал их ценой своего символа — HBAR (0.0938) получала цену RENDER (2.09), что дало фиктивный убыток −$126 на одной сделке. Теперь все условия собираются в один `.where(and(...))`.
+- **`GET /api/trades` возвращал пустой массив при ненулевой БД.** `eq(tradesTable.reject_reason, null)` генерирует SQL `= NULL`, а в SQL сравнение с `NULL` всегда ложно — фильтр молча скрывал все строки. `total` считался отдельным `count(*)` и оставался корректным. Заменено на `isNull(...)`.
+- **`tools/smoke_api.py`** — смоук-тест API (только чтение). Проверяет все эндпоинты, которые дёргает дашборд: `/bots`, `/trades` (два варианта), `/trades?symbol=`, `/trades/stats`, `/recovery/config`, `/live/daily-loss`, `/live/drawdown`, `/signals/stats`, `/healthz`, `/trading/check`. Инварианты, не зависящие от baseline: непустой массив `trades` при ненулевой БД; отсутствие rejected и non-null `reject_reason`; **отсутствие чужих символов в ответе на `?symbol=X`**; наличие `own_slot` в `/trading/check` (отсутствует в старом `trading.ts`). Режимы `--save baseline.json` (до деплоя) и `--baseline` (после, со сравнением).
+- **`tools/deploy_api.sh`** — безопасный деплой, выполняется на хосте: бэкап старых файлов → baseline смоуком → копирование из `_incoming/` → рестарт api-live/api-testnet → смоук → при FAIL откат из бэкапа и повторный смоук. Бэкап берётся ДО копирования (иначе в бэкап попадёт новый файл и откат восстановил бы сломанную версию). API, не поднявшийся после рестарта, тоже ведёт в откат.
+- **`tools/deploy.ps1`** — обёртка одной командой (проверка файлов → опрос ботов → `mkdir -p` + `scp` → вызов `deploy_api.sh` → восстановление ботов). Именно PowerShell, а не bash: bash в этом окружении — WSL, который не исполняет Windows-бинарники (`ssh.exe` → ENOEXEC), а собственный ssh WSL висит на `IdentityFile ~/.ssh/oracle_bot_key`, которого в WSL нет.
+- **`docker-compose.yml` переписан.** Были `.env`-строки вне `services:` (ломал YAML), отсутствовал сервис `api-live`, не было якорей. Теперь `x-api-base`/`x-dashboard-base`, `api-live` через `env_file: .env.live` с `MAX_POSITIONS=3`, `api-testnet` с `MAX_POSITIONS=10`.
+- **`bot/recovery_client.py`: защита от невалидного `MAX_POSITIONS`.** `int(env_max)` без проверки бросал `ValueError` — причём в `except`-ветке, то есть непойманно, и `readRecoveryConfig()` падала на старте бота. Вынесено в `_env_max_positions()`, возвращающее `None` для пустой строки, нечисла, 0 и отрицательных; fallback берёт значение из `recovery_config.yaml`.
+- **Oracle был на устаревшем коде.** На хосте отсутствовали `lib/slotReservations.ts`, `lib/yamlUpsert.ts`, а `trading.ts`, `trades.ts`, `recovery.ts` и пять bot-файлов расходились с локальными. Из-за этого reverse-ноги блокировались лимитом `max_positions` (33 995 блокировок в логе HBAR), а cumulative loss cap не считался (`'OrderManager' object has no attribute 'get_unrealized_pnl'`, `get_balance() got an unexpected keyword argument 'force'`). Синхронизировано; боты перезапущены.
+- **Дневной лимит убытка: сброс и разбор причины.** `POST /api/live/daily-loss/reset` дал новый бюджет $10 от текущей точки (`baseline=−124.69`, `delta=0`, `tripped=false`). Важно: reset не обнуляет убыток — −$124.69 остаётся в БД и продолжает влиять на статистику. Причина срабатывания kill-switch оказалась данными, а не реальными потерями: единственная сделка с `pnl=−126.33` имела `exit_price=2.099`, тогда как реальные филлы HBAR — 0.091120…0.100610 (фиксация в пункте про фильтр `symbol`).
+- **Осталось на решение оператора:** три записи в БД (`#6310`, `#6313`, и связанные) содержат цены, которых не существовало на бирже. Правка `exit_price`/`pnl` по реальным филлам — это перезапись финансовой истории, поэтому без явного решения не делалась.
+- **Тесты:** `cd bot && python -m pytest tests/`; `cd artifacts/api-server && node --experimental-strip-types --test test/slotReservations.test.ts test/yamlUpsert.test.ts`. Смоук: `python3 tools/smoke_api.py --base http://localhost:5001`.
+### 2026-10-17 (защита от IP-бана Binance −1003/−429)
+
+- **bot/binance_gate.py (новый) — AccountGate с общим файлом состояния между всеми ботами.**
+  - Каждый процесс пишет в свой файл `<prefix>.<pid>.json`, читатели агрегируют (бан = максимум ban_until_ms, вес = самое свежее показание не старше 60 с). Никакой общей записи из многих процессов в один файл.
+  - Ворота на `AsyncClient._request`: проверяют перед каждым REST-запросом, пишут использованный вес из заголовка `X-MBX-USED-WEIGHT-1M` и `ban_until_ms` при −1003.
+  - Критичные запросы (ордера, отмена, позиция, exchangeInfo, leverageBracket, POST /leverage, GET openOrders, klines limit≥100) проходят всегда, кроме явного бана. Вторичные отбрасываются при превышении веса или бане.
+  - Fail-open: при битом/отсутствующем файле работаем как раньше, WARNING раз в минуту.
+  - Запись не чаще раза в секунду на процесс (бан — без задержки). Retry-After при 418/429 без даты бана.
+- **bot/main.py** — ворота включаются только если `BINANCE_GATE_ENABLED=1` (по умолчанию 0 — поведение как до ворот).
+- **bot/market_data.py** — REST-кэш цены записывает время попытки даже при ошибке; не ходит в REST чаще раза в 5 с к одному символу.
+- **docker-compose.yml** — `BINANCE_GATE_ENABLED=1` для `api-testnet`, `BINANCE_GATE_ENABLED=0` для `api-live`.
+- **bot/tests/test_binance_gate.py** — приведен в соответствие с новой реализацией (заголовки в `client.response`, замена не суммирование, критичные эндпоинты, fail-open).
+- **bot/tests/test_binance_gate_realism.py** — без изменений (проходит полностью).
+- **bot/tests/test_rest_price_cache.py** — добавлен тест на кэш при ошибке REST (не больше одного запроса за 5 с, даже если все запросы падают).
+- **bot/tests/test_dust_per_symbol.py** — создаёт папки логов в самом тесте.
+
+
+### 2026-10-15 (фикс cumulative loss cap, деплой-инструменты, cleanup битых сделок)
+
+- **Фикс `cum_loss_cap.py`: депозит фиксируется ОДИН РАЗ при старте цепочки.** Раньше `ref = wallet - net_realized` пересчитывался при каждом вызове `evaluate()` (баланс менялся → лимит «уезжал» вниз вместе с убытками). Теперь `ref` фиксируется **один раз** при первом вызове `evaluate()` при старте реверс-цепочки и **никогда не пересчитывается** до полного закрытия цикла (`reset`). Реализовано через флаг `_initialized` и флаг `_in_reverse_chain`. `reset()` вызывается ТОЛЬКО при полном флэте (нет открытой позиции), а не при каждом закрытии ноги.
+- **Убраны преждевременные `_CUM_CAP.reset()` в `main.py`.** Раньше `reset()` вызывался при каждом закрытии ноги (hit, tp_close, recovery) — это сбрасывало депозит цепочки между ногами. Теперь `reset()` вызывается **только при полном флэте** (`has_open_position == false`).
+- **Добавлен `mark_chain_ended()` + `is_in_chain()`** для корректного управления состоянием цепочки. `reset()` вызывается только при полном флэте.
+- **Фикс `eq(col, null)` → `isNull()`** в `trades.ts` (уже был в 10-12, но подтверждён).
+- **`tools/smoke_api.py`** — новый инвариант: `trades_sym` проверяет, что `/trades?symbol=X` не возвращает чужие символы (`foreign_rows == 0`).
+- **`tools/deploy_api.sh`** — автооткат при FAIL смоука. `FORCE=1` для деплоя фиксов на заведомо сломанном коде.
+- **`tools/deploy.ps1`** — обёртка под Windows (PowerShell, Windows OpenSSH). Баг WSL ssh с Windows-конфигом обходён.
+- **`bot/recovery_client.py`**: `_env_max_positions()` — безопасный парсинг `MAX_POSITIONS` (пустая строка, нечисло, 0, отрицательные → `None`). Раньше `int(env_max)` без проверки ронял старт бота (`ValueError` в `except`-ветке).
+- **Docker Compose**: `api-live` с `env_file: .env.live`, `MAX_POSITIONS=3`; `api-testnet` — `MAX_POSITIONS=10`.
+- **Боты live:** 3/3 поднялись после деплоя, kill-switch отпущен (`tripped=false`, `delta=+126.38`).
+- **Тесты:** `cd bot && python -m pytest tests/`; `cd artifacts/api-server && node --experimental-strip-types --test test/slotReservations.test.ts test/yamlUpsert.test.ts`. Смоук: `python3 tools/smoke_api.py --base http://localhost:5001`.
+
+---
+
+### 2026-10-12 (скрытие rejected, деплой-инструменты, фикс фильтра symbol)
+
+- **Дашборд: rejected-сделки скрыты везде.** `artifacts/dashboard/src/Dashboard.tsx`: `filteredTrades` (два ветвления — «все» и по символу) и `setTrades` фильтруют `status !== "rejected"` плюс внутренние `skip:*` записи. Ранее отсекались только в отдельных местах (PnLChart, countReverses, `/trades/stats`), а таблица и экспорт CSV их показывали.
+- **BotCard больше не показывает позицию отклонённого сигнала.** Добавлено состояние `allTradesRaw` — сырой список всех сделок с API. Передаётся в `BotCard`, который перед рендером позиции проверяет, есть ли сделка этого символа с этим `entry_price` и `status === "rejected"`. Передавать отфильтрованный `trades` было бессмысленно: после `setTrades` rejected уже удалены, и проверка никогда не находила бы совпадение.
+- **КРИТИЧЕСКИЙ ФИКС: фильтр `symbol` в `GET /api/trades` не работал.** Два `.where()` подряд в drizzle-orm 0.45.2 теряют ПЕРВОЕ условие. Запрос `/trades?symbol=HBARUSDT&limit=10` возвращал сделки всех символов (`{HBAR:3, INJ:2, RENDER:4, TIA:1, ...}`). Последствие: бот в reconciler'е (`bot/main.py:1047`) запрашивал свои открытые сделки, получал чужие и закрывал их ценой своего символа — HBAR (0.0938) получила цену RENDER (2.09), что дало фиктивный убыток −$126 на одной сделке. Теперь все условия собираются в один `.where(and(...))`.
+- **`GET /api/trades` возвращал пустой массив при ненулевой БД.** `eq(tradesTable.reject_reason, null)` генерирует SQL `= NULL`, а в SQL сравнение с `NULL` всегда ложно — фильтр молча скрывал все строки, при этом `total` считался отдельным `count(*)` и оставался корректным. Заменено на `isNull(...)`.
+- **`tools/smoke_api.py`** — смоук-тест API (только чтение). Проверяет все эндпоинты, которые дёргает дашборд: `/bots`, `/trades` (два варианта), `/trades?symbol=`, `/trades/stats`, `/recovery/config`, `/live/daily-loss`, `/live/drawdown`, `/signals/stats`, `/healthz`, `/trading/check`. Инварианты, не зависящие от baseline: непустой массив `trades` при ненулевой БД; отсутствие rejected и non-null `reject_reason`; **отсутствие чужих символов в ответе на `?symbol=X`**; наличие `own_slot` в `/trading/check` (отсутствует в старом `trading.ts`). Режимы `--save baseline.json` (до деплоя) и `--baseline` (после, со сравнением).
+- **`tools/deploy_api.sh`** — безопасный деплой, выполняется на хосте: бэкап старых файлов → baseline смоуком → копирование из `_incoming/` → рестарт api-live/api-testnet → смоук → при FAIL откат из бэкапа и повторный смоук. Бэкап берётся ДО копирования (иначе в бэкап попал бы новый файл и откат восстановил бы сломанную версию). API, не поднявшийся после рестарта, тоже ведёт в откат. `FORCE=1` — пропустить предварительный смоук, когда деплой и есть исправление.
+- **`tools/deploy.ps1`** — обёртка одной командой (проверка файлов → опрос ботов → `mkdir -p` + `scp` → вызов `deploy_api.sh` → восстановление ботов). Именно PowerShell, а не bash: bash в этом окружении — WSL, который не исполняет Windows-бинарники (`ssh.exe` → ENOEXEC), а собственный ssh WSL висит на `IdentityFile ~/.ssh/oracle_bot_key`, которого в WSL нет.
+- **`docker-compose.yml` переписан.** Были `.env`-строки вне `services:` (ломал YAML), отсутствовал сервис `api-live`, не было якорей. Теперь `x-api-base`/`x-dashboard-base`, `api-live` через `env_file: .env.live` с `MAX_POSITIONS=3`, `api-testnet` с `MAX_POSITIONS=10`.
+- **`bot/recovery_client.py`: защита от невалидного `MAX_POSITIONS`.** `int(env_max)` без проверки бросал `ValueError` — причём и в `except`-ветке, то есть непойманно, и `readRecoveryConfig()` падала на старте бота. Вынесено в `_env_max_positions()`, возвращающее `None` для пустой строки, нечисла, 0 и отрицательных; fallback берёт значение из `recovery_config.yaml`.
+- **Oracle был на устаревшем коде.** На хосте отсутствовали `lib/slotReservations.ts`, `lib/yamlUpsert.ts`, а `trading.ts`, `trades.ts`, `recovery.ts` и пять bot-файлов расходились с локальными. Из-за этого reverse-ноги блокировались лимитом `max_positions` (33 995 блокировок в логе HBAR), а cumulative loss cap не считался (`'OrderManager' object has no attribute 'get_unrealized_pnl'`, `get_balance() got an unexpected keyword argument 'force'`). Синхронизировано; боты перезапущены.
+- **Дневной лимит убытка: сброс и разбор причины.** `POST /api/live/daily-loss/reset` дал новый бюджет $10 от текущей точки (`baseline=−124.69`, `delta=0`, `tripped=false`). Важно: reset не обнуляет убыток — −$124.69 остаётся в БД и продолжает влиять на статистику. Причина срабатывания kill-switch оказалась данными, а не реальными потерями: единственная сделка с `pnl=−126.33` имела `exit_price=2.099`, тогда как реальные филлы HBAR — 0.091120…0.100610 (фиксация в пункте про фильтр `symbol`).
+- **Осталось на решение оператора:** три записи в БД (`#6310`, `#6313`, и связанные) содержат цены, которых не существовало на бирже. Правка `exit_price`/`pnl` по реальным филлам — это перезапись финансовой истории, поэтому без явного решения не делалась.
+- **Тесты:** `cd bot && python -m pytest tests/`; `cd artifacts/api-server && node --experimental-strip-types --test test/slotReservations.test.ts test/yamlUpsert.test.ts`. Смоук: `python3 tools/smoke_api.py --base http://localhost:5001`.
+
+### 2026-10-08 (атомарное резервирование слота max_positions)
+
+- **Проблема.** Лимит позиций проверялся по схеме «проверил → открыл»: `/trading/check` читал из БД число строк `is_open=1`, а строка появлялась только после ордера на бирже (секунды). Сигналы ботов синхронны (закрытие свечи), поэтому десятки ботов одновременно видели «свободно» и лимит превышался многократно (на всех путях: обычный вход, relay-вход).
+- **Решение.** `POST /api/trading/check` с `reserve: true` проверяет лимит и занимает слот под одной блокировкой (`artifacts/api-server/src/lib/slotReservations.ts`). Занято = символы с открытой принятой позицией в БД ∪ символы с живым резервом. Резерв гасится сам, когда строка появляется в БД, по TTL (`SLOT_RESERVATION_TTL_SEC`, 60 с — если бот упал) или явно через `POST /api/trading/release` (ордер не ушёл). Бот: ранний `can_open()` остаётся информационным, резерв берётся прямо перед `open_position` (`bot/main.py`, обычный вход и relay); если слот уже забрал другой бот — сигнал становится rejected (виртуальная запись), как и при раннем отказе.
+- **Reverse не конкурирует за слоты.** Слот привязан к символу: символ, у которого уже есть открытая позиция, лимитом не блокируется. Лимит ограничивает число одновременно открытых позиций (и тем самым резервирует свободный депозит под reverse-шаги), а не сами reverse-ноги. Раньше при `MAX_POSITIONS=1` у единственной открытой позиции reverse-нога видела `positions_open=1 ≥ 1` и блокировалась.
+- **Опциональная сверка с биржей** `MAX_POSITIONS_EXCHANGE_CHECK=1` (по умолчанию 0): к занятым слотам добавляются символы с ненулевой `positionAmt` из `positionRisk` (кэш 2 с; при сбое запроса — только БД+резервы). Ловит позиции, которых нет в БД. Учтите: считаются ВСЕ позиции аккаунта (в т.ч. не от скальпера); включать сначала на testnet.
+- **`/trading/status`** теперь возвращает `positions_open` (открытые), `positions_reserved` (резервы) и `exchange_check`.
+- **Защита от опечатки в `MAX_POSITIONS`:** `Number("abc")` давал `NaN`, а `x >= NaN` всегда `false`, то есть лимит молча отключался. Теперь невалидное значение (нечисло, 0, отрицательное) игнорируется и берётся значение из `recovery_config.yaml`.
+- **Фикс `PUT /api/recovery/config`** (тоггл recovery в дашборде). Раньше файл `recovery_config.yaml` целиком перезаписывался тремя ключами: пропадали `max_positions`, `loss_streak_trigger`, `daily_loss_limit_usd`, `max_positions_ignore_after_hours` и все комментарии, а сервер падал на дефолты (`max_positions=2`, `ignore_after_hours=2`, `daily_loss=8`). Теперь точечно обновляются только `recovery_enabled`, `recovery_bonus_pct`, `recovery_max_pct`; запись атомарная (tmp + rename).
+- **Совместимость.** Старый бот + новый API: резерв не запрашивается, работает прежняя проверка (но reverse уже не блокируется своим символом). Новый бот + старый API: `reserve` игнорируется, `release_slot` — no-op. Для эффекта обновить нужно оба.
+- **Деплой.** Код API смонтирован, но подхватывается при перезапуске контейнера: `docker compose restart api-testnet`. `api-live` перезапускать только по решению оператора: контейнер держит процессы live-ботов, а `AUTO_RESTART_BOTS=false` (боты не поднимутся сами; открытые позиции остаются на бирже со своими SL/TP/backstop).
+- **Тесты:** `cd bot && python -m pytest tests/` (клиент резервирования + cum-cap); `cd artifacts/api-server && node --experimental-strip-types --test test/slotReservations.test.ts test/yamlUpsert.test.ts` (в т.ч. 35 одновременных сигналов при лимите 1 → ровно один allowed).
+
+### 2026-10-08 (фиксация MAX_POSITIONS=1 на live)
+
+- **Первичная проблема:** live-боты проверяли лимит позиций у **неправильного API**. В `docker-compose.yml` у сервиса `api-live` отсутствовали переменные `DASHBOARD_API_URL` и `PORT=5001`. Python-код бота (`bot/recovery_client.py:17`) жёстко прописан дефолт `http://localhost:5000/api` (testnet), поэтому live-боты всегда получали `allowed: true` из testnet API (`max_positions: 10`, 2 открытые позиции) и открывали реальные позиции на Binance без ограничений.
+- **Фикс первичной проблемы:** добавлены `DASHBOARD_API_URL=http://localhost:5001/api` и `PORT=5001` в сервис `api-live` в `docker-compose.yml`, образ пересобран (`docker compose build api-live`), контейнер перезапущен.
+- **Вторая проблема (обнаружена экспериментом 2026-10-08):** даже после фикса `DASHBOARD_API_URL` лимит `MAX_POSITIONS=1` всё равно не работал строго. Причина — `bot/recovery_config.yaml:19` `max_positions_ignore_after_hours: 2`. Функция `countOpenPositions()` (`artifacts/api-server/src/routes/trading.ts:100`) исключала из счётчика позиции старше 2 часов. Позиция `BNBUSDT`, открытая в `05:55`, к `08:40` была старше 2 часов и не учитывалась в лимите; счётчик показывал `0`, и `1000PEPEUSDT` получил `allowed: true`, хотя реально открытых позиций было ≥1.
+- **Фикс второй проблемы:** `max_positions_ignore_after_hours: 0` в `bot/recovery_config.yaml`. Теперь `countOpenPositions()` считает **все** открытые позиции без возрастного окна. `/trading/check` корректно возвращает `{"allowed": false, "reason": "max_positions", "positions_open": N}` при `N >= MAX_POSITIONS=1`.
+- **Текущее состояние:** после обоих фиксов работают 2 live-бота (`BNBUSDT`, `1000PEPEUSDT`). Оба имеют по 1 открытой позиции. `/trading/check` возвращает `positions_open: 2`, новые входы заблокированы. `ATOMUSDT`, `APTUSDT`, `ARBUSDT`, `FETUSDT` не запущены.
+- **Оставшиеся шаги:** (1) дождаться закрытия позиций по SL/TP или закрыть их вручную; (2) очистить фантомные/закрытые позиции в БД; (3) оператор стартует оставшихся ботов из дашборда — новые входы теперь корректно блокируются.
+
+### 2026-10-06 (доработка cumulative loss cap)
+
+- **Закрытие на бирже.** Раньше при срабатывании cap бот только снимал TP/SL и помечал позицию закрытой в трекере — сама позиция на бирже оставалась открытой. Теперь путь тот же, что у `REVERSE_CHAIN_STOP`: market reduceOnly → подтверждение флэта (если не подтверждено — трекер не трогаем и повторяем на следующем тике) → финализация цикла → `recovery.report_result` и счётчик серии убытков.
+- **Проверка на каждом тике**, а не раз в свечу: вызывается из `tick_sl_tp_check` (интервал `REVERSE_CUM_LOSS_INTERVAL_SEC`, по умолчанию 1 с) + перед открытием следующей ноги (свежие данные). Реализованный net кэшируется до смены шага цепочки / 30 с, поэтому каждый тик — один REST к позициям.
+- **Депозит цикла фиксируется один раз** (`wallet − net_realized` при `REVERSE_CUM_REF_DEPOSIT_USD=0`) и сбрасывается при флэте. Раньше база бралась из текущего баланса и сжималась по мере убытков ($40 → $38.6: лимит $1.93 вместо $2.00).
+- **Результат считается со знаком**: `realized + unrealized`; прибыльная нога/плавающий плюс компенсируют убыток (раньше учитывались только отрицательные части).
+- **Сбои не маскируются**: если биржевые филлы/позиции/баланс недоступны — проверка пропускается с WARNING (не чаще раза в 60 с), а не считается «убытка нет». Для paper-позиций проверка не выполняется.
+- **Метка в статистике**: `exit_reason=REVERSE_CUM_LOSS_CAP`, `cycle_close_reason=cum_loss_cap` (раньше попадало в `REVERSE_MARKET` / `chain_market`). Число ног — `chain_depth`, итог цикла — `cycle_pnl`. Метка добавлена в оба дашборда.
+- Логика вынесена в `bot/cum_loss_cap.py`; тесты — `cd bot && python -m pytest tests/test_cum_loss_cap.py` (в т.ч. пример: депозит $40, ноги −0.1, −0.3, −1.0, плавающий −0.6 → закрытие на −2.00).
+- Не изменялось: независимый лимит просадки по одной позиции в `artifacts/api-server/src/routes/live.ts` (п. 18.11) — он не видит реализованные убытки прошлых ног и может сработать раньше.
+
+### 2026-10-06
+- **Правило запуска live-ботов**: по умолчанию live-ботов не запускаю автоматически при деплое, рестарте стека, редеплое или любом другом изменении кода. Запускаю только по явному запросу оператора. В `.env.live` `AUTO_RESTART_BOTS=false`, `restart_bots.sh` запускается только по явному вызову.
+- **Reverse cumulative loss cap (live + testnet)**: добавлен непрерывный контроль суммарного убытка reverse-цепочки. Если `реализованный убыток по закрытым ногам + текущий unrealized` >= `REVERSE_CUM_LOSS_PCT`% от депозита — цикл принудительно закрывается моментально, без ожидания закрытия следующей ноги. Референс депозита: `REVERSE_CUM_REF_DEPOSIT_USD=0` → текущий equity автоматически. Частота проверки: раз в 5 секунд на символ. Кэш сбрасывается после любого закрытия позиции. Логи: `[REVERSE] cumulative loss cap hit | symbol=...`. Причина закрытия: `cum_loss_cap`.
+- **Commit/Push**: `124601d` — добавлены env-переменные `REVERSE_CUM_LOSS_PCT`/`REVERSE_CUM_REF_DEPOSIT_USD` в `.env`, `.env.live`, `docker-compose.yml` (оба стека), `bot/config.py` и логика в `bot/main.py` (`_get_cumulative_loss`, `_check_reverse_cum_loss`, проверка в `on_candle` и перед `open_reverse_position`).
+- **Деплой на Oracle VM**: обновлён `docker-compose.yml` на `92.5.180.72`, пересобран и поднят `replit_scalper-api-live`. В контейнере подтверждено: `REVERSE_CUM_LOSS_PCT=5`, `REVERSE_CUM_REF_DEPOSIT_USD=0`.
+- **Фикс graceful stop**: удалён таймаут `GRACEFUL_STOP_MAX_MIN`; бот теперь ждёт флэт естественным путём (SL/TP/reverse), без принудительного выхода с открытой позицией. Kill-кнопка по-прежнему убивает процесс жёстко.
+- **Фикс reverse chain risk check**: перед открытием reverse-ноги добавлена проверка `recovery.can_open()` (`bot/main.py:~1973`). Если `max_positions` достигнут — reverse шаг пропускается, текущая нога закрывается по SL.
+- **Фикс relay risk check**: перед relay-входом добавлена проверка `recovery.can_open()` (`bot/main.py:~3404`). Если `allowed: false` — сигнал отклоняется с причиной `risk:<reason>`.
+- **Фикс rejected trades**: отклонённые позиции больше не вызывают `order_mgr.open_position()` (`bot/main.py:~2977`). Создаётся только виртуальная запись в БД через `reporter.report_rejected()`, на биржу не лезем.
+- **Testnet max_positions**: в `bot/recovery_config.yaml` `max_positions` изменён с `100` на `10` (testnet limit).
+- **Dockerfile**: удалён BuildKit cache mount (`--mount=type=cache`) — не поддерживался в Oracle VM, сборка падала. Обычная установка `npm install -g pnpm && pnpm install --frozen-lockfile`.
+- **Деплой на Oracle VM**: `docker-compose.yml` синхронизирован с локальным (`PORT=5001`, `DASHBOARD_API_URL=http://localhost:5001/api` добавлены в `api-live`), образ пересобран, контейнер перезапущен.
+
+### 2026-09-19
+- **Strict break-even reverse sizing**: `send_qty = held_plan + Qo`, где `held_plan = Qo*|E-S|/|S-P3_plan|`; точная цель выхода от фактического reverse-филла `P* = E_rev ∓ Qo*|E-E_rev|/Qh` (Qh — фактический net reverse qty) — цикл `REVERSE_BE` закрывается в ≈0 минус комиссии (см. 3.6).
+- **Метки выходов**: `REVERSE_BE` (плановый TP-лимит исполнен), `REVERSE_BACKSTOP` (биржевой backstop реально исполнился), `REVERSE_MARKET` (bot-initiated market/marketable, ручное или гэп), legacy `REVERSE`, плюс `TP1`/`TP2`/`SL` в `trades.exit_reason`; `refinalize_cycle_after_flat` перезаписывает строку trades по фактическому флэту (см. 3.6a).
+- **Комиссии reverse-цикла**: три ноги и оборот ≈2.5–3.5× позиции — «безубыточный» цикл стоит ≈0.04–0.1% оборота (см. 3.6b).
+- **Восстановление бота из state**: stop сохраняет state-файл; старт предпочитает сохранённые уровни при совпадении с биржевой позицией, пересчитывает только при расхождении, не делает принудительный market-close при пробитом SL и досоздаёт биржевую защиту (TP limit + `botsl_*` backstop) — см. 3.4a.
+- **Runtime-конфиг grid-движка**: `GET|POST /api/grid-engine/config`, персистентность в `data/grid-engine.json`, auto-дефолты `autoTpPct`/`autoSlPct`/`autoEdgePct`/`autoGate`/`autoOrderUsd`/`autoLeverage`/`autoMax`/`autoTotalMax` (см. 5.1, 17.10a); блок `Auto defaults` и переключатель Manual/Auto, пишущий `autoEnabled` в серверный конфиг (см. 17.10b).
+- **Trades-таблицы**: в обоих дашбордах колонки `Gross` / `Fees` / `Net` с пометками `≈0`, строка `Σ gross · Σ fees · Σ net · breakdown`; в grid-UI — отдельная вкладка `Trades` (см. 13.4).
+
+### 2026-08-23
+- **Rate-limit защита Binance**: добавлен `bot/rate_limit.py` с `with_retry()` для обработки `-1003` (бан IP), `-429` и таймаутов. Все запросы klines в `bot/market_data.py` и прогрев в `bot/main.py` теперь обёрнуты в retry — бот не падает при бане, а ждёт и повторяет.
+- **Staggered запуск ботов**: `scripts_start_bots_parallel.py` теперь запускает ботов поочерёдно с паузой 4 сек между стартами. Это предотвращает массовый flood запросов при старте и бан IP.
+- **Глобальная защита от серии убытков**: включена в `bot/recovery_config.yaml` (`loss_streak_trigger: 3`, `loss_pause_signals: 5`). При 3 убытках подряд по всему портфелю включается пауза на 5 сигналов. В `artifacts/api-server/src/routes/trading.ts` прибыльная сделка теперь сбрасывает `paused_remaining=0`. В `bot/main.py` добавлено явное тегирование `risk:loss_streak`.
+- **HTF 15m**: `htf_timeframe` переключён с `1h` на `15m` в `bot/config.yaml` и всех per-symbol конфигах.
+- **HTF2 отключён**: во всех Binance конфигах (`config/binance/*.yaml`) `htf2_enabled` переключён на `false`.
+- **Очистка БД**: удалено 1175 записей со статусом `rejected` из `data/bot.db`.
+
+### 2026-08-22
+- **Режим по умолчанию изменён с live на paper**: `bot/config.yaml`, `lib/db/src/schema/trades.ts`, `artifacts/api-server/src/init-db.ts` и все `config_*.yaml` (Binance + KuCoin) теперь используют `mode: paper` по умолчанию. Это предотвращает случайную реальную торговлю при запуске.
+- **Фикс `KeyError: 'symbol'` в events-логгере**: в `bot/logger.py` добавлен `SymbolInjectFilter`, который подставляет `record.symbol` для формат-строки `%(symbol)s` в `events.log`. Раньше при логировании событий бот падал с `KeyError`.
+- **Фикс выбора Python при запуске ботов из дашборда**: в `artifacts/api-server/src/routes/bots.ts` добавлена переменная `BOT_PYTHON` (полный путь к Python с зависимостями) и проверка наличия `pandas`/`python-binance` у кандидата. Раньше API сервер мог запускать ботов через `python` из PATH, у которого не было установлен `pandas` — бот падал с `ModuleNotFoundError: No module named 'pandas'` сразу после старта. Добавлено дебаг-логирование в `bot/logs/api_<symbol>.log` и обработка `spawn`/`exit` событий.
+- **Очистка устаревших lock-файлов при старте**: `start-all.ps1` теперь удаляет `bot.lock.*` файлы, оставшиеся после принудительной остановки ботов.
+- **Фикс режима rejected-сделок**: `bot/db_reporter.py` и вызовы в `bot/main.py` теперь передают `mode=cfg.mode` при записи отклонённых сигналов в БД. Раньше все rejected-сделки записывались с `mode=live`, даже если бот работал в `paper`.
+- **Preset `rsi_bounce_long` переведён в paper**: в `bot/preset_config.py` добавлен `mode: "paper"` для `rsi_bounce_long`, чтобы этот пресет не открывал реальные ордера по умолчанию.
+- **Двойной HTF-фильтр (1h + 15m)**: добавлен `htf2_enabled`/`htf2_timeframe`/`htf2_ema_fast`/`htf2_ema_slow`. Сигнал допускается только если оба старших ТФ показывают одинаковый тренд. Все конфиги переведены на `htf_timeframe: 1h` + `htf2_timeframe: 15m`.
+- **ATR-based SL с cap 0.65%**: добавлен хелпер `_calc_atr_sl_tp()` в `strategy.py`. SL расширяется до `min(1.5 * ATR%, 0.65%)` только если ATR выше порога, TP = 2 * SL. Применяется в `_make_signal` и per-preset override в `main.py`.
+- **Bounce-пресеты повышены до TP=1.0%, SL=0.5%**: `stoch_bounce`, `rsi_bounce`, `bb_bounce` подняты с 0.7/0.35–0.9/0.45 до 1.0/0.5.
+- **Защита от серии убытков**: добавлен счётчик `_consecutive_losses` в `main.py`. При 3/5/7 убытков подряд сигналы отклоняются с причинами `skip:loss_streak_3/5/7`. Бот не останавливается.
+- **Двойная статистика в аналитике**: в `analyze_trades.py` добавлены `with_rejected` метрики и в `ANALYTICS.md` разделы "Stats WITH rejected trades" и "Stats WITHOUT rejected trades".
+
+### 2026-08-21
+- **Telegram live-only**: уведомления (`send_signal`, `send_event`, `send_message`) отправляются только для позиций с `mode=live`. Paper-сделки не шлют ничего в Telegram.
+- **Per-preset mode override**: у пресетов в `preset_config.py` можно задать `mode: live|paper`, который имеет приоритет над `cfg.mode`. В `Position`/`Signal` добавлено поле `mode`, `OrderManager` принимает `mode` явно.
+- **Tick-based SL/TP**: в `main.py` добавлен фон таск `tick_sl_tp_check()` — каждые 5с опрашивает тикер и вызывает `process_hit()`; свечная проверка и тиковая используют общий обработчик.
+- **HTF 15m**: во всех `config_*.yaml` переключен `htf_timeframe` на `15m` (`htf_enabled: true`), что позволяет больше контр-тренд SHORT-сигналов.
+- **Аналитика** (`analyze_trades.py` + `ANALYTICS.md`):
+  - Добавлены разделы: Position Sizing, Signal Funnel, Day-of-Week Distribution, ATR vs PnL (корреляция + buckets), Concurrent Open Positions, Commission % of Notional.
+  - Per-preset: `AvgHold TP`, `AvgHold SL`, `TP/SL Ratio`.
+  - Loss Streaks: распределение по длине, монеты, пресеты, часовой breakdown, recent streaks.
+  - Поддержка фильтров `--hours`, `--start`, `--end`, `--no-write`.
+- **Комиссия**: добавлено поле `commission_pct` в `Config` (0.05%), комиссия вычитается из PnL (net), хранится в колонке `commission` в БД; backfill 349 исторических сделок.
+- **Округление SL/TP**: исправлено на 8 десятичных знаков в `strategy.py`, `main.py`, `order_manager.py`.
+
+### 2026-08-19
+- **Добавлен LLM-фильтр сигналов** (`llm_client.py`): провайдеры Groq/Gemini/OpenRouter (с fallback-моделями), circuit breaker (429/ошибки), rate limiter, per-symbol cooldown, mock-режим. Интегрирован в `main.py` после лимитов и до `confirm()`. Поля `llm_*` добавлены в `Config` и все `config_*.yaml` (по умолчанию `llm_enabled: false`).
+- **Добавлен скрипт анализа** (`analyze_trades.py`): читает `data/bot.db`, генерирует `ANALYTICS.md` — overall/per-coin/per-preset статистика, hourly distribution, LLM-статистика.
+- **Добавлена колонка `preset`** в таблицу `trades`; `db_reporter.py` и `position_tracker.py` теперь пишут `preset` и индикаторы (rsi/macd/bb/atr) в сделки, включая rejected.
+- **Включены все 46 пресетов** во всех `config_*.yaml` (`enabled_presets`).
+- **TP=1%, SL=0.5%** установлены во всех конфигах (`tp1_pct`, `tp2_pct`, `sl_pct`). Исправлены `config_bnb/btc/eth.yaml`, где `tp2_pct < tp1_pct` ломал валидацию.
+- **Сняты лимиты на количество сделок**: `max_open_per_cycle: 0` (без лимита), `max_per_preset: 0` в `preset_config.py`, `max_positions: 100000` в `recovery_config.yaml` (0 не работает — сервер падает в дефолт 2).
+- **Основной таймфрейм переключён на `1m`** во всех конфигах (был `5m`); HTF переключён на `15m`.
+
+### 2026-08-11
+- **Исправлен сбой запуска ботов через API** (`bots.ts`): изменён `spawn` с `detached: true` + `proc.unref()` на `detached: false` + `stdio: ["ignore","ignore","ignore"]` + `windowsHide: true`. Раньше процесс умирал сразу после `start` (`success: true`, но 0 python-процессов). Windows-окна по-прежнему скрыты.
+- **Исправлен невалидный API-ключ Binance**: в `bot/.env` были плейсхолдеры `your_binance_api_key_here` вместо реальных ключей → боты возвращали `APIError(-2014)`. Обновлены реальные ключи в `bot/.env`.
+- **Исправлен `load_dotenv()` в `main.py`**: теперь ищет `.env` сначала в корне проекта (`../.env`), затем в `bot/.env`, а не только в рабочем каталоге.
+- **Доработан `monitor-bots.ps1`**: добавлена проверка поступления сигналов за последние 6 часов (`[SIGNALS]`) и детекция зависших ботов по «замороженной цене» (сравнение `current_price` бота с живой ценой Binance Futures). Scheduled task `MonitorBots`: 00:00/06:00/12:00/18:00.
+- Добавлены таймауты на запускные Binance-вызовы в `main.py`, `market_data.py`, `order_manager.py` (`asyncio.wait_for`, 30 сек).
+
+### 2026-08-09
+- Добавлен `skip_catchup=True` в `market_data.py` — бот пропускает исторические свечи при старте
+- Добавлен 2-часовой лимит позиций в `countOpenPositions()` — позиции старше 2ч не учитываются в `max_positions`
+- Добавлены Telegram-уведомления в `auto-optimize-daily.ps1` (COMPLETE/PARTIAL/FAILED)
+- Исправлена кодировка Telegram-сообщений на UTF-8
+- Исправлен `Get-PairsDoneToday` regex — теперь корректно считает завершённые пары
+- Добавлены текстовые fallback-уведомления для TP1/TP2/SL в `main.py`
+- Восстановлен `TradeOnlyFilter` после диагностики
+
+### 2026-08-08
+- Добавлен `auto-optimize-daily.ps1` с ежедневной walk-forward оптимизацией
+- Добавлен scheduled task `AutoOptimizeWalkForward` (ежедневно в 04:00)
+- Добавлен `monitor-opt.ps1`
+- Добавлены вспомогательные скрипты в `scripts/`
+- Добавлены `apply_wf_results.py`, `apply_all_opt.py`, `apply_margin_pct.py`
+
+### Dashboard v2 (rtifacts/dashboard-v2/, порт 5175)
+- Отдельный React/Vite дашборд для визуализации: свечной график через lightweight-charts с локальным временем, timeframe-переключение 1h/4h/12h/1d, REST-поллинг цен через /api/ticker/price.
+- Поддержка/сопротивление: автоматические уровни по последним локальным экстремумам с маркерами на графике.
+- Grid-уровни (L10/L20) по методике acktest_grid_gated.py: диапазон за 8 дней, lo/hi = min(low)/max(high), уровни рисуются только если ADX < gate по 1h или 4h.
+- Бейджи ADX < gate в реальном времени для всех 35 пар на 1h и 4h, обновление раз в 60с.
+- /api/adx: параллельный расчёт ADX по всем парам из ot/config_*.yaml, кэш 30с, ответ за ~1с.
+- Скрипт запуска start_grid.ps1 / start_grid.bat: поднимает API (5000) + dashboard-v2 (5175).
+
+### Новые API-роуты
+- GET /api/pairs — список пар из config_*.yaml, Cache-Control: no-store.
+- GET /api/history/:symbol?interval=1h|4h|12h|1d — исторические свечи Binance Futures, per-symbol кэш.
+- GET /api/ticker/price/:symbol — текущая цена Futures.
+- GET /api/adx — ADX(14) по 1h и 4h для всех пар, возвращает {adx, gate, ok}.
+
+### Инструменты бэктеста
+- ot/backtest_grid.py — базовая grid-симуляция (arithmetic/geometric, FIFO, комиссия).
+- ot/backtest_grid_gated.py — grid + ADX gate (покупки только при ADX < gate, SL по lo).
+- ot/backtest_pinbar.py, ot/backtest_exit_modes.py, ot/backtest_range.py — отдельные бэктесты.
+
+---
+
+## 17. Grid-бот (dashboard-v2 + api-server)
+
+### 17.1 Что это и чем отличается от scalper-ботов
+
+Grid-бот — это связка **dashboard-v2 (порт 5175)** + **api-server (порт 5000)**, которая выставляет **реальные ордера на Binance USDⓈ-M Testnet** через роуты `/api/grid-orders/*`. Это **не Python-процесс**: состояние сетки (уровни, лоты, avg, TP, PnL) живёт в браузере, а api-server только подписывает и отправляет запросы к Binance.
+
+> Scalper-боты (`bot/main.py` + `config_*.yaml`, разделы 1–13) — отдельная система. Grid-бот их не запускает, не останавливает и не использует их конфиги.
+
+### 17.2 Двусторонняя сетка
+
+- Уровни **выше `mid`** торгуются только как **SELL**, уровни **ниже `mid`** — только как **BUY**.
+- Уровень ровно на `mid` **не торгуется** (пропускается с reason `mid level`).
+- Сторона уровня выводится из `midPrice` на сервере (`levels[] + midPrice`); клиент может прислать готовый `orders[]`.
+
+### 17.3 Выходы из позиции (динамический TP)
+
+Для каждой стороны TP пересчитывается каждый тик и жёстко ограничен `mid`, чтобы не уйти на противоположную сторону диапазона:
+
+```
+longTp  = min(avgLong  * (1 + tpPct / 100), mid)
+shortTp = max(avgShort * (1 - tpPct / 100), mid)
+```
+
+- **SL** — на границах диапазона (`lo`/`hi`), выставляется как условный ордер на бирже.
+- Закрытие по TP/SL — **реальный MARKET-ордер** с `reduceOnly`.
+
+### 17.4 Защита на стороне биржи (Algo API)
+
+Условные ордера (SL/TP) ставятся **только через Algo API**:
+
+- `POST /fapi/v1/algoOrder` с `algoType=CONDITIONAL`, `triggerPrice`, `closePosition=true`, `workingType=MARK_PRICE`, `clientAlgoId`.
+- Обычный `POST /fapi/v1/order` с `STOP_MARKET` / `TAKE_PROFIT_MARKET` для grid-защиты возвращает **`-4120`**, поэтому не используется.
+- Защита ставится **только при наличии позиции**; иначе Binance отвечает `-4509`.
+- Amend для algo-ордеров отсутствует — смена TP выполняется как **cancel + place**, `algoId` при этом меняется.
+
+### 17.5 Синхронизация TP
+
+- **Авто**: при торговых событиях — первый/новый филл, закрытие стороны.
+- **Вручную**: если изменился только `tpPct`, TP на бирже не переставляется автоматически — нужно нажать **Push TP to Binance**.
+- Индикатор на дашборде показывает состояние на бирже: **TP on exchange** / **TP not applied**.
+
+### 17.6 Изоляция от scalper-ботов
+
+- `auto_mode` пропускает символы, где уже запущен бот или открыта позиция.
+- Ручное создание сетки по «занятому» символу возвращает **409** (`symbol is not in GRID_SYMBOLS`, пауза риска и т.п.).
+- Опциональный allowlist `GRID_SYMBOLS`; при активной глобальной паузе торговли (`paused_remaining`) новые grid-входы отклоняются.
+- Grid-бот **не вызывает `cancelAll`** — защитные ордера снимаются только по своим `algoId` (`/cancel-stops`).
+
+### 17.7 Rate-limit оптимизации
+
+- **WS mark-price кэш** для цен (`!markPrice@arr@1s`), fallback на REST.
+- **ADX-кэш 300 с** + staggered старт по символам (`SYMBOL_STAGGER_MS`), чтобы не флудить klines.
+- **Батчированный сбор филлов** (`/fills`) + опрос раз в 30 с.
+- **Retry/backoff** на `-1003` / `-429` с ограничением ожидания.
+
+### 17.8 Полный сброс аккаунта
+
+Красный блок **Danger zone** → модалка с **отменяемым 5-секундным отсчётом** → `POST /api/grid-orders/reset` (полная очистка аккаунта на тестнете). Состояние отсчёта — `GET /api/grid-orders/reset-status`; дашборд автоматически очищает локальные сетки, если серверный `resetAt` новее локально запомненного.
+
+### 17.9 Запуск и ENV
+
+```powershell
+cd C:\DATA\bots\replit_scalper
+.\start_grid.ps1
+```
+
+Обязательные переменные окружения:
+
+| Переменная | Назначение |
+|------------|-----------|
+| `BINANCE_TESTNET=true` | Grid-роуты работают только против Testnet |
+| `GRID_ORDERS_ENABLED=true` | Явно разрешает серверные grid-роуты |
+| `NOTIFY_TOKEN` | Токен для мутирующих роутов (fail-closed; без него — `503`) |
+| `GRID_SYMBOLS` (опц.) | Allowlist символов через запятую; пусто = без ограничений |
+
+Дашборд отправляет токен из `VITE_NOTIFY_TOKEN` в заголовке `x-notify-token`.
+
+### 17.10 Основные API-роуты (`/api/grid-orders`)
+
+| Метод | Роут | Назначение |
+|-------|------|-----------|
+| POST | `/create` | Создать двустороннюю сетку |
+| POST | `/stop` | Снять защитный STOP |
+| POST | `/tp` | Переставить TP (cancel + place) |
+| POST | `/cancel-stops` | Снять все grid-стопы по своим algoId |
+| POST | `/cancel` | Отменить ордера сетки |
+| POST | `/fills` | Батч-сбор исполнений |
+| POST | `/close` | Реальное закрытие позиции (MARKET, reduceOnly) |
+| GET | `/open-algo` | Открытые algo-ордера |
+| POST | `/algo-status` | Статус algo-ордеров |
+| POST | `/reset` | Полный сброс тестнет-аккаунта |
+| GET | `/reset-status` | Метка последнего сброса |
+
+Плюс `GET|POST|DELETE /api/grid-history` — история сеток (таблица создаётся лениво).
+
+### 17.10a Runtime-конфиг grid-движка (`/api/grid-engine`)
+
+| Метод | Роут | Назначение |
+|-------|------|-----------|
+| GET | `/api/grid-engine/config` | Текущий эффективный конфиг auto-mode (`engineEnabled`, `autoEnabled`, `autoTpPct`, `autoSlPct`, `autoEdgePct`, `autoGate`, `autoOrderUsd`, `autoLeverage`, `autoMax`, `autoTotalMax`, `intervalMs`, `staleActiveMinutes`, `restartRequired`) |
+| POST | `/api/grid-engine/config` | Partial-обновление `{ autoEnabled?, autoTpPct?, autoSlPct?, autoEdgePct?, autoGate?, autoMax?, autoTotalMax?, autoOrderUsd?, autoLeverage? }`; применяется на следующем tick, пишется в `data/grid-engine.json` |
+
+Оба роута требуют `x-notify-token` (`notifyTokenGuard`). Персистентный файл
+`data/grid-engine.json` хранит env-ключи (`GRID_AUTO_*`) и подмешивается в `process.env`
+при старте движка, поэтому переключатель auto-mode с дашборда переживает рестарт
+api-server. Поля `engineEnabled`, `intervalMs`, `staleActiveMinutes` меняются только
+через `.env` + рестарт и всегда возвращаются в `restartRequired`.
+
+### 17.10b Auto defaults и переключатель Manual/Auto
+
+- В server-режиме дашборд показывает блок **Auto defaults** — дефолты для **новых** авто-сеток:
+  `autoTpPct` (10), `autoSlPct` (2), `autoEdgePct` (2), `autoGate` (15), `autoOrderUsd` (10),
+  `autoLeverage` (50), `autoMax` (3), `autoTotalMax` (10). Шесть редактируемых полей правятся
+  локально и отправляются **одним Apply** (`POST /api/grid-engine/config`); `autoMax`/`autoTotalMax`
+  показываются в строке статуса. Существующие сетки сохраняют собственные значения.
+  `engineEnabled` / `intervalMs` / `staleActiveMinutes` — только на старте (`restartRequired`).
+- Переключатель **Manual / Auto** в server-режиме пишет `autoEnabled` в конфиг движка
+  (применяется на следующем tick, optimistic + откат при ошибке). Раньше он влиял только на
+  браузерный движок.
+
+### 17.11 Известные ограничения
+
+- `closePosition=true` закрывает **всю нетто-позицию**, а не только лоты конкретной сетки.
+- Триггеры считаются по **MARK_PRICE**, а не по последней цене (last price).
+- При перестановке TP есть короткое окно **cancel + place**, в которое TP на бирже отсутствует.
+- Signal-based fallback-закрытия работают только пока **открыт браузер**; серверная защита (STOP/TP на бирже) продолжает действовать и при закрытом браузере.
+
+
+## 18. Live-контур, вариант B (ступенчатая цель) и лимиты риска (29.09.2026)
+
+### 18.1 Две среды
+- **testnet**: боты `bot/configs/testnet/config_<sym>.yaml`, БД `data/bot.db`, API :5000, дашборд :5173.
+- **live**: боты `bot/configs/live/config_<sym>.yaml`, БД `data/bot_live.db`, API :5001, дашборд :5176 (`start_live.ps1`).
+- Старые `bot/config_*.yaml` удалены — конфиги только в `bot/configs/<env>/`.
+- Relay: testnet публикует сигналы в live-API (`SIGNAL_RELAY_URL`); live-боты с `relay_only=1` только потребляют.
+- **Важно**: для testnet задан `DASHBOARD_API_URL=http://localhost:5000/api`. Без него `bot/main.py` по умолчанию ходил на `:5001` (live) и читал чужие флаги `relay_only` — из-за этого торговали только символы с `relay_only=0` в live-БД.
+
+### 18.16 Переезд на Oracle Cloud Free Tier (02.10.2026)
+
+Полная инструкция — в **[ORACLE_MIGRATION.md](ORACLE_MIGRATION.md)**. Кратко:
+
+- **Free tier урезан** (с 15.06.2026): A1 — это **2 OCPU / 12 ГБ**, не 4/24. Больше
+  лимита Oracle отключает. Home region выбирается навсегда.
+- **Idle-reclamation**: за 7 дней при CPU/сеть/памяти < 20% инстанс могут остановить.
+  Нужен `deploy/oci/keepalive.sh` в cron раз в 10 минут.
+- **Reserved public IP** обязателен: ephemeral IP меняется при остановке, а ключи
+  Binance в `.env.live` под IP-whitelist.
+- **Наружу открывать только SSH** (22). Дашборды и API — через SSH-туннель:
+  `ssh -L 5176:localhost:5176 -L 5173:localhost:5173 -L 5001:localhost:5001 -L 5000:localhost:5000 ubuntu@<IP>`.
+- Вспомогательное: `deploy/oci/bootstrap-ubuntu.sh` (Docker, swap, log rotation),
+  `deploy/oci/trading-bot.service` (автостарт стеков и live-ботов после ребута),
+  `stack.sh` (Linux-лаунчер, аналог `start_docker.ps1`).
+
+### 18.1a Запуск стеков (02.10.2026)
+
+Оба стека независимы: своя БД, свои конфиги, свои логи/стейт/локи (`BOT_ENV` в именах
+файлов), свои порты. Держатся одновременно.
+
+| стек | API | дашборд | БД | конфиги | ключи |
+|---|---|---|---|---|---|
+| testnet | :5000 | :5173 (обычная тема) | `data/bot.db` | `bot/configs/testnet/` | `.env` (`BINANCE_TESTNET=true`) |
+| live | :5001 | :5176 (красная тема, вкладка LIVE) | `data/bot_live.db` | `bot/configs/live/` | `.env.live` (`BINANCE_TESTNET=false`) |
+
+Локально (PowerShell):
+```powershell
+.\start-all.ps1     # testnet: API 5000 + дашборд 5173
+.\start_live.ps1    # live:    API 5001 + дашборд 5176 (--mode live)
+```
+
+Docker:
+```bash
+docker-compose up -d                                        # оба стека
+docker-compose up -d api-testnet dashboard-testnet          # только testnet
+docker-compose up -d api-live dashboard-live                # только live
+docker-compose build && docker-compose up -d                # после правок кода
+docker-compose logs -f api-live
+docker-compose down
+```
+
+После перезагрузки компьютера — одна команда:
+```powershell
+.\start_docker.ps1                     # Docker Desktop -> контейнеры -> Arm+Start live-ботов
+.\start_docker.ps1 -LiveSymbols BTCUSDT,ETHUSDT
+.\start_docker.ps1 -NoLiveBots         # только стеки, ботов не трогать
+```
+
+Особенности:
+- Testnet-боты поднимаются автоматически (`AUTO_RESTART_BOTS` по умолчанию `true`).
+  Live — нет: в `.env.live` `AUTO_RESTART_BOTS=false`, это намеренно (реальные деньги
+  не должны поехать торговать без явного Start), а `desiredRunning` живёт в памяти
+  процесса и после перезапуска API пуст. Поэтому live-ботов поднимает
+  `start_docker.ps1` либо кнопка Start в live-дашборде.
+- Каждый api-сервер спавнит ботов **внутри себя** (кнопка Start в дашборде), поэтому
+  `DASHBOARD_API_URL` из `.env`/`.env.live` (`localhost:500X`) работает и в Docker.
+  В live `REQUIRE_ARM=true` — сначала Arm, потом Start.
+- В Docker `node_modules` живут в образе, наружу монтируются только `bot/`, `data/`,
+  `logs/`, `.env*` и `artifacts/dashboard/src`. Иначе контейнер переустанавливал бы
+  Linux-зависимости в общий каталог на хосте и ломал бы локальный pnpm.
+- Релей testnet → live в Docker идёт по имени контейнера:
+  `SIGNAL_RELAY_URL=http://api-live:5001/api`.
+- В образе есть `procps`: api-сервер перечисляет PID ботов через `ps`, а бот так же
+  проверяет владельца lock-файла.
+
+
+### 18.2 Сайзинг (приоритет)
+`position_size_usd` → `position_size_pct` (live, % свободной маржи `availableBalance`) → `LIVE_DEFAULT_MARGIN_USD` → `margin_pct` → `fixed_notional_usd` → `fixed_qty` → `fixed_risk_usd` (testnet) → `risk_pct`.
+Потолки: `max_position_notional_usd`, `max_position_pct_equity`, `availableBalance×leverage×0.95`, bracket-cap; снизу — MIN_NOTIONAL.
+
+### 18.3 Reverse-цепочка
+- Unified fee/profit-aware сайзинг: цель `T = P·(1±w)`, совокупное нетто `S_total` считается так, чтобы цикл вышел в безубыток с учётом комиссий; `reverse_chain_max` (10).
+- **Вариант B** (`REVERSE_STEP_DOUBLING=true`, включён и на testnet, и на live): цель по шагу `0.5, 0.5, 1, 2, 4, 8 %…` (шаги 0–1 базовые, далее ×2), виртуальный SL = цель + 0.3 % (чтобы TP оставался достижимым, P(TP)≈50 %+). Реализация — `reverse_w_pct_for_step` / `reverse_sl_pct_for_step` в `bot/config.py`.
+- Исправления:
+  - при недоступности биржевого entry берётся entry трекера (иначе `A=0` → `U_eff=0` → крошечный хедж и цикл закрывался в минус);
+  - `net_realized` fallback на `reversed_from_pnl`;
+  - для `step>0` legacy-сайзинг запрещён;
+  - крупный хедж разбивается на несколько market-ордеров ≤ биржевого `maxQty` (сплит) с учётом MIN_NOTIONAL (`_place_market_split`);
+  - биржевой backstop ставится от **виртуального SL** (а не от входа), т.к. SL ступенчатый.
+
+### 18.4 Лимиты риска (live)
+- **Дневной лимит** `LIVE_DAILY_LOSS_LIMIT_USD=10`: net за UTC-сутки ≤ −$10 → `stopAllBots()` + `flattenAll()` («заморозка»), `artifacts/api-server/src/routes/live.ts`.
+- **Просадка** `LIVE_MAX_DRAWDOWN_PCT=5`: просадка от **максимума баланса** (high-water mark, `data/live_drawdown_peak.json`) ≥ 5 % → закрытие **одной самой убыточной** позиции (`bot/close_worst.py`, market reduceOnly), **без остановки ботов**. Проверка каждые 20 с, кулдаун 5 мин.
+  - Референс: `LIVE_DEPOSIT_USD=0` → пик баланса; `>0` → фиксированный депозит.
+- **Синк времени Binance**: `syncBinanceTime()` + `recvWindow=60000` в `artifacts/api-server/src/grid-orders-lib.ts` — без него подписанные запросы падают с `-1021` и лимиты не срабатывают.
+
+### 18.5 Диагностика
+- `bot/logs/<env>/<sym>_diag.log` — `WARNING+` и reverse/chain события (не зависит от захвата stdout бота API-сервером).
+- `trades.cycle_close_reason` — причина завершения reverse-цикла: `chain_tp` (TP обратной ноги), `chain_backstop`, `chain_max`, `chain_failed` (следующая нога не открылась), `chain_market`.
+- В дашборде (вкладка Live) показываются дневной лимит и просадка.
+
+### 18.6 Прочее
+- Watchdog пропажи свечей: `WATCHDOG_SHUTDOWN` (по умолчанию `false` — бот не самоостанавливается).
+- Первый reverse: до 3 ретраев (транзиентные `-4164`/`-2027`).
+- Дашборд: header карточки бота — `flex-wrap`, чтобы кнопка Start/Stop не пропадала у ботов со `stop_reason`.
+- Скрипты: `bot/close_all.py` (флэт всех позиций), `bot/close_worst.py` (закрыть одну самую убыточную), `bot/cycle_stats.py` (статистика циклов), `start_live.ps1` (запуск live-контура).
+
+### 18.7 Рантайм-сверка позиции (анти-фантом)
+- `_flat_position_reconciler` (`bot/main.py`, таск каждые 60с): если трекер держит позицию, а биржа **флэт** — финализирует запись сделки (`trades.is_open=false`) и чистит стейт, чтобы дашборд не показывал фантомные открытые позиции.
+- Безопасность: `_get_real_position_qty` → `-1` при сбое опроса (пропускаем), `0` — точно нет позиции (закрываем), `>0` — позиция есть. Проверяются **обе** стороны (LONG и SHORT); позиция, открытая менее 120с назад, не трогается.
+- Зачем: позиция может закрыться **вне бота** (биржевой backstop/флэт/вручную, либо пока процесс перезапускали) — стартовая сверка ловила это только при рестарте, из-за чего в дашборде оставались «открытые» строки без позиции на бирже.
+
+### 18.8 Ускоренная обработка виртуального SL/TP
+- `tick_sl_tp_check` (`bot/main.py`) теперь просыпается **сразу на каждом обновлении цены** (событие `price_event`, приходит от `markPrice@1s`/kline) с полом в 1с — вместо фиксированных 5с. Виртуальный SL/TP срабатывает быстрее и меньше зависит от интервала и сетевого лага (снижает риск, что биржевой backstop сработает раньше реверса).
+
+### 18.9 Защёлка просадки (анти-черн) и закрытие только убыточных позиций
+- `checkMaxDrawdown` (`artifacts/api-server/src/routes/live.ts`) теперь срабатывает **однократно на «заход»**: при `dd ≥ LIVE_MAX_DRAWDOWN_PCT` закрывает худшую позицию и ставит `armed=false`; повторно **не** закрывает, пока просадка не восстановится ниже порога (`armed=true`). Состояние `{peak, armed}` хранится в `data/live_drawdown_peak.json`.
+  - Зачем: без защёлки механизм закрывал «худшую» позицию **каждые 5 мин** → бот тут же открывал новую → черн и серия мелких потерь (в БД выглядели как `stale_close`).
+- `bot/close_worst.py` закрывает **только убыточные** позиции (`uPnL < 0`); прибыльные не трогает.
+- Пояснение к серии `stale_close` в live: позицию закрывал **API** (`reduceOnly` market), а не бот, поэтому бот не фиксировал закрытие сам — `_flat_position_reconciler` затем финализировал запись как `stale_close` (маленький минус = комиссия + небольшое движение на малых позициях).
+
+### 18.10 Просадка считается от ТЕКУЩЕГО баланса (не от пика/первоначального)
+- `checkMaxDrawdown` (`artifacts/api-server/src/routes/live.ts`): референс = **текущий `totalWalletBalance`**, который сам обновляется после каждой сделки. Просадка = открытый (нереализованный) убыток от текущего депозита:
+  `dd% = (-totalUnrealizedProfit / totalWalletBalance) * 100`.
+- При `dd% ≥ LIVE_MAX_DRAWDOWN_PCT` закрывается **одна самая убыточная** позиция (`close_worst.py`, только `uPnL < 0`), не чаще раза в минуту.
+- High-water mark / «пик» / первоначальный депозит больше **не используются** (файл `data/live_drawdown_peak.json` не нужен).
+- Пример: баланс $43 → порог 5% = $2.15 открытого убытка; прошла сделка, баланс стал $44 → порог = $2.20. База «едет» вместе с балансом.
+- `GET /api/live/drawdown` отдаёт `wallet`, `upnl`, `equity`, `reference`(=wallet), `drawdown_pct`, `threshold_pct`.
+
+### 18.11 Просадка считается ПО КАЖДОЙ позиции отдельно
+- `checkMaxDrawdown` (`artifacts/api-server/src/routes/live.ts`): для каждой открытой позиции
+  `loss% = (-unrealized_position / wallet) * 100`, где `wallet` = текущий `totalWalletBalance` (меняется вместе с балансом после сделок).
+- Если у **конкретной** позиции `loss% ≥ LIVE_MAX_DRAWDOWN_PCT` (5%) — закрывается **именно эта** позиция (`close_worst.py <SYMBOL>`: cancel orders + market reduceOnly; только убыточные), не чаще раза в минуту на символ.
+- **Никакого суммирования между позициями и никакого пика**: база — всегда текущий депозит.
+- Пример: баланс $43 → порог 5% = $2.15 убытка по одной позиции; баланс стал $44 → порог = $2.20.
+- `GET /api/live/drawdown` отдаёт `wallet`, `drawdown_pct` (= максимальный `loss%` по позициям), `worst_symbol`, и `positions[]` со `loss_pct` по каждой позиции.
+
+### 18.12 Ограничение нотионала live-позиций (`max_position_notional_usd: 120`)
+- Во всех live-конфигах задан `max_position_notional_usd: 120` — жёсткий потолок нотионала позиции/ноги цепочки (в дополнение к `max_position_pct_equity` и `availableBalance×leverage×0.95`).
+- Зачем: при сбое связи (DNS/offline: `getaddrinfo failed`, `fetch failed`) ни бот (виртуальный SL), ни API‑лимит просадки не могут достать до Binance, и позиция защищена только биржевым backstop. Потолок нотионала ограничивает возможную потерю в таком случае (~2% × cap ≈ $2.4).
+- Ёмкость цепочки при cap $120 (base ~$10): ~2 шага — base $10 → step0 ~$28 → step1 ~$120; step2 ~$187 уже режется (clamp). Для 3 шагов нужен cap ~$200.
+
+### 18.13 Нотионал live поднят до $200
+- Во всех live-конфигах `max_position_notional_usd: 200` (было 120).
+- Ёмкость цепочки: ~3 шага (base ~$10 → step0 ~$28 → step1 ~$120 → step2 ~$200; step3 ~$398 режется).
+- Потеря при сбое связи ограничена ~`2% × $200 ≈ $4` (вместо ~$8 без cap).
+
+### 18.14 Отключён notional cap; мягкая остановка доводит цепочку; прототип loss-cap backstop
+- Во всех live-конфигах `max_position_notional_usd: 0` (cap отключён). Причина: жёсткий $200 не давал реверс-ноге набрать объём для выхода в безубыток → цикл закрывался в минус (`chain TP leaves cycle negative ... capped=True`). Остаются потолки `available margin × leverage × 0.95` и биржевой bracket.
+- Мягкая остановка (Stop): блокируются только **новые независимые входы** (свои `bot/main.py` + relay `_relay_entry`); текущая reverse-цепочка **доводится штатно** (на SL открывается новая нога), бот выходит при флэте. Убраны оба блока форс-флэта (`REVERSE_SKIP`/`REVERSE_CHAIN_STOP` по `_stop_requested`).
+- API: `resetStaleRunningBots` помечает мёртвых ботов с `stop_requested=1` как остановленных и **не** поднимает их (`autoRestartBots` пропускает) — рестарт API больше не отменяет Stop (`artifacts/api-server/src/index.ts`, `routes/bots.ts`).
+- Бот: перед отменой фоновых задач ждём завершения `tick_task` (`SHUTDOWN_FINALIZE_GRACE_SEC`, 20с), чтобы не терять close-PATCH и не плодить фантомные `is_open=1` (`bot/main.py`).
+- Прототип loss-cap backstop (`REVERSE_LOSSCAP_ENABLED/PCT/REF_DEPOSIT_USD`): на каждом реверсе считается цена, при которой убыток ЦИКЛА = `pct%` реф-депозита, триггер клэмпится так, чтобы не оказаться раньше виртуального SL; логи `[LOSSCAP]` с `worst%`/`attainable`. `ENABLED=false` — только логи; `true` — ставит `STOP_MARKET closePosition` по расчётному триггеру (`bot/order_manager.py:cycle_loss_cap`, `bot/main.py`).
+
+### 18.15 Периодический авто-рестарт ботов + диагностика сети + ускорение старта API
+- **Периодический авто-рестарт** (`routes/bots.ts`, `index.ts`). Раньше боты поднимались только при старте API: упавший бот оставался выключенным до ручного Start. Появилось множество `desiredRunning`:
+  - `Start` и стартовый `autoRestartBots` добавляют символ в `desiredRunning`;
+  - `Stop` (мягкая остановка), `Kill`, `stop-all`, `DELETE` — **убирают** (осознанная остановка не отменяется);
+  - `restartDesiredBots()` раз в 30с поднимает только символы из `desiredRunning`, у которых умер процесс и которые `armed` и без `stop_requested`;
+  - троттлинг против цикла рестартов: кулдаун `AUTO_RESTART_DEAD_COOLDOWN_MS` (90с) и лимит `AUTO_RESTART_MAX_ATTEMPTS` (5) в окне `AUTO_RESTART_WINDOW_MS` (30 мин);
+  - уважает `AUTO_RESTART_BOTS` (в `.env.live` он `false` → на live авто-рестарт выключен по конфигурации).
+- **Диагностика сетевых сбоев** (`bot/order_manager.py`, `bot/market_data.py`): сообщения вида `[LIVE] Could not fetch position info:`, `[PRICE] REST ticker failed …`, `[WS] socket error …` печатали пустую строку (у части исключений `str()` пуст), из-за чего сбои связи было невозможно диагностировать. Теперь логируется `type(e).__name__: e!r`.
+- **Ускорение старта/рестарта API** (устранение O(n) вызовов PowerShell):
+  - `findBotPid` больше не запускает `Get-CimInstance Win32_Process` на каждый вызов — перебор процессов кэшируется на 3с (`getAllBotPidsCached`);
+  - `resetStaleRunningBots` делает **один** перебор процессов вместо перебора на каждого бота (было ≈4с × 40 ≈ 3 минуты простоя, из-за чего `app.listen` не открывался);
+  - интерпретатор python резолвится один раз и кэшируется в `cachedPythonCmd` (`hasDeps` = `execSync` с импортом `pandas`+`binance` больше не выполняется на каждый старт бота);
+  - если перебор процессов не удался (`tryFindAllBotPids` вернул `null`), stale-ресет пропускается, чтобы не пометить живых ботов остановленными.
+
+### 19. Исправления 2026-10-16 (Oracle live: сделки не открывались, боты не запускались)
+
+#### 19.1 `bot/cum_loss_cap.py` — отсутствовал метод `reset`
+- **Симптом:** Боты запускались, но при закрытии каждой свечи падали с `AttributeError: 'CumLossCap' object has no attribute 'reset'`. Торговля не шла, код exits code=1.
+- **Причина:** Метод `reset(symbol)` вызывался в `should_close` (строка 220) и `mark_chain_ended`, но не был объявлен в классе `CumLossCap`.
+- **Исправление:** Добавлен метод `reset(symbol)` в класс `CumLossCap` — сбрасывает `_ref`, `_initialized`, `_in_reverse_chain`, `_realized`, `_ts`, `_warn_ts` для указанного символа.
+
+#### 19.2 `artifacts/api-server/src/routes/trades.ts` — коррупция файла (unaired characters, сломанные строковые литералы)
+- **Симптом:** API-сервер не стартовал: `SyntaxError: Unterminated string literal` и `Unexpected ","` при парсинге `trades.ts`.
+- **Причина:** Файл скопировался с повреждёнными символами (пропущенные кавычки `return ";` вместо `return "";`), сломанные регулярные выражения `replace(//g, '')`, сломанный тип аннотации `Map<string, { ... }>`, сломанные `replace(/\\g, '')`.
+- **Исправление:** Файл заменён на исправленную версию с репозитория хоста.
+
+#### 19.3 `artifacts/api-server/src/botPaths.ts` — `configPath()` возвращал относительный путь
+- **Симптом:** Живые боты запускались процессами, но API-сервер в reconcile-цикле не находил их (`[reconcile] <symbol>: no live process — marked stopped`) и помечал остановленными.
+- **Причина:** `configPath()` возвращал относительный путь `configs/live/config_*.yaml`, а процесс запускался с абсолютным путём через `BOT_CONFIG_DIR`. Совпадение `cmd.includes(BOT_CONFIG_DIR)` не находилось.
+- **Исправление:** `configPath()` возвращает `path.join(BOT_CONFIG_DIR, configFileName(symbol))` — полный абсолютный путь, совпадающий с командой запуска процесса.
+
+#### 19.4 `docker-compose.yml` — отсутствовала переменная `BINANCE_TESTNET=false` для `api-live`
+- **Симптом:** Живые боты запускались, но сразу падали при попытке подключения к Binance.
+- **Причина:** В `docker-compose.yml` для `api-live` не было переменной `BINANCE_TESTNET`. Без неё бот не мог подключиться к live API Binance и выходил с ошибкой.
+- **Исправление:** Добавлена переменная `- BINANCE_TESTNET=false` в секцию `environment` сервиса `api-live`.
+
+#### 19.5 `botPaths.ts` — временное изменение `configPath` (отменено)
+- Во время отладки `configPath` временно возвращал относительный путь `path.join("configs", BOT_ENV, configFileName(symbol))`. Возвращено к absolue путю через `BOT_CONFIG_DIR`, так как иначе reconcile-цикл не находил процессы ботов.
+
+### Как запустить после деплоя
+
+```bash
+# SSH-туннель (в отдельном окне PowerShell)
+ssh oracle-bot
+
+# В браузере: http://localhost:5176 — Arm, затем Start у нужного бота
+
+# Или все боты разом через CLI:
+ssh oracle-bot "cd /opt/trading-bot && bash /tmp/start_all_bots.sh"
+
+# Проверить статус:
+ssh oracle-bot "cd /opt/trading-bot && docker compose ps api-live"
+ssh oracle-bot "cd /opt/trading-bot && curl -s http://localhost:5001/api/bots | tr ',' '\n' | grep -E 'is_running' | sort | uniq -c"
+```
+
+### 2026-10-23 (реверс-цепочка без преждевременного закрытия, jitter против банов, SYNC_RUNTIME)
+
+#### 23.1 `bot/main.py` — реверс-цепочка продолжается при отрицательном суммарном PnL
+- **Проблема:** при закрытии обратной ноги по TP1 цепочка завершалась даже если суммарный PnL цикла всё ещё отрицательный. Продолжение цепочки (открытие следующей ноги) срабатывало только при ударе по SL (`main.py:1916`). TP1 на обратной ноге с минусом приводил к закрытию цикла в убыток вместо перехода на следующую ногу.
+- **Исправление:** после `apply_hit_async("TP1")` для `is_reverse` позиции, если `pnl < 0` и `chain_step < chain_max`, бот открывает следующую ногу реверса (풀 copy логики `open_reverse_position` с `NET_REALIZED`, `net_position`, `unrealized`, `cycle_loss_cap` и backstop). Цепочка продолжается до тех пор, пока суммарный PnL не станет положительным или не достигнет `reverse_chain_max`.
+- **Дефолт `reverse_chain_max`:** `2 → 10` (`main.py:1923`), соответствует `config.py:99`. LTC имеет `reverse_chain_max: 100` в своём конфиге.
+
+#### 23.2 `bot/config.py` — `reverse_cum_loss_pct` выключен
+- `reverse_cum_loss_pct: 10.0 → 0.0` — кросс-кап убытка в 10% от депозита больше не прерывает reverse-цепочку раньше времени. Лимитом теперь является только `reverse_chain_max`.
+
+#### 23.3 `bot/position_tracker.py` — фикс двойного подсчёта `orig_leg_pnl`
+- При закрытии reverse-позиции с биржевыми данными (`exchange is not None`) `total_trade_pnl` уже включает обе ноги цикла (из `_exchange_cycle_summary`). Раньше к нему прибавлялся `orig_leg_pnl` — убыток первой ноги считался дважды, итоговый PnL занижался. Теперь `orig_leg_pnl` прибавляется только при fallback на локальный расчёт (`exchange is None`).
+
+#### 23.4 `bot/main.py` — jitter 0–60 с в `on_candle` против банов Binance -1003
+- Все 40 ботов теперь засыпают на случайное время после закрытия свечи перед обработкой `on_candle`. Это убирает синхронный всплеск REST-запросов klines в :00/:05/:10, который приводил к IP-бану Binance (код -1003, «banned until <ms>»). Баны прекратились.
+
+#### 23.5 `bot/main.py` — `SYNC_RUNTIME` в `periodic_position_check`
+- Если трекер пуст, но на бирже есть позиция (открыта вручную, предыдущим экземпляром бота или до перезапуска), бот подхватывает её в состояние: создаёт `Position` с направлением, entry, SL/TP из конфига, `reverse_chain_step=0`. Позиция появляется в дашборде и начинает торговаться нормально. Проверка работает раз в час в `periodic_position_check`.
+
+#### 23.6 `bot/recovery_config.yaml` / `.env.live` — `max_positions: 1`
+- Глобальный лимит открытых позиций — 1. Пока открыта хотя бы одна позиция (LTC или DOGE), новые входы для остальных монет блокируются сервером с причиной `max_positions positions=N`. Reverse-ноги к уже открытой позиции слот не ocupают.
+
+#### 23.7 Тесты и деплой
+- `cd bot && python -m pytest tests/` — `128 passed`, 0 упавших.
+- Контейнер `replit_scalper-api-testnet` перезапущен, 39 ботов работают с новым кодом.
+- Изменения скопированы на сервер в `/opt/trading-bot/bot/` (main.py, config.py, configs/testnet/config_ltc.yaml, recovery_config.yaml).

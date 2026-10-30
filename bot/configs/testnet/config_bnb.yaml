@@ -115,3 +115,6 @@ volume_multiplier: 1.5
 reverse_profit_pct: 0.5
 reverse_breakeven_pct: 1.5
 reverse_fee_buffer_pct: 0.1
+expired_after_minutes: 120
+max_positions: 1
+max_positions_with_expired: 3

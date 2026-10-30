@@ -965,6 +965,12 @@ export default function Dashboard() {
   const [restartAfterApply, setRestartAfterApply] = useState(true);
   const [restarting, setRestarting] = useState(false);
 
+  // Position limits (testnet only): apply to all bots
+  const [expiredMinutesAll, setExpiredMinutesAll] = useState("");
+  const [maxPositionsAll, setMaxPositionsAll] = useState("");
+  const [maxPositionsWithExpiredAll, setMaxPositionsWithExpiredAll] = useState("");
+  const [applyingLimits, setApplyingLimits] = useState(false);
+
   useEffect(() => {
     healthz().then(setApiUp);
     const id = setInterval(() => healthz().then(setApiUp), 5000);
@@ -1178,6 +1184,144 @@ export default function Dashboard() {
       (failed.length
         ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
         : `Готово: размер позиции ${pct}% задан всем ${targets.length} ботам.`) + restartInfo
+    );
+    await load();
+  };
+
+  /**
+   * Задать время протухания (expired_after_minutes) сразу ВСЕМ ботам.
+   */
+  const handleApplyExpiredMinutesToAll = async () => {
+    const raw = expiredMinutesAll.trim().replace(",", ".");
+    const minutes = Number(raw);
+    if (!raw || !Number.isFinite(minutes) || minutes < 0 || minutes > 10080) { // max 1 week
+      setNotice("Укажите корректное время в минутах (0 = выкл, например 120 для 2 часов).");
+      return;
+    }
+    const targets = bots.map(b => b.symbol);
+    if (targets.length === 0) {
+      setNotice("Нет ботов для обновления.");
+      return;
+    }
+    if (!confirm(
+      `Задать время протухания ${minutes} мин сразу ${targets.length} ботам?\n\n` +
+      "Позиция старше этого времени не занимает слот max_positions.\n\n" +
+      "Изменение запишется в БД и в config_*.yaml. Применится к новым позициям."
+    )) return;
+
+    setApplyingLimits(true);
+    setNotice(null);
+    const failed: string[] = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (symbol) => {
+        try {
+          await updateConfig(symbol, { expired_after_minutes: minutes });
+        } catch {
+          failed.push(symbol);
+        }
+      }));
+      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
+    }
+    setApplyingLimits(false);
+    setExpiredMinutesAll("");
+    setNotice(
+      failed.length
+        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
+        : `Готово: время протухания ${minutes} мин задано всем ${targets.length} ботам.`
+    );
+    await load();
+  };
+
+  /**
+   * Задать max_positions сразу ВСЕМ ботам.
+   */
+  const handleApplyMaxPositionsToAll = async () => {
+    const raw = maxPositionsAll.trim().replace(",", ".");
+    const maxPos = Number(raw);
+    if (!raw || !Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
+      setNotice("Укажите корректное число (0 = без лимита, например 1).");
+      return;
+    }
+    const targets = bots.map(b => b.symbol);
+    if (targets.length === 0) {
+      setNotice("Нет ботов для обновления.");
+      return;
+    }
+    if (!confirm(
+      `Задать max_positions = ${maxPos} сразу ${targets.length} ботам?\n\n` +
+      "Макс. одновременно открытых позиций (включая recovery). 0 = без лимита.\n\n" +
+      "Изменение запишется в БД и в config_*.yaml. Применится к новым позициям."
+    )) return;
+
+    setApplyingLimits(true);
+    setNotice(null);
+    const failed: string[] = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (symbol) => {
+        try {
+          await updateConfig(symbol, { max_positions: maxPos });
+        } catch {
+          failed.push(symbol);
+        }
+      }));
+      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
+    }
+    setApplyingLimits(false);
+    setMaxPositionsAll("");
+    setNotice(
+      failed.length
+        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
+        : `Готово: max_positions = ${maxPos} задано всем ${targets.length} ботам.`
+    );
+    await load();
+  };
+
+  /**
+   * Задать max_positions_with_expired сразу ВСЕМ ботам.
+   */
+  const handleApplyMaxPositionsWithExpiredToAll = async () => {
+    const raw = maxPositionsWithExpiredAll.trim().replace(",", ".");
+    const maxPos = Number(raw);
+    if (!raw || !Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
+      setNotice("Укажите корректное число (0 = без лимита, например 3).");
+      return;
+    }
+    const targets = bots.map(b => b.symbol);
+    if (targets.length === 0) {
+      setNotice("Нет ботов для обновления.");
+      return;
+    }
+    if (!confirm(
+      `Задать max_positions_with_expired = ${maxPos} сразу ${targets.length} ботам?\n\n` +
+      "Макс. открытых позиций включая протухшие. 0 = без лимита.\n\n" +
+      "Изменение запишется в БД и в config_*.yaml. Применится к новым позициям."
+    )) return;
+
+    setApplyingLimits(true);
+    setNotice(null);
+    const failed: string[] = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (symbol) => {
+        try {
+          await updateConfig(symbol, { max_positions_with_expired: maxPos });
+        } catch {
+          failed.push(symbol);
+        }
+      }));
+      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
+    }
+    setApplyingLimits(false);
+    setMaxPositionsWithExpiredAll("");
+    setNotice(
+      failed.length
+        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
+        : `Готово: max_positions_with_expired = ${maxPos} задано всем ${targets.length} ботам.`
     );
     await load();
   };
@@ -1399,6 +1543,87 @@ export default function Dashboard() {
                 />
                 перезапустить
               </label>
+            </div>
+          )}
+          {!IS_LIVE && (
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Время протухания позиции в минутах. Позиция старше этого времени не занимает слот max_positions. 0 = выкл. Применится к новым позициям.">
+                Протухание, мин · всем
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="10080"
+                placeholder="120"
+                value={expiredMinutesAll}
+                onChange={e => setExpiredMinutesAll(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") void handleApplyExpiredMinutesToAll(); }}
+                className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleApplyExpiredMinutesToAll}
+                disabled={applyingLimits}
+                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              >
+                {applyingLimits ? "Working..." : "Apply"}
+              </Button>
+            </div>
+          )}
+          {!IS_LIVE && (
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Макс. одновременно открытых позиций (включая recovery). 0 = без лимита. Применится к новым позициям.">
+                Max поз. · всем
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="50"
+                placeholder="1"
+                value={maxPositionsAll}
+                onChange={e => setMaxPositionsAll(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsToAll(); }}
+                className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleApplyMaxPositionsToAll}
+                disabled={applyingLimits}
+                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              >
+                {applyingLimits ? "Working..." : "Apply"}
+              </Button>
+            </div>
+          )}
+          {!IS_LIVE && (
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Макс. открытых позиций включая протухшие. 0 = без лимита. Применится к новым позициям.">
+                Max поз. + протух. · всем
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="50"
+                placeholder="3"
+                value={maxPositionsWithExpiredAll}
+                onChange={e => setMaxPositionsWithExpiredAll(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsWithExpiredToAll(); }}
+                className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleApplyMaxPositionsWithExpiredToAll}
+                disabled={applyingLimits}
+                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              >
+                {applyingLimits ? "Working..." : "Apply"}
+              </Button>
             </div>
           )}
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
