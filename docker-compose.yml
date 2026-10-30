@@ -181,6 +181,15 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
+      # Reverse step doubling (testnet-like): удваивание цели на каждом шаге цепочки.
+      - REVERSE_STEP_DOUBLING=true
+      # Binance rate-limit gate (shared with testnet via volume).
+      - BINANCE_GATE_ENABLED=1
+      - BINANCE_WEIGHT_LIMIT_1M=2400
+      - BINANCE_SHED_AT=0.75
+      - BINANCE_BAN_FALLBACK_SEC=30
+      # Игнорировать позиции старше N часов для max_positions.
+      - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
 
   dashboard-live:
     <<: *dashboard-base
