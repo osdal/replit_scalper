@@ -392,6 +392,7 @@ def _is_critical(method: str, uri: str, **kwargs) -> bool:
     - маржа /marginType, плечо /leverage, открытые ордера /openOrders
     - цена тикера /ticker/price
     - свечи /klines с limit >= 100 (параметр limit из kwargs, затем из URI)
+    - данные цикла: /userTrades, /myTrades, /income (нужны защитным проверкам)
 
     НЕ критичные (режутся при превышении веса): любые остальные запросы.
     """
@@ -401,7 +402,11 @@ def _is_critical(method: str, uri: str, **kwargs) -> bool:
         return True
 
     markers = ("ORDER", "ALGO", "POSITIONRISK", "/ACCOUNT", "EXCHANGEINFO",
-               "LEVERAGE", "OPENORDERS", "LISTENKEY", "MARGINTYPE", "TICKER/PRICE")
+               "LEVERAGE", "OPENORDERS", "LISTENKEY", "MARGINTYPE", "TICKER/PRICE",
+               # Данные цикла для защитных проверок (cum-loss cap, TP-recalc,
+               # EXPIRED). Без них shed обнуляет cycle-net и отключает защиту,
+               # а весят они копейки в сравнении с positionRisk.
+               "USERTRADES", "/INCOME", "/MYTRADES")
     if any(m in u for m in markers):
         return True
 

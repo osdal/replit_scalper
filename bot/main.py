@@ -122,9 +122,29 @@ _CUM_CAP_CLOSING: set = set()
 # ≈ −2.4 USDT). На тиках проверяем не чаще раза в N секунд (REST на позицию +
 # income history), на старте — сразу.
 _REVERSE_TP_RECALC_INTERVAL_SEC = float(
-    os.getenv("REVERSE_TP_RECALC_INTERVAL_SEC") or "300"
+    os.getenv("REVERSE_TP_RECALC_INTERVAL_SEC") or "420"
 )
+# Разброс интервала ±20% по символу: десятки ботов не должны пересчитывать TP
+# синхронно (общий IP-бюджет Binance), иначе получаем всплески positionRisk/income.
+_REVERSE_TP_RECALC_JITTER = 0.2
 _reverse_tp_recalc_ts: dict = {}
+_reverse_tp_recalc_interval: dict = {}
+
+
+def _reverse_tp_recalc_interval_for(symbol: str) -> float:
+    """Стабильный (не меняющийся от тика к тику) интервал TP-recalc для символа."""
+    cached = _reverse_tp_recalc_interval.get(symbol)
+    if cached is not None:
+        return cached
+    base = _REVERSE_TP_RECALC_INTERVAL_SEC
+    # crc32, а не hash(): hash() рандомизирован per-process (PYTHONHASHSEED).
+    bucket = (zlib.crc32(symbol.encode("utf-8")) % 1000) / 999.0  # 0..1
+    interval = base * (
+        1.0 - _REVERSE_TP_RECALC_JITTER
+        + 2.0 * _REVERSE_TP_RECALC_JITTER * bucket
+    )
+    _reverse_tp_recalc_interval[symbol] = interval
+    return interval
 
 # «Протухание» позиции: старше N часов она больше не занимает слот max_positions
 # (routes/trading.ts). Чтобы старые цепочки не копились и не грузили депозит,
@@ -4655,7 +4675,7 @@ async def _run_live_or_paper(
                     # пересчитываем, чтобы TP не закрыл цикл в минус ниже cap.
                     _now_mono = time.monotonic()
                     if (_now_mono - _reverse_tp_recalc_ts.get(cfg.symbol, 0.0)
-                            >= _REVERSE_TP_RECALC_INTERVAL_SEC):
+                            >= _reverse_tp_recalc_interval_for(cfg.symbol)):
                         _reverse_tp_recalc_ts[cfg.symbol] = _now_mono
                         try:
                             await _recalc_reverse_cycle_tp(

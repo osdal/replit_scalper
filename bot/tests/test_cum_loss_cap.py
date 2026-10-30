@@ -190,6 +190,26 @@ def test_realized_exception_returns_none(log, caplog):
     assert any("realized unavailable" in r.message for r in caplog.records)
 
 
+def test_realized_stale_fallback_keeps_cap_alive(log):
+    """Сбой филлов не отключает cap: берём последний net того же шага."""
+    cap, clk = make_cap(realized_stale_max_sec=900.0)
+    om = FakeOrderMgr(wallet=38.6)
+    tr = FakeTracker(net_realized=-1.4, step=3)
+    om.upnl = -0.1
+    s1 = run(cap.evaluate("X", om, tr, log))
+    assert s1 is not None and s1.realized_pnl == pytest.approx(-1.4)
+
+    # Биржа перестала отдавать userTrades; шаг тот же — cap работает на stale net.
+    tr.net_realized = None
+    clk.t += 60
+    s2 = run(cap.evaluate("X", om, tr, log))
+    assert s2 is not None and s2.realized_pnl == pytest.approx(-1.4)
+
+    # За пределами окна устаревания — снова None (не держим «вечный» net).
+    clk.t += 1000
+    assert run(cap.evaluate("X", om, tr, log)) is None
+
+
 def test_unrealized_unavailable_returns_none(log, caplog):
     cap, _ = make_cap()
     om = FakeOrderMgr()

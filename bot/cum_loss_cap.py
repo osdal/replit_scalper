@@ -72,6 +72,7 @@ class CumLossCap:
         interval_sec: float = 1.0,
         min_interval_sec: Optional[float] = None,
         realized_ttl_sec: float = 30.0,
+        realized_stale_max_sec: float = 900.0,
         warn_interval_sec: float = 60.0,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -80,6 +81,9 @@ class CumLossCap:
         floor = MIN_INTERVAL_SEC if min_interval_sec is None else float(min_interval_sec)
         self.interval_sec = max(float(interval_sec), floor)
         self.realized_ttl_sec = float(realized_ttl_sec)
+        # Сколько секунд допустимо использовать последний известный net, когда
+        # биржевые филлы недоступны (rate-limit/бан). Иначе cap молча отключится.
+        self.realized_stale_max_sec = max(float(realized_stale_max_sec), 0.0)
         self.warn_interval_sec = float(warn_interval_sec)
         self._clock = clock
         self._ref: dict[str, float] = {}           # fixed deposit per symbol (set once per chain)
@@ -115,12 +119,19 @@ class CumLossCap:
         """Проверка, активна ли реверс-цепочка для символа."""
         return self._in_reverse_chain.get(symbol, False)
 
-    def _warn(self, symbol: str, log, msg: str) -> None:
+    def _warn(
+        self,
+        symbol: str,
+        log,
+        msg: str,
+        *,
+        prefix: str = "cum-loss cap check skipped",
+    ) -> None:
         now = self._clock()
         if now - self._warn_ts.get(symbol, -1e18) < self.warn_interval_sec:
             return
         self._warn_ts[symbol] = now
-        log.warning(f"[REVERSE] cum-loss cap check skipped | symbol={symbol} {msg}")
+        log.warning(f"[REVERSE] {prefix} | symbol={symbol} {msg}")
 
     async def evaluate(
         self,
@@ -148,22 +159,43 @@ class CumLossCap:
             self._in_reverse_chain[symbol] = True
 
         # --- реализованный net цикла ---------------------------------------
+        stale_used = False
         if net_realized is None:
             cached = self._realized.get(symbol)
             if (not fresh and cached is not None and cached[0] == step
                     and now - cached[1] < self.realized_ttl_sec):
                 net_realized = cached[2]
             else:
+                failed = False
                 try:
                     net_realized, _, _ = await tracker.cycle_realized_net()
                 except Exception as e:  # noqa: BLE001
                     self._warn(symbol, log, f"realized unavailable: {e!r}")
-                    return None
-                if net_realized is None:
-                    self._warn(symbol, log, "realized unavailable (exchange fills)")
-                    return None
+                    failed = True
+                if failed or net_realized is None:
+                    # FAIL-SAFE: сбой биржевых филлов (rate-limit/бан) не должен
+                    # полностью отключать cum-loss cap. Берём последний net ТОГО
+                    # ЖЕ шага, если он не старше realized_stale_max_sec: слегка
+                    # устаревший реальный net лучше, чем незащищённый цикл.
+                    stale = self._realized.get(symbol)
+                    if (stale is not None and stale[0] == step
+                            and now - stale[1] <= self.realized_stale_max_sec):
+                        net_realized = stale[2]
+                        stale_used = True
+                        self._warn(
+                            symbol, log,
+                            f"realized unavailable — using stale net "
+                            f"{net_realized:+.4f} age={now - stale[1]:.0f}s",
+                            prefix="cum-loss cap degraded (stale net)",
+                        )
+                    else:
+                        self._warn(symbol, log, "realized unavailable (exchange fills)")
+                        return None
         net_realized = float(net_realized)
-        self._realized[symbol] = (step, now, net_realized)
+        # «Протухшее» значение не продлеваем: иначе оно навсегда останется
+        # «свежим» и cap застрянет на устаревшем net.
+        if not stale_used:
+            self._realized[symbol] = (step, now, net_realized)
 
         # --- плавающий результат -------------------------------------------
         if unrealized is None:

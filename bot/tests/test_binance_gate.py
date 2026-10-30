@@ -202,6 +202,10 @@ def test_is_critical():
     assert _is_critical("GET", "/fapi/v1/ticker/price") is True
     assert _is_critical("GET", "/fapi/v1/order") is True        # статус ордера
     assert _is_critical("POST", "/fapi/v1/marginType") is True
+    # Данные цикла нужны защите (cum-loss cap / TP-recalc / EXPIRED): не режутся.
+    assert _is_critical("GET", "/fapi/v1/userTrades") is True
+    assert _is_critical("GET", "/fapi/v1/income") is True
+    assert _is_critical("GET", "/fapi/v1/myTrades") is True
 
 
 # --------------------------------------------------------------------------- #

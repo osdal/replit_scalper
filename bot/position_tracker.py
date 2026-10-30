@@ -1400,11 +1400,63 @@ class PositionTracker:
             require_flat=False,
         )
         if summary is None:
-            return None, 0.0, 0.0
+            # FAIL-SAFE: userTrades недоступны (rate-limit/бан/сбой) — не
+            # блокируем защитные проверки (cum-loss cap, TP-recalc, EXPIRED).
+            # Пробуем ДРУГОЙ эндпоинт — income history через get_realized_pnl;
+            # он отдаёт net (realized − commission − funding), поэтому
+            # возвращаем его и как realized с нулевой комиссией (net корректен).
+            alt_net = await self._cycle_net_from_income(entry_ms)
+            if alt_net is None:
+                return None, 0.0, 0.0
+            return alt_net, alt_net, 0.0
         realized = float(summary.get("realized", 0.0) or 0.0)
         commission = float(summary.get("commission", 0.0) or 0.0)
         net_realized = float(summary.get("pnl", realized - commission) or 0.0)
         return net_realized, realized, commission
+
+    async def _cycle_net_from_income(self, entry_ms: int) -> Optional[float]:
+        """Net цикла по income history (fallback, когда userTrades недоступны).
+
+        Независимый от userTrades эндпоинт `/fapi/v1/income`. В отличие от
+        `OrderManager.get_realized_pnl` (limit=50, для одиночной сделки) читает
+        всю историю окна с пагинацией, чтобы длинная reverse-цепочка не
+        недоучла убыток. Возвращает None, если данных нет. Никогда не бросает.
+        """
+        client = getattr(self.order_mgr, "client", None) if self.order_mgr else None
+        if client is None or entry_ms is None or entry_ms <= 0:
+            return None
+        end_ms = int(time.time() * 1000)
+        totals = {"REALIZED_PNL": 0.0, "COMMISSION": 0.0, "FUNDING_FEE": 0.0}
+        got_any = False
+        try:
+            for itype in totals:
+                cursor = int(entry_ms)
+                while cursor <= end_ms:
+                    rows = await client.futures_income_history(
+                        symbol=self.cfg.symbol, incomeType=itype,
+                        startTime=cursor, endTime=end_ms, limit=1000,
+                    )
+                    if not rows:
+                        break
+                    got_any = True
+                    totals[itype] += sum(
+                        float(r.get("income") or 0) for r in rows
+                    )
+                    if len(rows) < 1000:
+                        break
+                    cursor = int(rows[-1].get("time") or 0) + 1
+                    if cursor <= int(entry_ms):
+                        break
+        except Exception as e:  # noqa: BLE001
+            self.log.debug(f"[REVERSE] cycle income fallback failed: {e!r}")
+            return None
+        if not got_any:
+            return None
+        # Binance: REALIZED_PNL — gross, COMMISSION/FUNDING_FEE — отрицательные,
+        # поэтому net = gross + commission + funding (как в get_realized_pnl).
+        return float(
+            totals["REALIZED_PNL"] + totals["COMMISSION"] + totals["FUNDING_FEE"]
+        )
 
     async def refinalize_cycle_after_flat(self, exit_reason: Optional[str] = None) -> bool:
         """Пере-финализирует строку trades по ПОЛНОМУ окну [вход цикла, флэт].
