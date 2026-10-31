@@ -53,6 +53,11 @@ interface Bot {
   max_position_pct_equity?: number;
   position_size_usd?: number;
   trade_mode?: string;
+  expired_after_minutes?: number;
+  max_positions?: number;
+  max_positions_with_expired?: number;
+  paper_balance?: number;
+  position_size_pct?: number;
 }
 
 // Причины самоостановки бота (пишет сам бот, API сбрасывает при следующем старте).
@@ -971,6 +976,20 @@ export default function Dashboard() {
   const [maxPositionsWithExpiredAll, setMaxPositionsWithExpiredAll] = useState("");
   const [applyingLimits, setApplyingLimits] = useState(false);
 
+  // Computed display values for "Apply to all" inputs — show most common value among bots
+  const getCommonValue = <T,>(bots: Bot[], key: keyof Bot, fallback: T): T => {
+    const values = bots.map(b => b[key]).filter((v): v is T => v != null);
+    if (values.length === 0) return fallback;
+    const counts = new Map<T, number>();
+    for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  };
+
+  const displayExpiredMinutes = getCommonValue(bots, "expired_after_minutes", 120);
+  const displayMaxPositions = getCommonValue(bots, "max_positions", 1);
+  const displayMaxPositionsWithExpired = getCommonValue(bots, "max_positions_with_expired", 3);
+  const displaySizePct = getCommonValue(bots, "position_size_pct", 1);
+
   useEffect(() => {
     healthz().then(setApiUp);
     const id = setInterval(() => healthz().then(setApiUp), 5000);
@@ -1494,7 +1513,7 @@ export default function Dashboard() {
             )}
 
          </div>
-        <div className="flex gap-2 items-start">
+        <div className="flex flex-wrap gap-2 items-start">
           <Button
             variant="outline"
             size="sm"
@@ -1515,8 +1534,8 @@ export default function Dashboard() {
                 type="number"
                 step="0.1"
                 min="0"
-                placeholder="0.4"
-                value={sizePctAll}
+                placeholder={String(displaySizePct)}
+                value={sizePctAll || String(displaySizePct)}
                 onChange={e => setSizePctAll(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") void handleApplySizeToAll(); }}
                 className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
@@ -1555,8 +1574,8 @@ export default function Dashboard() {
                 step="1"
                 min="0"
                 max="10080"
-                placeholder="120"
-                value={expiredMinutesAll}
+                placeholder={String(displayExpiredMinutes)}
+                value={expiredMinutesAll || String(displayExpiredMinutes)}
                 onChange={e => setExpiredMinutesAll(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") void handleApplyExpiredMinutesToAll(); }}
                 className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
@@ -1582,8 +1601,8 @@ export default function Dashboard() {
                 step="1"
                 min="0"
                 max="50"
-                placeholder="1"
-                value={maxPositionsAll}
+                placeholder={String(displayMaxPositions)}
+                value={maxPositionsAll || String(displayMaxPositions)}
                 onChange={e => setMaxPositionsAll(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsToAll(); }}
                 className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
@@ -1609,8 +1628,8 @@ export default function Dashboard() {
                 step="1"
                 min="0"
                 max="50"
-                placeholder="3"
-                value={maxPositionsWithExpiredAll}
+                placeholder={String(displayMaxPositionsWithExpired)}
+                value={maxPositionsWithExpiredAll || String(displayMaxPositionsWithExpired)}
                 onChange={e => setMaxPositionsWithExpiredAll(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsWithExpiredToAll(); }}
                 className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
