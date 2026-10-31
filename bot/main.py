@@ -29,7 +29,7 @@ from strategy import calculate_indicators, calculate_htf_indicators, get_all_sig
 from preset_config import get_preset_config
 from signal_handler import SignalHandler
 from order_manager import OrderManager
-from cum_loss_cap import CumLossCap
+from cum_loss_cap import CumLossCap, CapSnapshot
 from position_tracker import PositionTracker, Position, _to_epoch_ms
 from binance_gate import AccountGate, wrap_client
 from backtester import run_backtest
@@ -76,6 +76,30 @@ MARKETABLE_LIMIT_OFFSET_PCT = 0.05
 # Дедлайны grace-ожидания TP-лимита обратной ноги (per cycle), чтобы не
 # блокировать tick-цикл sleep-loop'ом: филл ждём по тикам.
 _REVERSE_TP_DEADLINES: dict = {}
+
+# Бюджет ПОВТОРНЫХ перестановок TP-лимита (когда рабочий TP пропал, а позиция
+# открыта). Без него шторм -2022: каждую секунду _place_tp_limit заново получал
+# отказ биржи (reduceOnly при живом closePosition), fallback тоже пропускался —
+# и цикл повторялся, выжигая weight до IP-бана (16 тыс. -2022 за сутки).
+# key = "symbol:direction:tp" → список моментов попыток в окне.
+_TP_REPLACE_MAX = int(os.getenv("TP_REPLACE_MAX_ATTEMPTS") or "2")
+_TP_REPLACE_WINDOW_SEC = float(os.getenv("TP_REPLACE_WINDOW_SEC") or "60")
+_TP_REPLACE_TS: dict = {}
+
+
+def _tp_replace_budget_ok(key: str) -> bool:
+    """Разрешена ли ещё одна перестановка TP в текущем окне (иначе — market)."""
+    now = time.time()
+    attempts = [
+        t for t in _TP_REPLACE_TS.get(key, [])
+        if now - t < _TP_REPLACE_WINDOW_SEC
+    ]
+    if len(attempts) >= max(1, _TP_REPLACE_MAX):
+        _TP_REPLACE_TS[key] = attempts
+        return False
+    attempts.append(now)
+    _TP_REPLACE_TS[key] = attempts
+    return True
 
 # Сколько раз подряд и как долго разрешено пытаться открыть reverse-ногу в одном
 # цикле, прежде чем прекратить ретраи и принудительно закрыть цикл. Нужно, чтобы
@@ -1337,24 +1361,38 @@ async def _cap_after_unclosed_sl(
         return False
 
 
-async def _expired_cycle_profit_snapshot(symbol, order_mgr, tracker, log):
-    """Снимок цикла, если «протухшую» позицию пора закрыть в минимальный плюс.
+async def _expired_cycle_profit_snapshot(
+    symbol, order_mgr, tracker, log, current_price: float = 0.0,
+):
+    """Снимок позиции, если «протухшую» позицию пора закрыть в минимальный плюс.
 
-    Правило: позиция, открытая дольше `MAX_POSITIONS_IGNORE_AFTER_HOURS`, больше
-    не занимает слот `max_positions` — значит её нельзя держать «до своего TP»
-    бесконечно, иначе старые цепочки копятся и грузят депозит. Как только
-    суммарный net цикла (реализованный по закрытым ногам + плавающий) покрывает
-    комиссию выхода и минимальный плюс — закрываем рынком, не дожидаясь TP.
+    Правило: позиция, открытая дольше `cfg.expired_after_minutes` (fallback —
+    `MAX_POSITIONS_IGNORE_AFTER_HOURS`), больше не занимает слот max_positions
+    (но занимает max_positions_with_expired) — значит её нельзя держать «до
+    своего TP» бесконечно, иначе старые цепочки копятся и грузят депозит. Как
+    только результат покрывает комиссию выхода и минимальный плюс — закрываем
+    рынком, не дожидаясь TP.
+
+    Работает для ЛЮБОЙ позиции: для reverse-цепочки net считается по всем ногам
+    (`_CUM_CAP.evaluate`), для обычной (не-reverse) реализованных ног нет —
+    плавающий результат берётся от `current_price`.
 
     Возвращает `CapSnapshot` (net >= порога), иначе None: фича выключена,
-    позиция не reverse/live, цикл ещё молодой, не хватает данных или net ниже
-    порога. Троттлинг — `EXPIRED_CLOSE_INTERVAL_SEC`, чтобы не дёргать REST
-    каждую секунду.
+    позиция не live, цикл ещё молодой, не хватает данных или net ниже порога.
+    Троттлинг — `EXPIRED_CLOSE_INTERVAL_SEC`, чтобы не дёргать REST каждую секунду.
     """
-    if _EXPIRED_CLOSE_HOURS <= 0:
+    # Срок протухания: per-bot минуты из конфига, иначе общий env-часы.
+    expired_h = _EXPIRED_CLOSE_HOURS
+    try:
+        cfg_minutes = float(getattr(order_mgr.cfg, "expired_after_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        cfg_minutes = 0.0
+    if cfg_minutes > 0:
+        expired_h = cfg_minutes / 60.0
+    if expired_h <= 0:
         return None
     pos = tracker.position
-    if pos is None or not getattr(pos, "is_reverse", False):
+    if pos is None:
         return None
     if (getattr(pos, "mode", None) or order_mgr.cfg.mode) != "live":
         return None
@@ -1372,11 +1410,35 @@ async def _expired_cycle_profit_snapshot(symbol, order_mgr, tracker, log):
     if entry_ms <= 0:
         return None
     age_h = (time.time() * 1000 - entry_ms) / 3_600_000.0
-    if age_h < _EXPIRED_CLOSE_HOURS:
+    if age_h < expired_h:
         return None
-    snap = await _CUM_CAP.evaluate(symbol, order_mgr, tracker, log)
-    if snap is None:
-        return None
+
+    is_reverse = bool(getattr(pos, "is_reverse", False))
+    if is_reverse:
+        snap = await _CUM_CAP.evaluate(symbol, order_mgr, tracker, log)
+        if snap is None:
+            return None
+    else:
+        # Обычная позиция: realized по закрытым ногам отсутствует, плавающий
+        # результат считаем от текущей цены (без лишнего REST по филлам).
+        px = float(current_price or 0.0)
+        if px <= 0:
+            try:
+                px = float(get_price_snapshot().get("last_price", 0.0) or 0.0)
+            except Exception:
+                px = 0.0
+        entry = float(pos.entry_price or 0.0)
+        qty = abs(float(pos.remaining_qty or 0.0))
+        if px <= 0 or entry <= 0 or qty <= 0:
+            return None
+        sign = 1.0 if str(pos.direction).upper() == "LONG" else -1.0
+        snap = CapSnapshot(
+            realized_pnl=0.0,
+            unrealized_pnl=(px - entry) * qty * sign,
+            ref=0.0,
+            pct=0.0,
+            threshold=0.0,
+        )
     # Порог = комиссия выхода рынком + минимальный плюс. Unrealized с биржи
     # комиссию выхода НЕ учитывает, поэтому без неё «плюс» после закрытия
     # превратился бы в минус на размер тейкера.
@@ -1387,8 +1449,9 @@ async def _expired_cycle_profit_snapshot(symbol, order_mgr, tracker, log):
     if snap.total_pnl < required:
         return None
     log.warning(
-        f"[EXPIRED] cycle in profit after {age_h:.1f}h — closing without waiting TP | "
-        f"symbol={symbol} net={snap.total_pnl:+.4f} required={required:.4f} "
+        f"[EXPIRED] position in profit after {age_h:.1f}h — closing without waiting TP | "
+        f"symbol={symbol} reverse={is_reverse} net={snap.total_pnl:+.4f} "
+        f"required={required:.4f} "
         f"(exit_fee={exit_fee:.4f} min_profit={max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD):.4f}) "
         f"realized={snap.realized_pnl:+.4f} unrealized={snap.unrealized_pnl:+.4f}"
     )
@@ -2070,15 +2133,18 @@ async def _run_live_or_paper(
         is_live_close = (pos_mode == "live")
         is_live = (pos_mode == "live")
 
-        async def _force_flat_after_reverse(direction: str, closed_by: str = "market") -> None:
+        async def _force_flat_after_reverse(
+            direction: str, closed_by: str = "market", label: Optional[str] = None,
+        ) -> None:
             """После закрытия reverse-ноги добиваем биржевой остаток выше пыли и
             сбрасываем трекер в плоское состояние (total_qty/remaining_qty не
             должны оставаться рассинхронизированными).
 
             closed_by — подтверждённая причина закрытия ("tp"/"backstop"/
             "market"), используется как fallback-метка, если классификатор
-            ещё не выставил _last_reverse_reason. Добивание остатка рынком —
-            это bot-initiated market, т.е. REVERSE_MARKET."""
+            ещё не выставил _last_reverse_reason. label — явная метка
+            exit_reason для не-reverse закрытий (EXPIRED_CLOSE). Добивание
+            остатка рынком — это bot-initiated market, т.е. REVERSE_MARKET."""
             if not is_live_close:
                 return
             try:
@@ -2152,7 +2218,7 @@ async def _run_live_or_paper(
             # Остаток reverse-ноги мог добраться рынком уже ПОСЛЕ снимка
             # _exchange_cycle_summary в момент детекта TP — пересчитываем строку
             # по полному окну [вход, флэт], сохраняя текущую reverse-метку.
-            reason = getattr(tracker, "_last_reverse_reason", None)
+            reason = label or getattr(tracker, "_last_reverse_reason", None)
             if not reason:
                 reason = _REVERSE_CLOSED_BY_REASON.get(closed_by, "REVERSE_MARKET")
             await tracker.refinalize_cycle_after_flat(reason)
@@ -2273,12 +2339,15 @@ async def _run_live_or_paper(
                 if preset_before and tracker.position is None:
                     _on_position_closed(preset_before)
                 label = (
-                    "REVERSE_EXPIRED_PROFIT"
+                    (
+                        "REVERSE_EXPIRED_PROFIT"
+                        if getattr(leg, "is_reverse", False) else "EXPIRED_CLOSE"
+                    )
                     if exit_reason == "expired_profit"
                     else "REVERSE_CUM_LOSS_CAP"
                 )
                 if is_live_close:
-                    await _force_flat_after_reverse(direction, exit_reason)
+                    await _force_flat_after_reverse(direction, exit_reason, label=label)
                 else:
                     await tracker.refinalize_cycle_after_flat(label)
                 events.warning(
@@ -4559,8 +4628,13 @@ async def _run_live_or_paper(
             if 0.0 <= real_qty < DUST_QTY:
                 return "tp", last_px
             # Лимита нет, а позиция ещё открыта: переставляем TP-лимит вместо
-            # агрессивного закрытия по рынку (снижает долю REVERSE_MARKET).
-            if real_qty >= DUST_QTY and target_px and target_px > 0:
+            # агрессивного закрытия по рынку (снижает долю REVERSE_MARKET), но
+            # не бесконечно: после исчерпания бюджета (2 попытки / 60 с на
+            # symbol:direction:tp) уходим в marketable/market. Это устраняет
+            # шторм -2022, когда TP не ставится, а ретрай идёт каждую секунду.
+            _replace_key = f"{cfg.symbol}:{direction}:{target_px}"
+            if real_qty >= DUST_QTY and target_px and target_px > 0 \
+                    and _tp_replace_budget_ok(_replace_key):
                 try:
                     await order_mgr._place_tp_limit(direction, target_px, real_qty)
                     _REVERSE_TP_DEADLINES[_deadline_key] = time.time() + REVERSE_TP_GRACE_SEC
@@ -4572,6 +4646,12 @@ async def _run_live_or_paper(
                     return None, 0.0
                 except Exception as e:
                     log.warning(f"[TP_CLOSE] re-place TP failed: {e}")
+            elif real_qty >= DUST_QTY and target_px and target_px > 0:
+                log.warning(
+                    f"[TP_CLOSE] TP re-place budget exhausted "
+                    f"({_TP_REPLACE_MAX}/{int(_TP_REPLACE_WINDOW_SEC)}s) | "
+                    f"dir={direction} tp={target_px} — going aggressive"
+                )
             log.info(
                 f"[TP_CLOSE] resting TP limit missing | dir={direction} "
                 f"real_qty={real_qty} tp={target_px} — going aggressive"
@@ -4693,13 +4773,14 @@ async def _run_live_or_paper(
                             "CUM_LOSS_CAP", current_price, int(time.time() * 1000)
                         )
                         continue
-                if not hit and tracker.position is not None \
-                        and getattr(tracker.position, "is_reverse", False):
+                if not hit and tracker.position is not None:
                     # «Протухшая» позиция не должна висеть до своего TP: как только
-                    # цикл (все ноги) выходит в минимальный плюс — закрываем рынком.
-                    # Проверка внутри троттлится EXPIRED_CLOSE_INTERVAL_SEC.
+                    # она выходит в минимальный плюс — закрываем рынком. Работает и
+                    # для reverse-цепочки, и для обычной позиции (раньше только
+                    # reverse, из-за чего ATOM висел 72 ч в +4%). Проверка внутри
+                    # троттлится EXPIRED_CLOSE_INTERVAL_SEC.
                     if await _expired_cycle_profit_snapshot(
-                        cfg.symbol, order_mgr, tracker, log
+                        cfg.symbol, order_mgr, tracker, log, current_price
                     ) is not None:
                         await process_hit(
                             "EXPIRED_PROFIT", current_price, int(time.time() * 1000)

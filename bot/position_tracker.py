@@ -998,7 +998,11 @@ class PositionTracker:
         # прежняя семантика (SL/TP1/TP2 из apply_hit либо сам hit).
         exit_reason = (
             self._classify_reverse_exit(p_before, close_price, hit, closed_by=closed_by)
-            if is_reverse else (exit_reason_override or hit)
+            if is_reverse
+            else (
+                "EXPIRED_CLOSE" if closed_by == "expired_profit"
+                else (exit_reason_override or hit)
+            )
         )
         if is_reverse:
             self._last_reverse_reason = exit_reason

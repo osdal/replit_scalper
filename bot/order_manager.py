@@ -589,13 +589,27 @@ class OrderManager:
         cache = self._balance_cache
         if (cache.get("free") is not None and cache["mode"] == mode
                 and (now - cache["ts"]) < BALANCE_CACHE_TTL_SEC):
-            return float(cache["free"])
+            free = float(cache["free"])
+        else:
+            # Освежаем через get_balance: он заполняет и value, и free.
+            await self.get_balance(mode)
+            if cache.get("free") is not None and cache["mode"] == mode:
+                free = float(cache["free"])
+            else:
+                free = 0.0
 
-        # Освежаем через get_balance: он заполняет и value, и free.
-        await self.get_balance(mode)
-        if cache.get("free") is not None and cache["mode"] == mode:
-            return float(cache["free"])
-        return 0.0
+        # Testnet: availableBalance тестовой биржи (~$100) не отражает бумажный
+        # депозит. Ограничиваем его paper_balance, иначе position_size_pct на
+        # тестнете считается от $100 и вместо «$10-режима» даёт $40 нотионала.
+        # Без этой поправки тестнёт не может проверить поведение live на $10.
+        if BOT_ENV == "testnet":
+            try:
+                paper = float(self.cfg.paper_balance or 0.0)
+            except (TypeError, ValueError):
+                paper = 0.0
+            if paper > 0:
+                free = min(free, paper)
+        return free
 
     # ------------------------------------------------------------------ #
     #  Cancel helpers                                                      #
@@ -1900,34 +1914,40 @@ class OrderManager:
                 pct = 0.0
             if pct > 0:
                 pct_free_balance = await self.get_free_balance(mode)
-                if pct_free_balance > 0:
-                    margin = pct_free_balance * pct / 100
-                    # Нижний порог нотионала: процент от малого свободного депозита
-                    # не должен уходить ниже MIN_NOTIONAL биржи, иначе ордер отклонят.
-                    min_notional = await self._get_min_notional_usd()
-                    min_margin = (min_notional / self.cfg.leverage) if min_notional > 0 else 0.0
-                    if min_margin > 0 and margin < min_margin:
-                        if min_margin <= pct_free_balance:
-                            margin = math.ceil(min_margin * 100) / 100
-                            self.log.info(
-                                f"[LIVE] position_size_pct below minNotional "
-                                f"(floor=${min_notional:.2f}) — margin bumped to ${margin:.2f}"
-                            )
-                        else:
-                            self.log.warning(
-                                f"[LIVE] position_size_pct below minNotional "
-                                f"(floor=${min_notional:.2f}) and free balance "
-                                f"${pct_free_balance:.2f} too low — fallback to legacy sizing"
-                            )
-                            margin = 0.0
-                    else:
-                        margin = round(margin, 2)
-                    pct_margin = margin if margin > 0 else 0.0
-                else:
+                if pct_free_balance <= 0:
+                    # FAIL-CLOSED: размер задан, но базы для расчёта нет.
+                    # Раньше здесь был «fallback to legacy sizing», и на live это
+                    # давало непредсказуемый нотионал (например $20 вместо $5).
                     self.log.warning(
-                        "[LIVE] position_size_pct set but free balance unavailable — "
-                        "fallback to legacy sizing"
+                        "[LIVE] position_size_pct set but free balance unavailable "
+                        f"(${pct_free_balance:.2f}) — skipping entry (fail-closed)"
                     )
+                    return None
+                margin = pct_free_balance * pct / 100
+                # Нижний порог нотионала: процент от малого свободного депозита
+                # не должен уходить ниже MIN_NOTIONAL биржи, иначе ордер отклонят.
+                min_notional = await self._get_min_notional_usd()
+                min_margin = (min_notional / self.cfg.leverage) if min_notional > 0 else 0.0
+                if min_margin > 0 and margin < min_margin:
+                    if min_margin <= pct_free_balance:
+                        margin = math.ceil(min_margin * 100) / 100
+                        self.log.info(
+                            f"[LIVE] position_size_pct below minNotional "
+                            f"(floor=${min_notional:.2f}) — margin bumped to ${margin:.2f}"
+                        )
+                    else:
+                        # FAIL-CLOSED: даже минимальный лот не покрывается
+                        # свободной маржой — вход не открываем (раньше уходили
+                        # в legacy sizing и получали ордер, который биржа отклонит).
+                        self.log.warning(
+                            f"[LIVE] position_size_pct below minNotional "
+                            f"(floor=${min_notional:.2f}) and free balance "
+                            f"${pct_free_balance:.2f} too low — skipping entry (fail-closed)"
+                        )
+                        return None
+                else:
+                    margin = round(margin, 2)
+                pct_margin = margin if margin > 0 else 0.0
 
         if is_recovery:
             # Recovery FIRST — must size to cover debt, ignore fixed sizing
@@ -2012,6 +2032,7 @@ class OrderManager:
                     leverage=self.cfg.leverage,
                 )
         # Потолок нотионала (конфиг / % от equity с нереализованным PnL / брекет биржи).
+        cap_usd = 0.0
         if mode == "live" and raw_qty > 0 and signal.entry_price > 0:
             cap_usd = await self._notional_cap_usd()
             if cap_usd > 0:
@@ -2023,6 +2044,51 @@ class OrderManager:
                     )
                     raw_qty = max_qty_cap
         qty = await self._adjust_qty(raw_qty, mode=mode)
+
+        # minNotional: (a) биржевой минимум должен влезать в наш потолок нотионала,
+        # иначе символ торговать нельзя (BTCUSDT: minNotional $50 при cap $50 —
+        # каждая позиция была бы на грани и получала -4164/-2022); (b) если
+        # расчётный объём ниже минимума, поднимаем qty ровно до допустимого.
+        if mode == "live" and qty > 0 and signal.entry_price > 0:
+            min_notional = await self._get_min_notional_usd()
+            entry_px = float(signal.entry_price)
+            if min_notional > 0:
+                if cap_usd > 0 and min_notional >= cap_usd:
+                    self.log.warning(
+                        f"[CAP] minNotional ${min_notional:.2f} >= notional cap "
+                        f"${cap_usd:.2f} — symbol is not tradable at this size, "
+                        f"skipping entry"
+                    )
+                    return None
+                if qty * entry_px < min_notional:
+                    need = min_notional / entry_px
+                    try:
+                        step = float(self._step_size or 0.0)
+                    except (TypeError, ValueError):
+                        step = 0.0
+                    if step > 0:
+                        need = math.ceil(need / step) * step
+                    bumped_qty = await self._adjust_qty(need, mode=mode)
+                    bumped_notional = bumped_qty * entry_px
+                    if bumped_qty <= 0 or bumped_notional < min_notional:
+                        self.log.warning(
+                            f"[LIVE] cannot reach minNotional ${min_notional:.2f} | "
+                            f"qty={bumped_qty} notional≈${bumped_notional:.4f} — "
+                            f"skipping entry"
+                        )
+                        return None
+                    if cap_usd > 0 and bumped_notional > cap_usd * 1.0001:
+                        self.log.warning(
+                            f"[LIVE] minNotional bump exceeds notional cap | "
+                            f"qty={bumped_qty} notional≈${bumped_notional:.2f} > "
+                            f"cap=${cap_usd:.2f} — skipping entry"
+                        )
+                        return None
+                    self.log.info(
+                        f"[LIVE] qty raised to minNotional | {qty} -> {bumped_qty} "
+                        f"notional≈${bumped_notional:.2f} minNotional=${min_notional:.2f}"
+                    )
+                    qty = bumped_qty
 
         if qty > 0 and sl_distance > 0:
             self.log.info(

@@ -22,6 +22,8 @@
  *    мьютекс на promise-цепочке даёт настоящую атомарность.
  */
 
+export type SlotDenyReason = "max_positions" | "max_positions_with_expired";
+
 export interface SlotResult {
   allowed: boolean;
   /** Символ уже занимает слот (открытая позиция или собственный резерв). */
@@ -32,6 +34,22 @@ export interface SlotResult {
   occupied: number;
   /** Из них — резервы, которых ещё нет в БД. */
   reserved: number;
+  /** Причина отказа (только при allowed=false). */
+  reason?: SlotDenyReason;
+  /** Открытых позиций с учётом «протухших» (если передан total-лимит). */
+  totalOccupied?: number;
+}
+
+/**
+ * Второй (жёсткий) лимит: все открытые позиции, включая «протухшие» (старше
+ * expired_after_minutes). Протухшие не занимают обычный слот max_positions, но
+ * копиться бесконечно не должны: флот не может держать больше N позиций всего.
+ */
+export interface SlotTotalLimit {
+  /** 0 = без лимита. */
+  max: number;
+  /** Свежий список ВСЕХ открытых символов (без окна протухания). */
+  load: () => Promise<Iterable<string>>;
 }
 
 interface Reservation {
@@ -77,21 +95,30 @@ export class SlotReservations {
   /**
    * Проверить лимит и (при reserve=true) занять слот под одной блокировкой.
    * loadOccupied — свежий список символов, реально занимающих слот (БД [+ биржа]).
+   * total — жёсткий лимит всех открытых, включая «протухшие» (max_positions_with_expired).
    */
   check(
     symbol: string,
     max: number,
     loadOccupied: () => Promise<Iterable<string>>,
     reserve: boolean,
+    total?: SlotTotalLimit,
   ): Promise<SlotResult> {
     return this.exclusive(async () => {
       const occupiedSet = new Set(await loadOccupied());
+      const totalSet = total ? new Set(await total.load()) : null;
       this.prune(occupiedSet);
       const reservedCount = this.res.size;
       const occupied = occupiedSet.size + reservedCount;
+      // Все открытые (включая протухшие) + живые резервы, без двойного счёта.
+      const totalOpen = totalSet
+        ? new Set<string>([...totalSet, ...this.res.keys()]).size
+        : undefined;
 
       const mine = this.res.get(symbol);
-      if (occupiedSet.has(symbol) || mine) {
+      // own — символ уже занимает позицию: обычная открытая, «протухшая» или
+      // свой резерв. Добор reverse-ноги в существующую цепочку не блокируем.
+      if (occupiedSet.has(symbol) || mine || (totalSet?.has(symbol) ?? false)) {
         if (mine) mine.expiresAt = this.now() + this.ttlMs; // повторный запрос — продлеваем
         return {
           allowed: true,
@@ -99,15 +126,31 @@ export class SlotReservations {
           reservationId: mine ? mine.id : null,
           occupied,
           reserved: reservedCount,
+          totalOccupied: totalOpen,
         };
       }
 
       if (occupied >= max) {
-        return { allowed: false, own: false, reservationId: null, occupied, reserved: reservedCount };
+        return {
+          allowed: false, own: false, reservationId: null,
+          occupied, reserved: reservedCount,
+          reason: "max_positions", totalOccupied: totalOpen,
+        };
+      }
+
+      if (total && total.max > 0 && totalOpen !== undefined && totalOpen >= total.max) {
+        return {
+          allowed: false, own: false, reservationId: null,
+          occupied, reserved: reservedCount,
+          reason: "max_positions_with_expired", totalOccupied: totalOpen,
+        };
       }
 
       if (!reserve) {
-        return { allowed: true, own: false, reservationId: null, occupied, reserved: reservedCount };
+        return {
+          allowed: true, own: false, reservationId: null,
+          occupied, reserved: reservedCount, totalOccupied: totalOpen,
+        };
       }
 
       const t = this.now();
@@ -119,6 +162,7 @@ export class SlotReservations {
         reservationId: id,
         occupied: occupied + 1,
         reserved: reservedCount + 1,
+        totalOccupied: totalOpen !== undefined ? totalOpen + 1 : undefined,
       };
     });
   }

@@ -219,26 +219,47 @@ async function getFreeDebt(): Promise<number> {
  */
 router.post("/check", async (req, res) => {
   try {
-    const cfg = readConfig();
+    const globalCfg = readConfig();
     const control = await getControlRow();
     const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+
+    // Per-bot лимиты из БД (fallback — глобальный yaml/env). Так дашборд может
+    // задать max_positions / max_positions_with_expired / expired_after_minutes
+    // индивидуально, без перезапуска контейнера.
+    let botMaxPositions = globalCfg.max_positions;
+    let botMaxWithExpired = 0;
+    let botIgnoreAfterHours = globalCfg.max_positions_ignore_after_hours;
+    if (symbol) {
+      const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
+      if (bot) {
+        if (bot.max_positions != null && bot.max_positions > 0) botMaxPositions = bot.max_positions;
+        if (bot.max_positions_with_expired != null && bot.max_positions_with_expired > 0) {
+          botMaxWithExpired = bot.max_positions_with_expired;
+        }
+        if (bot.expired_after_minutes != null && bot.expired_after_minutes >= 0) {
+          // Convert minutes to hours for server logic
+          botIgnoreAfterHours = Math.max(0, Math.round(bot.expired_after_minutes / 60));
+        }
+      }
+    }
+
     // reserve=true — занять слот атомарно (вызывается ботом непосредственно перед
     // ордером). Без флага запрос «информационный» и ничего не занимает.
     const wantReserve = req.body?.reserve === true && symbol !== "";
     const { occupied: positions } = await slots.inspect(
-      () => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours),
+      () => loadOccupiedSymbols(botIgnoreAfterHours),
     );
     const daily_loss = await getDailyLoss();
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
-    const reset = await autoResetStale(control, cfg.pause_timeout_minutes);
+    const reset = await autoResetStale(control, globalCfg.pause_timeout_minutes);
     if (reset) {
       control.loss_streak = 0;
       control.paused_remaining = 0;
     }
 
     // Дневной лимит убытков — жёсткая остановка на день.
-    if (cfg.daily_loss_limit_usd > 0 && daily_loss >= cfg.daily_loss_limit_usd) {
+    if (globalCfg.daily_loss_limit_usd > 0 && daily_loss >= globalCfg.daily_loss_limit_usd) {
       return res.json({
         allowed: false,
         reason: "daily_loss_limit",
@@ -268,11 +289,17 @@ router.post("/check", async (req, res) => {
     // иначе синхронные сигналы многих ботов видят один и тот же счётчик (race).
     // Символ, который уже занимает слот (открытая позиция/резерв), лимитом не
     // блокируется — это добор reverse-ноги в уже открытую цепочку, а не новая позиция.
+    // Второй лимит (max_positions_with_expired) считает ВСЕ открытые позиции, без
+    // окна протухания: старые цепочки не могут копиться бесконечно.
     let slot = await slots.check(
       symbol,
-      cfg.max_positions,
-      () => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours),
+      botMaxPositions,
+      () => loadOccupiedSymbols(botIgnoreAfterHours),
       wantReserve,
+      {
+        max: botMaxWithExpired,
+        load: () => dbOpenSymbols(0),
+      },
     );
     // «Протухшая» позиция (старше max_positions_ignore_after_hours) исключена из
     // occupied и потому не опознаётся как own по БД. Из-за этого следующая
@@ -288,10 +315,12 @@ router.post("/check", async (req, res) => {
     if (!slot.allowed) {
       return res.json({
         allowed: false,
-        reason: "max_positions",
+        reason: slot.reason ?? "max_positions",
         positions_open: slot.occupied,
         positions_reserved: slot.reserved,
-        max_positions: cfg.max_positions,
+        max_positions: botMaxPositions,
+        max_positions_with_expired: botMaxWithExpired,
+        total_open: slot.totalOccupied ?? null,
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
@@ -303,7 +332,9 @@ router.post("/check", async (req, res) => {
       reason: null,
       positions_open: slot.occupied,
       positions_reserved: slot.reserved,
-      max_positions: cfg.max_positions,
+      max_positions: botMaxPositions,
+      max_positions_with_expired: botMaxWithExpired,
+      total_open: slot.totalOccupied ?? null,
       own_slot: slot.own,
       reservation_id: slot.reservationId,
       loss_streak: control.loss_streak,
