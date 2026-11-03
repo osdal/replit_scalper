@@ -1241,6 +1241,8 @@ async def _close_stale_db_trade(
     direction: str = "LONG", tp1_price: float = 0.0, tp2_price: float = 0.0,
     is_reverse: bool = False, mode: Optional[str] = None,
     pos=None, backstop_algo_id=None,
+    max_age_ms: Optional[int] = STALE_CLOSE_MAX_AGE_MS,
+    reason_override: Optional[str] = None,
 ) -> float:
     """Закрывает stale (is_open=1) строку trades по факту флэта на бирже.
 
@@ -1248,14 +1250,19 @@ async def _close_stale_db_trade(
     exit_price/qty/commission/net-pnl/exit_time из userTrades (UTC-окно). Если
     он упал — inline PATCH с расчётным PnL. Paper: филлов нет, пишем нейтральную
     причину paper_close БЕЗ exit_price. Возвращает pnl.
+
+    max_age_ms ограничивает окно суммирования филлов (None = до now). Для строк
+    старше 48h окно не обрезается: иначе закрытие, случившееся позже, не попадёт
+    в PnL, а строка осталась бы is_open=1 навсегда и занимала слот.
+    reason_override позволяет пометить такие закрытия как reconcile_flat.
     """
     entry_ms = _stale_close_entry_ms(entry_time)
     exit_ms = int(time.time() * 1000)
-    if entry_ms > 0:
+    if entry_ms > 0 and max_age_ms:
         # Не суммируем филлы за пределами разумного окна: иначе в старую
         # открытую строку попадут сделки чужих циклов.
-        exit_ms = min(exit_ms, entry_ms + STALE_CLOSE_MAX_AGE_MS)
-    reason = await _classify_stale_close_reason(
+        exit_ms = min(exit_ms, entry_ms + max_age_ms)
+    reason = reason_override or await _classify_stale_close_reason(
         cfg, tracker, order_mgr, log,
         pos=pos, direction=direction, entry_ms=entry_ms,
         tp1_price=tp1_price, tp2_price=tp2_price,
@@ -1501,12 +1508,16 @@ async def _sync_position_on_start(
                     if trade.get("is_open"):
                         trade_id = trade["id"]
                         stale_entry_time = trade.get("entry_time") or (sync_pos.entry_timestamp if sync_pos else None)
-                        if not _stale_trade_recent(stale_entry_time):
+                        # Строку старше 48h не пропускаем: иначе она навсегда
+                        # останется is_open=1, займёт слот в max_positions и
+                        # продолжит искажать статистику. Закрываем её с окном
+                        # до now и нейтральной причиной reconcile_flat.
+                        is_old = not _stale_trade_recent(stale_entry_time)
+                        if is_old:
                             log.warning(
-                                f"[SYNC] Skipping stale trade #{trade_id} for {cfg.symbol}: "
-                                f"entry older than {STALE_CLOSE_MAX_AGE_MS // 3600000}h"
+                                f"[SYNC] Stale trade #{trade_id} for {cfg.symbol} is older than "
+                                f"{STALE_CLOSE_MAX_AGE_MS // 3600000}h — closing by reconcile"
                             )
-                            continue
                         pnl_val = await _close_stale_db_trade(
                             cfg, tracker, order_mgr, log,
                             api_url=api_url,
@@ -1519,6 +1530,8 @@ async def _sync_position_on_start(
                             mode=getattr(sync_pos, "mode", None) or trade.get("mode"),
                             pos=sync_pos,
                             backstop_algo_id=getattr(sync_pos, "backstop_algo_id", None),
+                            max_age_ms=None if is_old else STALE_CLOSE_MAX_AGE_MS,
+                            reason_override="reconcile_flat" if is_old else None,
                         )
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
@@ -1556,12 +1569,12 @@ async def _sync_position_on_start(
                     if trade.get("is_open"):
                         trade_id = trade["id"]
                         stale_entry_time = trade.get("entry_time")
-                        if not _stale_trade_recent(stale_entry_time):
+                        is_old = not _stale_trade_recent(stale_entry_time)
+                        if is_old:
                             log.warning(
-                                f"[SYNC] Skipping stale trade #{trade_id} for {cfg.symbol}: "
-                                f"entry older than {STALE_CLOSE_MAX_AGE_MS // 3600000}h"
+                                f"[SYNC] Stale trade #{trade_id} for {cfg.symbol} is older than "
+                                f"{STALE_CLOSE_MAX_AGE_MS // 3600000}h — closing by reconcile"
                             )
-                            continue
                         pnl_val = await _close_stale_db_trade(
                             cfg, tracker, order_mgr, log,
                             api_url=api_url,
@@ -1571,6 +1584,8 @@ async def _sync_position_on_start(
                             tp1_price=trade.get("tp1_price") or 0.0,
                             tp2_price=trade.get("tp2_price") or 0.0,
                             mode=trade.get("mode"),
+                            max_age_ms=None if is_old else STALE_CLOSE_MAX_AGE_MS,
+                            reason_override="reconcile_flat" if is_old else None,
                         )
                         log.info(f"[SYNC] Closed stale trade #{trade_id} for {cfg.symbol} | pnl={pnl_val:.4f}")
                         if pnl_val < 0 and recovery:
