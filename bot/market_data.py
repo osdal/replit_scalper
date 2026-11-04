@@ -308,6 +308,17 @@ async def start_kline_websocket(
                                 f"Candle closed | {iv} "
                                 f"time={candle.name} close={candle['close']:.2f}"
                             )
+                        # Разнести обработку закрытия по времени: 40 ботов
+                        # получают событие одновременно и бьют в REST одним
+                        # залпом — биржа отвечает IP-баном -1003 на ~4 минуты.
+                        # Детерминированная задержка 0–2 с на процесс (hash
+                        # рандомизирован per-process) сглаживает пик.
+                        try:
+                            await asyncio.sleep(
+                                (hash(msg.get("stream", "") or "") % 2000) / 1000.0
+                            )
+                        except asyncio.CancelledError:
+                            raise
                         try:
                             result = cb(candle)
                             if asyncio.iscoroutine(result):

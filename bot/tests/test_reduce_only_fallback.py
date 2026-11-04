@@ -167,6 +167,26 @@ def test_tp_fallback_skips_when_close_position_stop_exists():
     assert om.exchange_tp_conditional is False
 
 
+def test_tp_reject_backoff_skips_repeat_with_same_params():
+    """-2022 не повторяем каждую свечу: тот же TP в окне бэкоффа пропускается.
+
+    LINKUSDT 03.11: reduceOnly отклонялся каждые 7 минут по одной и той же
+    цене/объёму (12–16 раз в сутки). Виртуальный TP закрывает позицию и без
+    лимита, поэтому повтор бессмысленен — ждём смены параметров.
+    """
+    client = FakeClient()
+    om = make_om(client)
+
+    run(om._place_tp_limit("SHORT", 8.716, 4.0))
+    assert len(client.calls) == 2  # LIMIT (-2022) + TAKE_PROFIT_MARKET fallback
+
+    run(om._place_tp_limit("SHORT", 8.716, 4.0))
+    assert len(client.calls) == 2  # бэкофф: ни лимита, ни fallback
+
+    run(om._place_tp_limit("SHORT", 8.700, 4.0))
+    assert len(client.calls) == 4  # цена изменилась → пробуем снова
+
+
 def test_backstop_removes_stale_close_position_before_placing():
     """Осиротевший closePosition-стоп не должен блокировать новый (-4130)."""
     class OrphanClient(FakeClient):

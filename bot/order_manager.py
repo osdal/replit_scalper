@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import time
-from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional, Tuple
 
 from binance import AsyncClient
@@ -25,6 +25,13 @@ from strategy import Signal
 BOT_ENV = (os.getenv("BOT_ENV") or "testnet").strip().lower() or "testnet"
 _AUDIT_ENABLED = BOT_ENV == "live"
 _AUDIT_PATH = os.path.join("logs", BOT_ENV, "orders_audit.jsonl")
+
+# Бэкофф повторных попыток выставить TP-лимит после отказа биржи -2022.
+# Тестнет иногда «резервирует» позицию фантомными bidNotional/askNotional:
+# reduceOnly не принимается вообще, и бот повторял один и тот же отказ каждую
+# свечу (12–16 раз в сутки на символ). Повтор с ТЕМИ ЖЕ ценой/объёмом в этом
+# окне пропускается; смена параметров (переворот, пересчёт TP) сбрасывает его.
+TP_REJECT_COOLDOWN_SEC = 1800.0
 
 
 def _live_default_margin() -> float:
@@ -114,6 +121,21 @@ def _round_step(value: float, step: float) -> float:
     if d_step <= 0:
         return value
     steps = (Decimal(str(value)) / d_step).to_integral_value(rounding=ROUND_FLOOR)
+    return float(steps * d_step)
+
+
+def _round_step_up(value: float, step: float) -> float:
+    """Округление quantity ВВЕРХ до шага биржи.
+
+    Нужно только для флора MIN_NOTIONAL: объём ноги нельзя занизить, иначе
+    позицию не защитить TP (биржа отвечает -2022) и не закрыть (-4164).
+    """
+    if value is None or step is None or step <= 0:
+        return value
+    d_step = Decimal(str(step))
+    if d_step <= 0:
+        return value
+    steps = (Decimal(str(value)) / d_step).to_integral_value(rounding=ROUND_CEILING)
     return float(steps * d_step)
 
 
@@ -334,6 +356,15 @@ class OrderManager:
             return round(qty, 3)
         await self._get_symbol_filters()
         return _round_step(qty, self._step_size)
+
+    async def _adjust_qty_up(self, qty: float, mode: Optional[str] = None) -> float:
+        """Как _adjust_qty, но округляет вверх (флор MIN_NOTIONAL)."""
+        if mode is None:
+            mode = self.cfg.mode
+        if mode != "live":
+            return round(qty, 3)
+        await self._get_symbol_filters()
+        return _round_step_up(qty, self._step_size)
 
     async def _place_market_split(
         self, side: str, qty: float, mode: str, fallback_price: float = 0.0
@@ -861,6 +892,16 @@ class OrderManager:
         if qty <= 0:
             self.log.warning(f"[LIVE] TP limit qty={qty} <= 0, skipping")
             return
+        # Бэкофф после -2022: тот же TP (цена+объём) повторно не долбим.
+        reject_key = (side, round(price, 8), round(qty, 8))
+        last_reject = getattr(self, "_tp_reject", None)
+        if (last_reject and last_reject[0] == reject_key
+                and (time.monotonic() - last_reject[1]) < TP_REJECT_COOLDOWN_SEC):
+            self.log.debug(
+                f"[LIVE] TP limit skipped (cooldown after -2022) | "
+                f"{direction} qty={qty} price={price} — virtual TP closes by market"
+            )
+            return
         try:
             await self.client.futures_create_order(
                 symbol=self.cfg.symbol,
@@ -872,9 +913,12 @@ class OrderManager:
                 reduceOnly=True,
             )
             self.exchange_tp_conditional = False
+            self._tp_reject = None
         except BinanceAPIException as e:
             if getattr(e, "code", None) != -2022:
                 raise
+            # Запоминаем отказ, чтобы не повторять его каждую свечу (см. бэкофф выше).
+            self._tp_reject = (reject_key, time.monotonic())
             # -2022 при ЖИВОЙ позиции — не «нет позиции», а рассинхрон состояния
             # биржи: testnet оставляет «фантомные» объёмы в bidNotional/
             # askNotional после отмены/переворота позиции, и ЛЮБОЙ reduceOnly
@@ -1636,6 +1680,37 @@ class OrderManager:
             )
             return None
 
+        # ФЛОР НОТИОНАЛА НОВОЙ НОГИ. Биржа не даёт ни защитить, ни закрыть
+        # позицию меньше MIN_NOTIONAL: reduceOnly-ордера отклоняются с -2022,
+        # обычный MARKET — с -4164. В $10-режиме хедж часто выходит на $2–4
+        # (LINK 0.37 ≈ $4.09, DOGE 28 ≈ $2.08), и такая нога «зависает»:
+        # TP-лимит не поставить, рыночное закрытие не проходит. Поэтому, если
+        # итоговое нетто меньше биржевого минимума, увеличиваем ногу до него.
+        # Цена цели T от размера ноги не зависит (T = P*(1±w)), поэтому цикл
+        # на той же цели даёт даже больший профит, а позиция становится
+        # защищаемой и закрываемой.
+        floor_applied = False
+        if mode == "live":
+            try:
+                min_notional = await self._get_min_notional_usd()
+                if min_notional > 0 and P > 0:
+                    min_leg_qty = await self._adjust_qty_up(
+                        min_notional * 1.02 / P, mode=mode
+                    )
+                    if min_leg_qty > 0 and abs(S_total) < min_leg_qty - 1e-12:
+                        new_s = min_leg_qty if S_total > 0 else -min_leg_qty
+                        self.log.warning(
+                            f"[REVERSE] leg below minNotional — raised | step={step} "
+                            f"old_net={S_total} new_net={new_s} "
+                            f"notional≈${abs(S_total) * P:.2f} -> ${min_leg_qty * P:.2f} "
+                            f"(minNotional=${min_notional:.2f})"
+                        )
+                        S_total = new_s
+                        q = S_total - N
+                        floor_applied = True
+            except Exception as e:
+                self.log.warning(f"[REVERSE] minNotional floor skipped: {e}")
+
         qty = abs(q)
         capped = False
         # Потолок нотионала (конфиг/%equity/биржевой брекет) — ограничение на ВЕСЬ
@@ -1652,7 +1727,12 @@ class OrderManager:
                     )
                     qty = max_qty_cap
                     capped = True
-        qty = await self._adjust_qty(qty, mode=mode)
+        if floor_applied and not capped:
+            # Флор считался «снизу»: округляем объём вверх, иначе хвост float
+            # (0.9199999999999999 → 0.91) снова уводит ногу под minNotional.
+            qty = await self._adjust_qty_up(qty, mode=mode)
+        else:
+            qty = await self._adjust_qty(qty, mode=mode)
         if qty <= 0:
             self.log.warning(f"[REVERSE] chain qty={qty} <= 0 — no new leg")
             return None
