@@ -3706,6 +3706,10 @@ async def _run_live_or_paper(
             # предыдущего цикла. В one-way режиме остаток сложился бы с новым
             # ордером, и следующий reverse сайзился бы от раздутого нетто.
             entry_mode = signal.mode or cfg.mode
+            # Смещение объёма под dust-остаток на бирже (знаковое): в ту же
+            # сторону — вычитаем из новой ноги, в противоположную — добавляем,
+            # чтобы итоговая позиция совпала с плановой.
+            dust_offset_qty = 0.0
             if entry_mode == "live" and order_mgr:
                 try:
                     order_mgr._invalidate_position_cache()
@@ -3722,10 +3726,13 @@ async def _run_live_or_paper(
                     # исполнился объёмом в 800 раз больше позиции. Такой остаток
                     # безопаснее игнорировать — следующий вход его неттит.
                     if await order_mgr._is_dust_notional(stale_qty, stale_entry):
+                        dust_offset_qty = (
+                            stale_qty if stale_dir == signal.direction else -stale_qty
+                        )
                         log.warning(
                             f"[GUARD] stale dust below minNotional — ignoring | "
                             f"qty={stale_qty:.6f} direction={stale_dir} "
-                            f"entry={stale_entry:.6f}; the next entry nets it"
+                            f"entry={stale_entry:.6f}; next entry offset={dust_offset_qty:+.6f}"
                         )
                     else:
                         flattened = False
@@ -3871,7 +3878,8 @@ async def _run_live_or_paper(
             else:
                 # Нормальная позиция: открываем на бирже
                 try:
-                    result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode)
+                    result = await order_mgr.open_position(signal, recovery_target=recovery_target, mode=signal.mode or cfg.mode,
+                                                           dust_offset_qty=(0.0 if is_recovery else dust_offset_qty))
                 except BaseException:
                     if slot_reserved:
                         await recovery.release_slot()
@@ -4296,6 +4304,24 @@ async def _run_live_or_paper(
                     )
                     return False, f"risk:{reason}"
                 slot_reserved = bool(risk_check.get("reservation_id"))
+            # Dust-остаток на бирже (live): тот же неттинг, что и для своих
+            # сигналов — иначе новая нога сложится с пылью и учёт разойдётся.
+            dust_offset_qty = 0.0
+            try:
+                order_mgr._invalidate_position_cache()
+                stale = await order_mgr.get_position_info()
+                if stale and abs(stale.get("qty", 0.0)) > DUST_QTY:
+                    stale_dir = stale.get("direction")
+                    stale_qty = abs(stale.get("qty", 0.0))
+                    stale_entry = float(stale.get("entry_price", 0) or 0.0)
+                    if await order_mgr._is_dust_notional(stale_qty, stale_entry):
+                        dust_offset_qty = stale_qty if stale_dir == direction else -stale_qty
+                        log.warning(
+                            f"[RELAY] dust on exchange — offsetting | qty={stale_qty:.6f} "
+                            f"direction={stale_dir} offset={dust_offset_qty:+.6f}"
+                        )
+            except Exception as e:
+                log.warning(f"[RELAY] dust check failed: {e}")
             tp1 = float(payload.get("tp1_price") or 0) or entry_px
             relay_signal = Signal(
                 direction=direction,
@@ -4311,7 +4337,8 @@ async def _run_live_or_paper(
                 f"entry={entry_px} sl={relay_signal.sl_price} tp1={relay_signal.tp1_price}"
             )
             try:
-                result = await order_mgr.open_position(relay_signal, mode=cfg.mode)
+                result = await order_mgr.open_position(relay_signal, mode=cfg.mode,
+                                                       dust_offset_qty=dust_offset_qty)
             except BaseException:
                 if slot_reserved:
                     await recovery.release_slot()

@@ -1950,7 +1950,17 @@ class OrderManager:
         self, signal: Signal,
         recovery_target: Optional[float] = None,
         mode: Optional[str] = None,
+        dust_offset_qty: float = 0.0,
     ) -> Optional[Tuple[float, float]]:
+        """Открывает позицию.
+
+        dust_offset_qty — знаковое смещение объёма ордера под «пыль» на бирже:
+        положительное, если остаток в ту же сторону (его нельзя ни защитить TP,
+        ни закрыть рынком — см. guard в main.py), отрицательное, если в
+        противоположную. Итоговая позиция на бирже должна равняться плановой
+        qty, поэтому ордер шлётся на qty - dust_offset_qty, а TP/SL и учёт
+        считаются по полному размеру qty (остаток + новая часть).
+        """
         if mode is None:
             mode = self.cfg.mode
         balance = await self.get_balance(mode)
@@ -2170,6 +2180,47 @@ class OrderManager:
                     )
                     qty = bumped_qty
 
+        # Dust-остаток на бирже, который нельзя защитить/закрыть ордером.
+        # Следующий вход его неттит: шлём ордер только на разницу, чтобы
+        # итоговая позиция совпала с плановой (а не удвоилась, как было с
+        # SUIUSDT 04.11: dust 3.6 + новая нога 5.5 = 9.1 на бирже при двух
+        # строках в БД). Если новая часть меньше minNotional — вход пропускаем:
+        # такую ногу всё равно не получится ни защитить, ни закрыть.
+        order_qty = qty
+        apply_dust = False
+        dust = 0.0
+        if mode == "live" and abs(dust_offset_qty) > 0:
+            try:
+                dust = float(dust_offset_qty)
+            except (TypeError, ValueError):
+                dust = 0.0
+            if not math.isfinite(dust):
+                dust = 0.0
+        if dust != 0.0:
+            apply_dust = True
+            order_qty = await self._adjust_qty(qty - dust, mode=mode)
+            entry_px = float(signal.entry_price or 0.0)
+            min_notional = await self._get_min_notional_usd()
+            if order_qty <= 0:
+                self.log.warning(
+                    f"[DUST] planned qty {qty:.6f} already covered by exchange "
+                    f"residual {dust:+.6f} — entry skipped"
+                )
+                return None
+            if (min_notional > 0 and entry_px > 0
+                    and order_qty * entry_px < min_notional):
+                self.log.warning(
+                    f"[DUST] new part below minNotional after dust offset — "
+                    f"entry skipped | planned={qty:.6f} dust={dust:+.6f} "
+                    f"order={order_qty:.6f} notional≈${order_qty * entry_px:.4f} "
+                    f"< minNotional=${min_notional:.2f}"
+                )
+                return None
+            self.log.info(
+                f"[DUST] offset applied | exchange={dust:+.6f} planned_total={qty:.6f} "
+                f"order={order_qty:.6f} notional≈${order_qty * entry_px:.2f}"
+            )
+
         if qty > 0 and sl_distance > 0:
             self.log.info(
                 f"[RISK] entry={signal.entry_price:.6f} sl={effective_sl_price:.6f} "
@@ -2193,9 +2244,9 @@ class OrderManager:
                 symbol=self.cfg.symbol,
                 side=_direction_to_side(signal.direction),
                 type=ORDER_TYPE_MARKET,
-                quantity=qty,
+                quantity=order_qty,
             )
-            _audit("entry", symbol=self.cfg.symbol, direction=signal.direction, qty=qty, orderId=(order or {}).get("orderId"))
+            _audit("entry", symbol=self.cfg.symbol, direction=signal.direction, qty=order_qty, orderId=(order or {}).get("orderId"))
             # Вход изменил позицию/баланс — кэши невалидны.
             self._invalidate_caches()
             entry_price = await self._get_fill_price(order, signal.entry_price)
@@ -2228,6 +2279,13 @@ class OrderManager:
                     f"requested={qty:.6f} actual={real_qty:.6f} ({real_qty/qty*100:.1f}%)"
                 )
                 # Use actual qty from exchange
+                qty = real_qty
+                entry_price = await self._get_real_position_entry(signal.direction) or entry_price
+
+            if apply_dust and real_qty > 0:
+                # На бирже теперь dust + новая часть. Учёт ведём по фактическому
+                # нетто и средней цене входа биржи — иначе трекер разойдётся с
+                # биржей по объёму и PnL (пыль входит в среднюю цену).
                 qty = real_qty
                 entry_price = await self._get_real_position_entry(signal.direction) or entry_price
 
