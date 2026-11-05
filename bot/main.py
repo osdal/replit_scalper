@@ -118,6 +118,7 @@ _REVERSE_CLOSED_BY_REASON = {
     "chain_stop": "REVERSE_CHAIN_STOP",
     "cum_loss_cap": "REVERSE_CUM_LOSS_CAP",
     "expired_profit": "REVERSE_EXPIRED_PROFIT",
+    "expired_deadline": "REVERSE_EXPIRED_DEADLINE",
 }
 
 # Глобальные переменные для отслеживания recovery-состояния
@@ -179,6 +180,10 @@ _EXPIRED_CLOSE_HOURS = float(os.getenv("MAX_POSITIONS_IGNORE_AFTER_HOURS") or "0
 # Минимальный плюс сверх комиссии выхода (USD): 0 = закрывать ровно в безубыток.
 _EXPIRED_CLOSE_MIN_PROFIT_USD = float(os.getenv("EXPIRED_CLOSE_MIN_PROFIT_USD") or "0.02")
 _EXPIRED_CLOSE_INTERVAL_SEC = float(os.getenv("EXPIRED_CLOSE_INTERVAL_SEC") or "10")
+# Жёсткий дедлайн для «протухшей» позиции: если цикл так и не вышел в
+# минимальный плюс за N часов, закрываем его рынком при любом результате.
+# 0 = выкл (testnet по умолчанию; live включает EXPIRED_HARD_CLOSE_HOURS=6).
+_EXPIRED_HARD_CLOSE_HOURS = float(os.getenv("EXPIRED_HARD_CLOSE_HOURS") or "0")
 _expired_close_ts: dict = {}
 
 # Очередь симуляции исходов отклонённых сигналов.
@@ -1384,9 +1389,14 @@ async def _expired_cycle_profit_snapshot(
     (`_CUM_CAP.evaluate`), для обычной (не-reverse) реализованных ног нет —
     плавающий результат берётся от `current_price`.
 
-    Возвращает `CapSnapshot` (net >= порога), иначе None: фича выключена,
-    позиция не live, цикл ещё молодой, не хватает данных или net ниже порога.
-    Троттлинг — `EXPIRED_CLOSE_INTERVAL_SEC`, чтобы не дёргать REST каждую секунду.
+    Жёсткий дедлайн: если задан `EXPIRED_HARD_CLOSE_HOURS` (live) и цикл не
+    вышел в минимальный плюс за это время, возвращается снимок с
+    `deadline=True` — цикл закрывается принудительно, даже в минусе.
+
+    Возвращает `CapSnapshot` (net >= порога либо дедлайн), иначе None: фича
+    выключена, позиция не live, цикл ещё молодой, не хватает данных или net ниже
+    порога. Троттлинг — `EXPIRED_CLOSE_INTERVAL_SEC`, чтобы не дёргать REST каждую
+    секунду.
     """
     # Срок протухания: per-bot минуты из конфига, иначе общий env-часы.
     expired_h = _EXPIRED_CLOSE_HOURS
@@ -1420,10 +1430,23 @@ async def _expired_cycle_profit_snapshot(
     if age_h < expired_h:
         return None
 
+    # Жёсткий дедлайн (включается только на live через EXPIRED_HARD_CLOSE_HOURS):
+    # если цикл не вышел в минимальный плюс за N часов, закрываем его рынком при
+    # любом результате. Так «мёртвые» цепочки не висят десятками часов и не
+    # превращаются в хвостовой убыток. Дедлайн не срабатывает раньше протухания.
+    hard_h = _EXPIRED_HARD_CLOSE_HOURS
+    forced = hard_h > 0 and age_h >= max(hard_h, expired_h)
+
     is_reverse = bool(getattr(pos, "is_reverse", False))
     if is_reverse:
         snap = await _CUM_CAP.evaluate(symbol, order_mgr, tracker, log)
         if snap is None:
+            if forced:
+                log.warning(
+                    f"[EXPIRED] hard deadline after {age_h:.1f}h but cycle net "
+                    f"unavailable — force closing | symbol={symbol}"
+                )
+                return CapSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, deadline=True)
             return None
     else:
         # Обычная позиция: realized по закрытым ногам отсутствует, плавающий
@@ -1453,6 +1476,19 @@ async def _expired_cycle_profit_snapshot(
     fee_pct = float(getattr(order_mgr.cfg, "taker_fee_pct", 0.05) or 0.0) / 100.0
     exit_fee = qty * float(pos.entry_price or 0.0) * fee_pct
     required = exit_fee + max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD)
+    if forced:
+        # Дедлайн важнее порога: закрываем даже в минусе, чтобы не держать цикл
+        # бессрочно. Метка deadline=True → process_hit закроет с отдельной
+        # причиной EXPIRED_DEADLINE, чтобы статистика отличала это от выхода
+        # в минимальный плюс.
+        snap.deadline = True
+        log.warning(
+            f"[EXPIRED] hard deadline after {age_h:.1f}h (limit {hard_h:g}h) — "
+            f"force closing | symbol={symbol} reverse={is_reverse} "
+            f"net={snap.total_pnl:+.4f} required={required:.4f} "
+            f"realized={snap.realized_pnl:+.4f} unrealized={snap.unrealized_pnl:+.4f}"
+        )
+        return snap
     if snap.total_pnl < required:
         return None
     log.warning(
@@ -2355,11 +2391,18 @@ async def _run_live_or_paper(
                     _on_position_closed(preset_before)
                 label = (
                     (
-                        "REVERSE_EXPIRED_PROFIT"
-                        if getattr(leg, "is_reverse", False) else "EXPIRED_CLOSE"
+                        "REVERSE_EXPIRED_DEADLINE"
+                        if getattr(leg, "is_reverse", False) else "EXPIRED_DEADLINE"
                     )
-                    if exit_reason == "expired_profit"
-                    else "REVERSE_CUM_LOSS_CAP"
+                    if exit_reason == "expired_deadline"
+                    else (
+                        (
+                            "REVERSE_EXPIRED_PROFIT"
+                            if getattr(leg, "is_reverse", False) else "EXPIRED_CLOSE"
+                        )
+                        if exit_reason == "expired_profit"
+                        else "REVERSE_CUM_LOSS_CAP"
+                    )
                 )
                 if is_live_close:
                     await _force_flat_after_reverse(direction, exit_reason, label=label)
@@ -2387,12 +2430,15 @@ async def _run_live_or_paper(
                     _consecutive_losses += 1
                     _last_loss_time = time.time()
             return
-        if hit == "EXPIRED_PROFIT":
+        if hit in ("EXPIRED_PROFIT", "EXPIRED_DEADLINE"):
             # Синтетический hit: «протухшая» (старше MAX_POSITIONS_IGNORE_AFTER_HOURS)
-            # reverse-позиция вышла в минимальный плюс по всем ногам — закрываем
-            # цикл рынком, не дожидаясь TP и не занимая депозит дальше.
+            # позиция либо вышла в минимальный плюс по всем ногам (EXPIRED_PROFIT),
+            # либо не сделала этого за жёсткий дедлайн (EXPIRED_DEADLINE) —
+            # закрываем цикл рынком, не дожидаясь TP и не занимая депозит дальше.
             if pos is not None and tracker.has_open_position():
-                pnl = await _close_cycle_by_cum_loss_cap("expired_profit")
+                pnl = await _close_cycle_by_cum_loss_cap(
+                    "expired_deadline" if hit == "EXPIRED_DEADLINE" else "expired_profit"
+                )
                 if pnl is not None:
                     if pnl >= 0:
                         _consecutive_losses = 0
@@ -4817,15 +4863,20 @@ async def _run_live_or_paper(
                         continue
                 if not hit and tracker.position is not None:
                     # «Протухшая» позиция не должна висеть до своего TP: как только
-                    # она выходит в минимальный плюс — закрываем рынком. Работает и
-                    # для reverse-цепочки, и для обычной позиции (раньше только
+                    # она выходит в минимальный плюс — закрываем рынком. Если же
+                    # задан EXPIRED_HARD_CLOSE_HOURS (live) и плюса так и нет —
+                    # дедлайн закрывает цикл принудительно, даже в минусе. Работает
+                    # и для reverse-цепочки, и для обычной позиции (раньше только
                     # reverse, из-за чего ATOM висел 72 ч в +4%). Проверка внутри
                     # троттлится EXPIRED_CLOSE_INTERVAL_SEC.
-                    if await _expired_cycle_profit_snapshot(
+                    expired_snap = await _expired_cycle_profit_snapshot(
                         cfg.symbol, order_mgr, tracker, log, current_price
-                    ) is not None:
+                    )
+                    if expired_snap is not None:
                         await process_hit(
-                            "EXPIRED_PROFIT", current_price, int(time.time() * 1000)
+                            "EXPIRED_DEADLINE" if getattr(expired_snap, "deadline", False)
+                            else "EXPIRED_PROFIT",
+                            current_price, int(time.time() * 1000),
                         )
                         continue
                 if hit:

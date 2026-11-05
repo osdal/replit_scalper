@@ -42,6 +42,10 @@ class CapSnapshot:
     ref: float               # депозит цикла, от которого считается порог
     pct: float               # лимит, % от депозита
     threshold: float         # ref * pct / 100 (в USD)
+    # True — снимок сделан по жёсткому дедлайну «протухшей» позиции
+    # (EXPIRED_HARD_CLOSE_HOURS), т.е. цикл закрывается принудительно даже
+    # в минусе, а не потому что достигнут минимальный плюс/cum-loss cap.
+    deadline: bool = False
 
     @property
     def total_pnl(self) -> float:

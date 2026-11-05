@@ -125,6 +125,45 @@ def test_disabled_when_hours_zero(env, monkeypatch):
     assert cap.calls == 0
 
 
+def test_hard_deadline_forces_close_even_in_loss(env, monkeypatch):
+    """Жёсткий дедлайн (EXPIRED_HARD_CLOSE_HOURS) закрывает цикл даже в минусе."""
+    monkeypatch.setattr(main, "_EXPIRED_HARD_CLOSE_HOURS", 6.0)
+    monkeypatch.setattr(main, "_expired_close_ts", {})
+    cap = FakeCap(total_pnl=-1.0)  # цикл в минусе
+    monkeypatch.setattr(main, "_CUM_CAP", cap)
+    tracker = FakeTracker(_pos(), _age_ms(7.0))  # старше дедлайна 6ч
+    snap = run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG))
+    assert snap is not None
+    assert getattr(snap, "deadline", False) is True
+    assert cap.calls == 1
+
+
+def test_hard_deadline_does_not_fire_before_expired(env, monkeypatch):
+    """Дедлайн не срабатывает раньше срока протухания, но evaluate вызывается."""
+    monkeypatch.setattr(main, "_EXPIRED_CLOSE_HOURS", 2.0)
+    monkeypatch.setattr(main, "_EXPIRED_HARD_CLOSE_HOURS", 6.0)
+    monkeypatch.setattr(main, "_expired_close_ts", {})
+    cap = FakeCap(total_pnl=-1.0)
+    monkeypatch.setattr(main, "_CUM_CAP", cap)
+    # Возраст 4ч: протухло (2ч), но дедлайн (6ч) ещё не наступил
+    tracker = FakeTracker(_pos(), _age_ms(4.0))
+    snap = run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG))
+    assert snap is None  # без плюса — ждём
+    assert cap.calls == 1  # evaluate всё равно вызывается для протухшей позиции
+
+
+def test_hard_deadline_disabled_when_zero(env, monkeypatch):
+    """Дедлайн = 0 не срабатывает, но evaluate вызывается для протухшей."""
+    monkeypatch.setattr(main, "_EXPIRED_HARD_CLOSE_HOURS", 0.0)
+    monkeypatch.setattr(main, "_expired_close_ts", {})
+    cap = FakeCap(total_pnl=-1.0)
+    monkeypatch.setattr(main, "_CUM_CAP", cap)
+    tracker = FakeTracker(_pos(), _age_ms(100.0))
+    snap = run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG))
+    assert snap is None
+    assert cap.calls == 1  # evaluate вызывается, но дедлайн выключен
+
+
 def test_ignores_non_reverse_and_paper(env, monkeypatch):
     cap = FakeCap(total_pnl=5.0)
     monkeypatch.setattr(main, "_CUM_CAP", cap)

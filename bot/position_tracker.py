@@ -646,6 +646,10 @@ class PositionTracker:
                        закрыл весь нетто → REVERSE_CHAIN_STOP;
           "cum_loss_cap" — суммарный убыток цикла достиг лимита % депозита,
                        бот принудительно закрыл цикл → REVERSE_CUM_LOSS_CAP;
+          "expired_profit" — «протухший» цикл закрыт в минимальный плюс →
+                       REVERSE_EXPIRED_PROFIT;
+          "expired_deadline" — «протухший» цикл закрыт по жёсткому дедлайну
+                       (даже в минусе) → REVERSE_EXPIRED_DEADLINE;
           None/"market" — бот закрыл сам (marketable/market), ручное/внешнее
                        закрытие или гэп.
 
@@ -662,6 +666,8 @@ class PositionTracker:
             return "REVERSE_CUM_LOSS_CAP"
         if closed_by == "expired_profit":
             return "REVERSE_EXPIRED_PROFIT"
+        if closed_by == "expired_deadline":
+            return "REVERSE_EXPIRED_DEADLINE"
         if closed_by == "backstop":
             return "REVERSE_BACKSTOP"
         if closed_by == "tp":
@@ -692,6 +698,8 @@ class PositionTracker:
             return "cum_loss_cap"
         if closed_by == "expired_profit":
             return "expired_profit"
+        if closed_by == "expired_deadline":
+            return "expired_deadline"
         if closed_by == "chain_failed":
             return "chain_failed"
         return "chain_market"
@@ -1000,7 +1008,8 @@ class PositionTracker:
             self._classify_reverse_exit(p_before, close_price, hit, closed_by=closed_by)
             if is_reverse
             else (
-                "EXPIRED_CLOSE" if closed_by == "expired_profit"
+                "EXPIRED_DEADLINE" if closed_by == "expired_deadline"
+                else "EXPIRED_CLOSE" if closed_by == "expired_profit"
                 else (exit_reason_override or hit)
             )
         )
