@@ -517,7 +517,7 @@ loss_streak_trigger: 2
 loss_pause_signals: 3
 # Потолок накопленного долга recovery (free+locked). Выше — claim() отказывает.
 max_free_debt_usd: 15.0
-# Дневной лимит убытков (USDT). При достижении боты останавливаются до конца дня.
+# Дневной лимит НЕТТО-убытка (USDT): прибыльные сделки компенсируют убыточные.
 daily_loss_limit_usd: 8.0
 ```
 
@@ -536,8 +536,9 @@ daily_loss_limit_usd: 8.0
 - Бот при `reason="debt_limit"` **пропускает сигнал целиком** (не открывает даже обычную позицию).
 
 ### Механизм 4 — Дневной лимит убытков (`daily_loss_limit_usd`)
-- `POST /api/trading/check` считает сумму `pnl < 0` по закрытым сделкам за текущий UTC-день.
-- Если `daily_loss >= daily_loss_limit_usd` → `{allowed: false, reason: "daily_loss_limit"}` — боты не входят до конца дня.
+- `POST /api/trading/check` считает **нетто**-результат закрытых сделок за текущий UTC-день: `SUM(pnl)`, где `pnl` уже включает комиссии. Прибыль компенсирует убыток.
+- Если `daily_net <= -daily_loss_limit_usd` → `{allowed: false, reason: "daily_loss_limit"}` — боты не входят до конца дня.
+- В ответе есть оба поля: `daily_net` (знаковый результат дня) и `daily_loss` (`max(0, -daily_net)`, для обратной совместимости).
 
 ### Фиксация отклонённых сигналов (для статистики)
 - В таблицу `trades` добавлены колонки `status` (`open`/`closed`/`rejected`) и `reject_reason`.
@@ -560,7 +561,7 @@ daily_loss_limit_usd: 8.0
 ```
 { positions_open, max_positions, loss_streak, loss_streak_trigger,
   paused_remaining, loss_pause_signals, max_free_debt_usd, free_debt,
-  daily_loss_limit_usd, daily_loss }
+  daily_loss_limit_usd, daily_loss, daily_net }
 ```
 
 ### ADX-фильтр силы тренда (дополнительно)

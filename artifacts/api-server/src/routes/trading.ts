@@ -33,12 +33,19 @@ function sanitizeIgnoreAfterHours(value: unknown, fallback: number): number {
   return n;
 }
 
+function sanitizeLossStreakTrigger(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.floor(n);
+}
+
 /**
  * ENV-оверрайды поверх yaml. Нужны, чтобы включить «протухание» позиций
- * (MAX_POSITIONS_IGNORE_AFTER_HOURS) только на одном стеке: yaml общий для
- * api-testnet и api-live, а менять поведение live нельзя.
+ * (MAX_POSITIONS_IGNORE_AFTER_HOURS) и строгий loss-streak (LOSS_STREAK_TRIGGER)
+ * только на одном стеке: yaml общий для api-testnet и api-live, а менять
+ * поведение live нельзя.
  */
-function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number }>(cfg: T): T {
+function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number }>(cfg: T): T {
   const env_max = process.env.MAX_POSITIONS;
   if (env_max !== undefined && env_max !== null && env_max !== "") {
     // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
@@ -49,6 +56,10 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_igno
     cfg.max_positions_ignore_after_hours = sanitizeIgnoreAfterHours(
       env_ignore, cfg.max_positions_ignore_after_hours,
     );
+  }
+  const env_streak = process.env.LOSS_STREAK_TRIGGER;
+  if (env_streak !== undefined && env_streak !== null && env_streak !== "") {
+    cfg.loss_streak_trigger = sanitizeLossStreakTrigger(env_streak, cfg.loss_streak_trigger);
   }
   return cfg;
 }
@@ -192,14 +203,19 @@ async function exchangeHasPosition(symbol: string): Promise<boolean> {
   }
 }
 
-/** Сумма убытков (pnl < 0) по закрытым сделкам за текущий UTC-день. Положительное число. */
-async function getDailyLoss(): Promise<number> {
+/**
+ * Чистый реализованный результат закрытых сделок за текущий UTC-день.
+ * `pnl` в БД уже net of fees (комиссия вычитается при закрытии), поэтому
+ * SUM(pnl) — это фактический дневной результат. Отрицательное значение =
+ * убыток дня, положительное = прибыль.
+ */
+async function getDailyNet(): Promise<number> {
   const startToday = new Date();
   startToday.setUTCHours(0, 0, 0, 0);
-  const [res] = await db.select({ loss: sql<number>`COALESCE(SUM(-pnl),0)` })
+  const [res] = await db.select({ net: sql<number>`COALESCE(SUM(pnl),0)` })
     .from(tradesTable)
-    .where(sql`is_open = 0 AND pnl < 0 AND exit_time >= ${startToday.toISOString()}`);
-  return Number(res?.loss || 0);
+    .where(sql`is_open = 0 AND exit_time >= ${startToday.toISOString()}`);
+  return Number(res?.net || 0);
 }
 
 /** Сумма всех неразрешённых долгов recovery (free + locked). */
@@ -215,7 +231,7 @@ async function getFreeDebt(): Promise<number> {
  * Бот спрашивает перед открытием позиции: можно ли.
  * Учитывает: лимит позиций, паузу после серии убытков, потолок долга,
  * дневной лимит убытков.
- * Возвращает: { allowed, reason?, positions_open, loss_streak, paused_remaining, daily_loss }
+ * Возвращает: { allowed, reason?, positions_open, loss_streak, paused_remaining, daily_loss, daily_net }
  */
 router.post("/check", async (req, res) => {
   try {
@@ -249,7 +265,10 @@ router.post("/check", async (req, res) => {
     const { occupied: positions } = await slots.inspect(
       () => loadOccupiedSymbols(botIgnoreAfterHours),
     );
-    const daily_loss = await getDailyLoss();
+    // Дневной лимит считаем по НЕТТО: прибыль компенсирует убыток. Блокируем
+    // входы только если день реально закрыт в минус на величину лимита.
+    const daily_net = await getDailyNet();
+    const daily_loss = Math.max(0, -daily_net);
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
     const reset = await autoResetStale(control, globalCfg.pause_timeout_minutes);
@@ -258,8 +277,8 @@ router.post("/check", async (req, res) => {
       control.paused_remaining = 0;
     }
 
-    // Дневной лимит убытков — жёсткая остановка на день.
-    if (globalCfg.daily_loss_limit_usd > 0 && daily_loss >= globalCfg.daily_loss_limit_usd) {
+    // Дневной лимит убытков — жёсткая остановка на день (по нетто-результату).
+    if (globalCfg.daily_loss_limit_usd > 0 && daily_net <= -globalCfg.daily_loss_limit_usd) {
       return res.json({
         allowed: false,
         reason: "daily_loss_limit",
@@ -267,6 +286,7 @@ router.post("/check", async (req, res) => {
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
+        daily_net: Number(daily_net.toFixed(2)),
       });
     }
 
@@ -282,6 +302,7 @@ router.post("/check", async (req, res) => {
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
+        daily_net: Number(daily_net.toFixed(2)),
       });
     }
 
@@ -324,6 +345,7 @@ router.post("/check", async (req, res) => {
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
+        daily_net: Number(daily_net.toFixed(2)),
       });
     }
 
@@ -340,6 +362,7 @@ router.post("/check", async (req, res) => {
       loss_streak: control.loss_streak,
       paused_remaining: control.paused_remaining,
       daily_loss: Number(daily_loss.toFixed(2)),
+      daily_net: Number(daily_net.toFixed(2)),
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -514,7 +537,8 @@ router.get("/status", async (_req, res) => {
       control.paused_remaining = 0;
     }
     const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours));
-    const daily_loss = await getDailyLoss();
+    const daily_net = await getDailyNet();
+    const daily_loss = Math.max(0, -daily_net);
     const free_debt = await getFreeDebt();
     res.json({
       positions_open: st.open,
@@ -530,6 +554,7 @@ router.get("/status", async (_req, res) => {
       free_debt: Number(free_debt.toFixed(2)),
       daily_loss_limit_usd: cfg.daily_loss_limit_usd,
       daily_loss: Number(daily_loss.toFixed(2)),
+      daily_net: Number(daily_net.toFixed(2)),
       pause_timeout_minutes: cfg.pause_timeout_minutes,
     });
   } catch (e) {

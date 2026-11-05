@@ -332,8 +332,8 @@ SHORT: SL = entry + sl_dist,  TP1 = entry - tp1_dist,  TP2 = entry - tp2_dist
 
 - `recovery_max_pct` — макс. % депозита под recovery-сделку.
 - `max_positions` — глобальный лимит открытых позиций (через API). Live: `1` (`MAX_POSITIONS=1` в `docker-compose.yml`). Testnet: `10` (`bot/recovery_config.yaml`). Лимит считается по **символам**: слот занимает символ с открытой принятой позицией; reverse-нога в уже открытую позицию слот не занимает и лимитом не блокируется. Слот занимается атомарно резервом непосредственно перед ордером (см. changelog 2026-10-08).
-- `loss_streak_trigger` — после N убытков подряд включается пауза на `loss_pause_signals` сигналов.
-- `daily_loss_limit_usd` — дневной лимит убытков (USDT).
+- `loss_streak_trigger` — после N убытков подряд включается пауза на `loss_pause_signals` сигналов. Для live переопределяется через `LOSS_STREAK_TRIGGER=4` в `docker-compose.yml` (yaml остаётся мягким для testnet).
+- `daily_loss_limit_usd` — дневной лимит **нетто-убытка** (USDT): блокирует входы, только если `SUM(pnl)` закрытых сделок за UTC-день ниже `-limit`. `pnl` уже net of fees, поэтому прибыльные сделки компенсируют убыточные.
 - `max_free_debt_usd` — потолок долга recovery (новые claim запрещены при превышении).
 
 ### 3.3a Защита от серии убытков (loss streak)

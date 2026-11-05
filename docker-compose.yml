@@ -192,6 +192,9 @@ services:
       - BINANCE_BAN_FALLBACK_SEC=30
       # Игнорировать позиции старше N часов для max_positions.
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
+      # Глобальная пауза после 4 убытков подряд (yaml=35, т.е. выкл для testnet;
+      # live получает строгий порог через ENV).
+      - LOSS_STREAK_TRIGGER=4
 
   dashboard-live:
     <<: *dashboard-base
