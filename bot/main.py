@@ -4930,8 +4930,6 @@ async def _run_live_or_paper(
                 # FIX A: виртуальный TP/SL считается по последней торговой цене,
                 # mark — только fallback (см. _latest_trigger_price).
                 current_price, _price_src = await _latest_trigger_price()
-                if current_price <= 0:
-                    continue
                 # Обновляем live-цену для дашборда, чтобы unrealized PnL в карточке
                 # бота пересчитывался между свечами, а не залипал на цене открытия.
                 # Защита: никогда не перезаписываем цену нулём (Binance может вернуть 0
@@ -4940,6 +4938,25 @@ async def _run_live_or_paper(
                 if reporter is not None and current_price > 0 and (now_ts - last_tick_hb_ts) >= 30:
                     last_tick_hb_ts = now_ts
                     await reporter.report_heartbeat(current_price)
+
+                # EXPIRED/DEADLINE проверка для reverse-циклов НЕ требует current_price
+                # (использует _CUM_CAP.evaluate). Запускаем её ДО проверки current_price,
+                # чтобы дедлайн срабатывал даже при бане REST price.
+                if tracker.position is not None and getattr(tracker.position, "is_reverse", False):
+                    expired_snap = await _expired_cycle_profit_snapshot(
+                        cfg.symbol, order_mgr, tracker, log, current_price
+                    )
+                    if expired_snap is not None:
+                        await process_hit(
+                            "EXPIRED_DEADLINE" if getattr(expired_snap, "deadline", False)
+                            else "EXPIRED_PROFIT",
+                            current_price, int(time.time() * 1000),
+                        )
+                        continue
+
+                if current_price <= 0:
+                    continue
+
                 hit = tracker.check(current_price)
                 if not hit and tracker.position is not None \
                         and getattr(tracker.position, "is_reverse", False) \
@@ -4967,14 +4984,8 @@ async def _run_live_or_paper(
                             "CUM_LOSS_CAP", current_price, int(time.time() * 1000)
                         )
                         continue
-                if not hit and tracker.position is not None:
-                    # «Протухшая» позиция не должна висеть до своего TP: как только
-                    # она выходит в минимальный плюс — закрываем рынком. Если же
-                    # задан EXPIRED_HARD_CLOSE_HOURS (live) и плюса так и нет —
-                    # дедлайн закрывает цикл принудительно, даже в минусе. Работает
-                    # и для reverse-цепочки, и для обычной позиции (раньше только
-                    # reverse, из-за чего ATOM висел 72 ч в +4%). Проверка внутри
-                    # троттлится EXPIRED_CLOSE_INTERVAL_SEC.
+                if not hit and tracker.position is not None and not getattr(tracker.position, "is_reverse", False):
+                    # Для обычных (не-reverse) позиций EXPIRED проверяем только если есть цена
                     expired_snap = await _expired_cycle_profit_snapshot(
                         cfg.symbol, order_mgr, tracker, log, current_price
                     )
