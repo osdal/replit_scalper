@@ -4292,10 +4292,15 @@ async def _run_live_or_paper(
                         # Финализируем с pnl=0, exit_reason=reconcile_phantom
                         trade_id = trade["id"]
                         try:
-                            # Сначала пробуем закрыть через API (помечает is_open=0)
-                            close_resp = _rq.post(
-                                f"{api_url}/trades/{trade_id}/close",
-                                json={"exit_reason": "reconcile_phantom", "exit_price": 0},
+                            # PATCH /trades/:id — обновляем is_open=0, exit_reason, exit_time
+                            close_resp = _rq.patch(
+                                f"{api_url}/trades/{trade_id}",
+                                json={
+                                    "is_open": 0,
+                                    "exit_reason": "reconcile_phantom",
+                                    "pnl": 0,
+                                    "exit_price": 0,
+                                },
                                 timeout=10,
                             )
                             if close_resp.status_code == 200:
