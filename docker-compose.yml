@@ -105,13 +105,13 @@ services:
       - EXPIRED_HARD_CLOSE_HOURS=6
       # Общий шлюз Binance rate-limit (bot/binance_gate.py). 40 ботов делят
       # один IP: без шлюза вес доходит до ~3500/мин при лимите 2400 и ловит
-      # -1003. Второстепенные запросы сбрасываются при 75% веса; критичные
-      # (ордера, позиции, account, exchangeInfo, ticker/price, klines limit>=100)
-      # проходят всегда. BAN_FALLBACK_SEC — общая пауза, если -1003 пришёл без
-      # "banned until" (типично для testnet).
+      # -1003. Второстепенные запросы сбрасываются при 50% веса (testnet);
+      # критичные (ордера, позиции, account, exchangeInfo, ticker/price, klines
+      # limit>=100) проходят всегда. BAN_FALLBACK_SEC — общая пауза, если -1003
+      # пришёл без "banned until" (типично для testnet).
       - BINANCE_GATE_ENABLED=1
       - BINANCE_WEIGHT_LIMIT_1M=2400
-      - BINANCE_SHED_AT=0.75
+      - BINANCE_SHED_AT=0.5
       - BINANCE_BAN_FALLBACK_SEC=30
       # Grid engine (server-side): включить движок сеток.
       - GRID_ENGINE_ENABLED=true
@@ -192,7 +192,7 @@ services:
       # Binance rate-limit gate (shared with testnet via volume).
       - BINANCE_GATE_ENABLED=1
       - BINANCE_WEIGHT_LIMIT_1M=2400
-      - BINANCE_SHED_AT=0.75
+      - BINANCE_SHED_AT=0.6
       - BINANCE_BAN_FALLBACK_SEC=30
       # Игнорировать позиции старше N часов для max_positions.
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=2

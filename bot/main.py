@@ -1508,17 +1508,30 @@ async def _sync_position_on_start(
     if cfg.mode != "live":
         return
 
-    try:
-        positions = await asyncio.wait_for(
-            client.futures_position_information(symbol=cfg.symbol),
-            timeout=30,
-        )
-    except asyncio.TimeoutError:
-        log.error(f"[SYNC] Timeout fetching positions for {cfg.symbol}")
-        return
-    except Exception as e:
-        log.error(f"[SYNC] Failed to fetch positions: {e}")
-        return
+    # Retry с экспоненциальным бэкоффом + джиттер для устойчивости к -1003
+    # во время одновременного старта множества ботов.
+    import random
+    for attempt in range(5):
+        try:
+            positions = await asyncio.wait_for(
+                client.futures_position_information(symbol=cfg.symbol),
+                timeout=30,
+            )
+            break
+        except asyncio.TimeoutError:
+            log.error(f"[SYNC] Timeout fetching positions for {cfg.symbol}")
+            return
+        except Exception as e:
+            if attempt == 4:
+                log.error(f"[SYNC] Failed to fetch positions after 5 attempts: {e}")
+                return
+            _base = min(2 * (2 ** attempt), 30)
+            _delay = _base + random.uniform(0, _base * 0.5)
+            log.warning(f"[SYNC] position fetch failed (attempt {attempt+1}/5): {e}; retry in {_delay:.1f}s")
+            try:
+                await asyncio.wait_for(asyncio.sleep(_delay), timeout=_delay)
+            except asyncio.TimeoutError:
+                pass
 
     exchange_qty = 0.0
     for p in positions:
@@ -2102,6 +2115,20 @@ async def _run_live_or_paper(
     _rejected_sims.extend(loaded)
     log.info(f"[STARTUP] Step 6: loaded {len(loaded)} rejected trades")
 
+    # Staggered startup: рандомная задержка 0-60с, чтобы 40 ботов не бьли
+    # API одновременно после рестарта контейнера (предотвращает -1003 бан).
+    # Только для live-режима (testnet тоже live по режиму).
+    import random
+    _stagger = random.uniform(0.0, 60.0)
+    log.info(f"[STARTUP] staggered delay {_stagger:.1f}s before warm-up")
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=_stagger)
+    except asyncio.TimeoutError:
+        pass
+    if shutdown_event.is_set():
+        log.warning("[STARTUP] shutdown during stagger, exiting")
+        return
+
     log.info("[STARTUP] Step 7: fetching klines for warm-up")
     df_buffer: pd.DataFrame = pd.DataFrame()
     _warm_attempt = 0
@@ -2114,10 +2141,12 @@ async def _run_live_or_paper(
             break
         except Exception as e:
             _warm_attempt += 1
-            _delay = min(5 * _warm_attempt, 60)
+            # Экспоненциальный бэкофф с джиттером: 5s, 10s, 20s, 40s, 60s (max)
+            _base = min(5 * (2 ** (_warm_attempt - 1)), 60)
+            _delay = _base + random.uniform(0, _base * 0.3)
             log.warning(
                 f"[STARTUP] warm-up klines failed (attempt {_warm_attempt}): {e}; "
-                f"retry in {_delay}s"
+                f"retry in {_delay:.1f}s"
             )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=_delay)
