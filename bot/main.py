@@ -2019,7 +2019,11 @@ async def main():
     # Ворота Binance rate-limit: общий файл data/binance_gate.json между всеми
     # ботами, обёртка вокруг AsyncClient._request.
     # Включаются только если BINANCE_GATE_ENABLED=1 (по умолчанию 0 — как до ворот).
-    gate = AccountGate()
+    # Разделяем state по стеку (testnet/live), т.к. они используют один IP и
+    # имеют общий лимит 2400 weight/min, но разные пороги shed_at.
+    bot_env = os.getenv("BOT_ENV", "testnet")
+    gate_path = Path(f"data/binance_gate_{bot_env}.json")
+    gate = AccountGate(path=gate_path)
     if os.getenv("BINANCE_GATE_ENABLED", "0").lower() in ("1", "true", "yes"):
         client = wrap_client(client, gate)
         log.info(f"[RATE_LIMIT] Gate ACTIVE | limit={gate.weight_limit_1m}, shed_at={gate.shed_at}")
