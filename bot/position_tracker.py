@@ -361,10 +361,13 @@ class PositionTracker:
         now_ms = int(time.time() * 1000)
         # Приоритет — фактическое время входа цикла с биржи (entry_fill_ms).
         # Кэш переживает очистку self.position при закрытии.
+        # ИСПРАВЛЕНИЕ: для reverse-циклов с prefer_db=True игнорируем кэш
+        # текущей ноги, чтобы получить время входа ИСХОДНОГО цикла.
+        is_reverse = bool(getattr(self.position, "is_reverse", False)) if self.position else False
         cached_fill_ms = self._entry_fill_ms
         if not cached_fill_ms and self.position is not None:
             cached_fill_ms = getattr(self.position, "entry_fill_ms", None)
-        if cached_fill_ms and cached_fill_ms > 0:
+        if cached_fill_ms and cached_fill_ms > 0 and not (prefer_db and is_reverse):
             return int(cached_fill_ms)
         pos_ts = getattr(self.position, "entry_timestamp", None) if self.position else None
         entry_ms = 0
