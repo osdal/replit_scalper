@@ -4243,6 +4243,73 @@ async def _run_live_or_paper(
     # Запускаем периодическую проверку состояния позиции в фоне
     check_task = asyncio.create_task(periodic_position_check())
     flat_reconcile_task = asyncio.create_task(_flat_position_reconciler())
+
+    # Дополнительная сверка: ищем фантомные сделки в БД, которые не соответствуют
+    # реальной позиции на бирже. Биржа может иметь только ОДНУ нетто-позицию на символ.
+    # Если в БД есть открытые сделки в направлении, отличном от биржи — это фантомы,
+    # их нужно финализировать (pnl=0, exit_reason=reconcile_phantom).
+    async def _phantom_trade_reconciler():
+        while not shutdown_event.is_set():
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                break
+            try:
+                order_mgr._invalidate_position_cache()
+                q_long = await order_mgr._get_real_position_qty("LONG")
+                q_short = await order_mgr._get_real_position_qty("SHORT")
+            except Exception as e:
+                log.debug(f"[PHANTOM] reconciler fetch failed: {e}")
+                continue
+            if q_long < 0 or q_short < 0:
+                continue
+            # Определяем текущее направление на бирже
+            exch_dir = None
+            if q_long > 1e-9:
+                exch_dir = "LONG"
+            elif q_short > 1e-9:
+                exch_dir = "SHORT"
+            # Если на бирже нет позиции — фантомы обработает _flat_position_reconciler
+            if exch_dir is None:
+                continue
+            # Ищем открытые сделки в БД, направление которых НЕ совпадает с биржей
+            try:
+                import requests as _rq
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+                trades_resp = _rq.get(
+                    f"{api_url}/trades?symbol={cfg.symbol}&limit=20", timeout=5
+                ).json()
+                for trade in (trades_resp.get("trades") or []):
+                    if not trade.get("is_open"):
+                        continue
+                    db_dir = trade.get("direction")
+                    if db_dir != exch_dir:
+                        # Фантомная сделка: направление в БД не совпадает с биржей
+                        # Финализируем с pnl=0, exit_reason=reconcile_phantom
+                        trade_id = trade["id"]
+                        try:
+                            # Сначала пробуем закрыть через API (помечает is_open=0)
+                            close_resp = _rq.post(
+                                f"{api_url}/trades/{trade_id}/close",
+                                json={"exit_reason": "reconcile_phantom", "exit_price": 0},
+                                timeout=10,
+                            )
+                            if close_resp.status_code == 200:
+                                log.warning(
+                                    f"[PHANTOM] closed stale trade #{trade_id} "
+                                    f"({db_dir}) for {cfg.symbol} — exchange has {exch_dir}"
+                                )
+                            else:
+                                log.warning(
+                                    f"[PHANTOM] failed to close trade #{trade_id}: "
+                                    f"{close_resp.status_code} {close_resp.text}"
+                                )
+                        except Exception as e:
+                            log.warning(f"[PHANTOM] close trade #{trade_id} failed: {e}")
+            except Exception as e:
+                log.debug(f"[PHANTOM] reconciler error: {e}")
+
+    phantom_reconcile_task = asyncio.create_task(_phantom_trade_reconciler())
+
     sim_task = asyncio.create_task(_simulate_rejected_background(client, reporter, recovery, log, shutdown_event))
 
     async def _watchdog():
