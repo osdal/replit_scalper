@@ -6,6 +6,7 @@ import { db, tradesTable } from "@workspace/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 import { BOT_DIR, BOT_ENV } from "../botPaths";
 import { binanceRequest, syncBinanceTime } from "../grid-orders-lib";
+import { getWalletBalanceUsd } from "../lib/account-balance";
 import { stopAllBots } from "./bots";
 
 const router = Router();
@@ -81,14 +82,46 @@ async function todayTotalNet(): Promise<{ realized: number; unrealized: number; 
 }
 
 /**
- * Дневной лимит убытка: если реализованный net за текущие UTC-сутки опустился
- * ниже -(baseline + LIVE_DAILY_LOSS_LIMIT_USD), останавливаем всех ботов.
- * Только для live-окружения. Сброс базы — POST /api/live/daily-loss/reset.
+ * Лимит kill-switch в USD.
+ *
+ * Если задан LIVE_DAILY_LOSS_LIMIT_PCT (> 0) — это процент от ТЕКУЩЕГО баланса
+ * счёта (кэш 60с, fallback DEPOSIT_USD). Иначе — фиксированный
+ * LIVE_DAILY_LOSS_LIMIT_USD (историческое поведение). Проценты включаются
+ * только на live-стеке, где они заданы в env.
+ */
+async function resolveKillSwitchLimit(): Promise<{
+  limit: number;
+  pct: number;
+  balance: number | null;
+  source: "pct" | "usd";
+}> {
+  const pct = Number(process.env.LIVE_DAILY_LOSS_LIMIT_PCT || "0");
+  if (Number.isFinite(pct) && pct > 0) {
+    const balance = await getWalletBalanceUsd();
+    const limit = (balance * pct) / 100;
+    if (limit > 0) return { limit, pct, balance, source: "pct" };
+  }
+  const limit = Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0");
+  return { limit, pct: 0, balance: null, source: "usd" };
+}
+
+/**
+ * Дневной лимит убытка: если итог за текущие UTC-сутки (реализованный net +
+ * нереализованный по открытым) опустился ниже -limit, останавливаем всех ботов
+ * и закрываем позиции. Только для live-окружения.
+ * Сброс базы — POST /api/live/daily-loss/reset.
  */
 export async function checkDailyLossLimit(): Promise<void> {
-  const limit = Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0");
-  if (BOT_ENV !== "live" || !Number.isFinite(limit) || limit <= 0) return;
-  if (dailyLossTripped) return;
+  if (BOT_ENV !== "live" || dailyLossTripped) return;
+  let resolved: Awaited<ReturnType<typeof resolveKillSwitchLimit>>;
+  try {
+    resolved = await resolveKillSwitchLimit();
+  } catch (e) {
+    console.error("[live] kill-switch limit resolve failed:", String(e));
+    return;
+  }
+  const limit = resolved.limit;
+  if (!Number.isFinite(limit) || limit <= 0) return;
   try {
     if (lossState.date !== utcDate()) {
       lossState = { date: utcDate(), baseline: 0 };
@@ -101,7 +134,9 @@ export async function checkDailyLossLimit(): Promise<void> {
       console.error(
         `[live] DAILY LOSS LIMIT reached: delta=${delta.toFixed(2)} ` +
         `(realized=${realized.toFixed(2)} unrealized=${unrealized.toFixed(2)} total=${total.toFixed(2)} ` +
-        `baseline=${lossState.baseline.toFixed(2)}) <= -${Math.abs(limit)} — ` +
+        `baseline=${lossState.baseline.toFixed(2)}) <= -${Math.abs(limit).toFixed(2)} ` +
+        `[${resolved.source}${resolved.pct > 0 ? ` ${resolved.pct}%` : ""}` +
+        `${resolved.balance !== null ? ` of ${resolved.balance.toFixed(2)}` : ""}] — ` +
         `stopping all bots and flattening positions`,
       );
       const summary = await flattenAll();
@@ -115,12 +150,17 @@ export async function checkDailyLossLimit(): Promise<void> {
 }
 
 router.get("/daily-loss", async (_req, res) => {
-  const limit = Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0");
   try {
+    const resolved = await resolveKillSwitchLimit();
     const { realized, unrealized, total } = await todayTotalNet();
     res.json({
       bot_env: BOT_ENV,
-      limit,
+      limit: Number(resolved.limit.toFixed(2)),
+      limit_pct: resolved.pct,
+      limit_source: resolved.source,
+      wallet_balance_usd: resolved.balance === null
+        ? null
+        : Number(resolved.balance.toFixed(2)),
       net: total,
       realized,
       unrealized,
@@ -140,8 +180,17 @@ router.post("/daily-loss/reset", async (_req, res) => {
     lossState = { date: utcDate(), baseline: total };
     saveBaseline(lossState);
     dailyLossTripped = false;
-    const limit = Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0");
-    res.json({ success: true, baseline: total, net: total, delta: 0, limit, tripped: false });
+    const resolved = await resolveKillSwitchLimit();
+    res.json({
+      success: true,
+      baseline: total,
+      net: total,
+      delta: 0,
+      limit: Number(resolved.limit.toFixed(2)),
+      limit_pct: resolved.pct,
+      limit_source: resolved.source,
+      tripped: false,
+    });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

@@ -99,6 +99,10 @@ services:
       # покроет комиссию выхода + EXPIRED_CLOSE_MIN_PROFIT_USD (не ждать TP).
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
       - EXPIRED_CLOSE_MIN_PROFIT_USD=0.02
+      # Дневной лимит входа фиксированный ($10): testnet остаётся сопоставимым
+      # с накопленной статистикой. Процентный режим (DAILY_LOSS_LIMIT_PCT)
+      # включён только на live.
+      - DAILY_LOSS_LIMIT_USD=10
       # Жёсткий дедлайн для протухших позиций: если цикл старше 6ч не вышел в
       # минимальный плюс — закрываем принудительно, даже в минусе. Включаем на
       # testnet для сбора статистики (live тоже 6ч).
@@ -185,9 +189,16 @@ services:
       - BOT_ENV=live
       - PORT=5001
       - BINANCE_TESTNET=false
-      # Лимит позиций для live: 3 (из .env.live)
-      - MAX_POSITIONS=3
+      # Лимит позиций для live: 1 (старт на $10). ВАЖНО: .env.live тоже
+      # содержит MAX_POSITIONS и переопределяет process env — менять в обоих.
+      - MAX_POSITIONS=1
       - DASHBOARD_API_URL=http://localhost:5001/api
+      # Риск от ТЕКУЩЕГО баланса счёта (кэш 60с, fallback DEPOSIT_USD).
+      #   5%  — стоп НОВЫХ входов по нетто-PnL за UTC-день;
+      #   10% — kill-switch: стоп всех ботов + закрытие позиций (realized+unrealized).
+      - DAILY_LOSS_LIMIT_PCT=5
+      - LIVE_DAILY_LOSS_LIMIT_PCT=10
+      - DEPOSIT_USD=10
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0

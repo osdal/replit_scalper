@@ -18,6 +18,7 @@ import yaml from "js-yaml";
 import { stopAllBots } from "./bots";
 import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
+import { getWalletBalanceUsd } from "../lib/account-balance";
 
 const router = Router();
 
@@ -45,7 +46,7 @@ function sanitizeLossStreakTrigger(value: unknown, fallback: number): number {
  * только на одном стеке: yaml общий для api-testnet и api-live, а менять
  * поведение live нельзя.
  */
-function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number }>(cfg: T): T {
+function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T): T {
   const env_max = process.env.MAX_POSITIONS;
   if (env_max !== undefined && env_max !== null && env_max !== "") {
     // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
@@ -61,7 +62,38 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_igno
   if (env_streak !== undefined && env_streak !== null && env_streak !== "") {
     cfg.loss_streak_trigger = sanitizeLossStreakTrigger(env_streak, cfg.loss_streak_trigger);
   }
+  // Фиксированный дневной лимит (USD) per-stack. Нужен, чтобы testnet остался
+  // на $10, а live мог использовать процент (DAILY_LOSS_LIMIT_PCT) или своё
+  // значение, не меняя общий recovery_config.yaml.
+  const env_daily = process.env.DAILY_LOSS_LIMIT_USD;
+  if (env_daily !== undefined && env_daily !== null && env_daily !== "") {
+    const n = Number(env_daily);
+    if (Number.isFinite(n) && n >= 0) cfg.daily_loss_limit_usd = n;
+  }
   return cfg;
+}
+
+/**
+ * Дневной лимит убытка в USD, привязанный к проценту от баланса.
+ *
+ * Если задан DAILY_LOSS_LIMIT_PCT (> 0), лимит = pct% × текущий totalWalletBalance
+ * (кэш 60с, fallback DEPOSIT_USD). Иначе — историческое поведение: значение из
+ * env DAILY_LOSS_LIMIT_USD / yaml. Процент включается только там, где он задан,
+ * поэтому testnet (DAILY_LOSS_LIMIT_USD=10) не меняется.
+ */
+async function resolveDailyLossLimitUsd(configuredLimit: number): Promise<{
+  limit: number;
+  pct: number;
+  balance: number | null;
+  source: "pct" | "usd";
+}> {
+  const pct = Number(process.env.DAILY_LOSS_LIMIT_PCT || "0");
+  if (Number.isFinite(pct) && pct > 0) {
+    const balance = await getWalletBalanceUsd();
+    const limit = (balance * pct) / 100;
+    if (limit > 0) return { limit, pct, balance, source: "pct" };
+  }
+  return { limit: configuredLimit, pct: 0, balance: null, source: "usd" };
 }
 
 function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
@@ -278,7 +310,8 @@ router.post("/check", async (req, res) => {
     }
 
     // Дневной лимит убытков — жёсткая остановка на день (по нетто-результату).
-    if (globalCfg.daily_loss_limit_usd > 0 && daily_net <= -globalCfg.daily_loss_limit_usd) {
+    const daily_limit = await resolveDailyLossLimitUsd(globalCfg.daily_loss_limit_usd);
+    if (daily_limit.limit > 0 && daily_net <= -daily_limit.limit) {
       return res.json({
         allowed: false,
         reason: "daily_loss_limit",
@@ -287,6 +320,8 @@ router.post("/check", async (req, res) => {
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
         daily_net: Number(daily_net.toFixed(2)),
+        daily_loss_limit_usd: Number(daily_limit.limit.toFixed(2)),
+        daily_loss_limit_pct: daily_limit.pct,
       });
     }
 
@@ -539,6 +574,7 @@ router.get("/status", async (_req, res) => {
     const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours));
     const daily_net = await getDailyNet();
     const daily_loss = Math.max(0, -daily_net);
+    const daily_limit = await resolveDailyLossLimitUsd(cfg.daily_loss_limit_usd);
     const free_debt = await getFreeDebt();
     res.json({
       positions_open: st.open,
@@ -552,7 +588,12 @@ router.get("/status", async (_req, res) => {
       loss_pause_signals: cfg.loss_pause_signals,
       max_free_debt_usd: cfg.max_free_debt_usd,
       free_debt: Number(free_debt.toFixed(2)),
-      daily_loss_limit_usd: cfg.daily_loss_limit_usd,
+      daily_loss_limit_usd: Number(daily_limit.limit.toFixed(2)),
+      daily_loss_limit_pct: daily_limit.pct,
+      daily_loss_limit_source: daily_limit.source,
+      wallet_balance_usd: daily_limit.balance === null
+        ? null
+        : Number(daily_limit.balance.toFixed(2)),
       daily_loss: Number(daily_loss.toFixed(2)),
       daily_net: Number(daily_net.toFixed(2)),
       pause_timeout_minutes: cfg.pause_timeout_minutes,
