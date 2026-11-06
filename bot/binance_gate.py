@@ -199,6 +199,11 @@ class AccountGate:
             self._local_window_weight(),
             int(data.get("local_weight_1m", 0) or 0),
         )
+        # На testnet заголовок X-MBX-USED-WEIGHT-1M для signed-запросов отдаёт
+        # общий счётчик среды (2500-5000), а не наш IP. Принудительно используем
+        # локальный счётчик, игнорируя настройку WEIGHT_SOURCE.
+        if os.getenv("BINANCE_TESTNET", "false").lower() == "true":
+            return local
         if self._weight_source == "local":
             return local
         header = int(data.get("used_weight_1m", 0) or 0)
