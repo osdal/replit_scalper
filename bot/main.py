@@ -4190,7 +4190,8 @@ async def _run_live_or_paper(
             if entry_ms and (time.time() * 1000 - float(entry_ms)) < 120_000:
                 continue
             try:
-                order_mgr._invalidate_position_cache()
+                # TTL-кэш позиций (POSITION_CACHE_TTL_SEC) достаточно свежий:
+                # принудительный сброс здесь давал лишний positionRisk каждую минуту.
                 q_dir = await order_mgr._get_real_position_qty(pos.direction)
                 q_opp = await order_mgr._get_real_position_qty(
                     "SHORT" if pos.direction == "LONG" else "LONG"
@@ -4255,11 +4256,13 @@ async def _run_live_or_paper(
     # их нужно финализировать (pnl=0, exit_reason=reconcile_phantom).
     async def _phantom_trade_reconciler():
         while not shutdown_event.is_set():
-            await asyncio.sleep(60)
+            # При открытой позиции — раз в минуту; на флэте фантомы в БД
+            # обрабатывает _flat_position_reconciler, поэтому опрос биржи
+            # достаточно делать раз в 5 минут (экономия positionRisk ×40 ботов).
+            await asyncio.sleep(60 if tracker.has_open_position() else 300)
             if shutdown_event.is_set():
                 break
             try:
-                order_mgr._invalidate_position_cache()
                 q_long = await order_mgr._get_real_position_qty("LONG")
                 q_short = await order_mgr._get_real_position_qty("SHORT")
             except Exception as e:

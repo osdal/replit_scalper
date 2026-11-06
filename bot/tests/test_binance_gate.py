@@ -183,6 +183,43 @@ def test_note_request_aggregates_and_logs(tmp_path, caplog):
     assert gate._demand["GET /fapi/v1/ticker/price"][0] == 1
 
 
+def test_local_weight_source_ignores_inflated_header(tmp_path, monkeypatch):
+    """На testnet заголовок для signed-запросов общий (3000-5000) — не режем
+    вторичные запросы по нему: считаем собственный вес (source=local)."""
+    import time as _time
+
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    monkeypatch.setenv("BINANCE_WEIGHT_SOURCE", "auto")
+    p = tmp_path / "gate.json"
+    write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 300, "ts": _time.time()})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.5)
+    assert gate._weight_source == "local"
+
+    gate.record_response(4000)  # «чужой» раздутый заголовок
+    allowed, reason = gate.check_and_reserve(weight=5, is_critical=False)
+    assert allowed is True, reason
+
+
+def test_local_weight_source_sheds_on_own_load(tmp_path, monkeypatch):
+    """Если локальный вес реально превысил порог — вторичные запросы режутся."""
+    import time as _time
+
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    monkeypatch.setenv("BINANCE_WEIGHT_SOURCE", "auto")
+    p = tmp_path / "gate.json"
+    write_gate(p, {"ban_until_ms": 0, "used_weight_1m": 0, "ts": _time.time()})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.5)
+    for _ in range(250):  # 250 * 5 = 1250 > 50% от 2400
+        gate.note_request("GET", "/fapi/v1/klines", 5, False, True)
+
+    allowed, reason = gate.check_and_reserve(weight=1, is_critical=False)
+    assert allowed is False
+    assert "shed" in reason
+    # Критичный запрос проходит всегда.
+    allowed, _ = gate.check_and_reserve(weight=5, is_critical=True)
+    assert allowed is True
+
+
 def test_is_critical():
     assert _is_critical("POST", "/fapi/v1/order") is True
     assert _is_critical("DELETE", "/fapi/v1/order") is True

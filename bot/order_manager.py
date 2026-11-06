@@ -63,7 +63,9 @@ def _audit(event: str, **fields) -> None:
 # весу эндпоинт (~90% бюджета IP): 20с вместо 5с режет его вызовы вчетверо,
 # не мешая SL/TP-тику (он идёт по WS/last-цене) и инвалидации после сделок.
 BALANCE_CACHE_TTL_SEC = 10.0
-POSITION_CACHE_TTL_SEC = 20.0
+# TTL кэша позиций можно поднять через env (testnet: 30с). Инвалидация после
+# сделок и `fresh=True` в защитных проверках сохраняются.
+POSITION_CACHE_TTL_SEC = float(os.getenv("POSITION_CACHE_TTL_SEC", "20"))
 
 
 def _direction_to_side(direction: str) -> str:

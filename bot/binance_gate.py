@@ -35,6 +35,18 @@ RETRY_AFTER_DEFAULT_SEC = 10.0
 # боты продолжают слать запросы и продлевают бан.
 BAN_FALLBACK_SEC = float(os.getenv("BINANCE_BAN_FALLBACK_SEC", "30"))
 
+# Откуда брать текущий вес для решения о shedding (env BINANCE_WEIGHT_SOURCE):
+#   header — X-MBX-USED-WEIGHT-1M из ответа (корректно на mainnet: проверено,
+#            невалидный ключ получает те же ~40, что и ping с того же IP);
+#   local  — собственный счётчик запросов за последние 60с, суммированный по
+#            всем процессам через gate-файлы;
+#   auto   — local на testnet, header на mainnet.
+# ПРИЧИНА: на testnet заголовок для SIGNED-запросов отдаёт общий счётчик среды
+# (2600-5200), а не наш IP: невалидный ключ и наш ключ получают одинаковые
+# значения, при этом unsigned ping с того же IP — ~40. Из-за этого gate
+# постоянно уходил в shed и блокировал легитимные вторичные запросы (REST ticker,
+# реконсилеры), не защищая ни от чего.
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -113,6 +125,18 @@ class AccountGate:
         # раз в STATS_INTERVAL_SEC и пишется одной строкой в лог.
         self._demand: dict[str, list[int]] = {}
         self._demand_since: float = _now_sec()
+        # Локальный счётчик веса за последние 60с (fallback/основа на testnet).
+        self._local_events: list[tuple[float, int]] = []
+        # Источник веса читаем при создании gate, а не на импорте модуля:
+        # в тестах/скриптах окружение может меняться после импорта.
+        source = (os.getenv("BINANCE_WEIGHT_SOURCE", "auto") or "auto").strip().lower()
+        if source not in ("local", "header"):
+            source = (
+                "local"
+                if os.getenv("BINANCE_TESTNET", "false").lower() == "true"
+                else "header"
+            )
+        self._weight_source = source
 
     # ------------------------------------------------------------------ #
     #  Файловые хелперы                                                  #
@@ -133,8 +157,10 @@ class AccountGate:
 
     def _read_all(self) -> dict:
         """Агрегирует все файлы <path>.*: бан = максимум, вес = самое свежее."""
-        best = {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0}
+        best = {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0, "local_weight_1m": 0}
         try:
+            now = _now_sec()
+            local_sum = 0
             for fpath in glob.glob(str(self.path) + "*"):
                 try:
                     d = self._read_one(Path(fpath))
@@ -143,12 +169,40 @@ class AccountGate:
                 if d.get("ban_until_ms", 0) > best["ban_until_ms"]:
                     best["ban_until_ms"] = d["ban_until_ms"]
                 dts = d.get("ts", 0.0)
-                if _now_sec() - dts <= WEIGHT_TTL_SEC and dts > best.get("ts", 0.0):
-                    best["used_weight_1m"] = d.get("used_weight_1m", 0)
-                    best["ts"] = dts
+                if now - dts <= WEIGHT_TTL_SEC:
+                    # Сумма локальных окон всех живых процессов = реальный
+                    # расход IP за минуту, без опоры на заголовок Binance.
+                    try:
+                        local_sum += int(d.get("local_weight_1m", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    if dts > best.get("ts", 0.0):
+                        best["used_weight_1m"] = d.get("used_weight_1m", 0)
+                        best["ts"] = dts
+            best["local_weight_1m"] = local_sum
         except Exception:
             pass
         return best
+
+    def _local_window_weight(self) -> int:
+        """Собственный вес запросов процесса за последние 60 секунд."""
+        now = _now_sec()
+        if self._local_events:
+            self._local_events = [
+                (ts, w) for ts, w in self._local_events if now - ts <= 60.0
+            ]
+        return int(sum(w for _, w in self._local_events))
+
+    def _effective_weight(self, data: dict) -> int:
+        """Вес для решения о shedding с учётом источника (см. WEIGHT_SOURCE)."""
+        local = max(
+            self._local_window_weight(),
+            int(data.get("local_weight_1m", 0) or 0),
+        )
+        if self._weight_source == "local":
+            return local
+        header = int(data.get("used_weight_1m", 0) or 0)
+        return max(header, local)
 
     def _read_all_cached(self) -> dict:
         """Чтение с кэшированием на ~1 секунду."""
@@ -220,7 +274,7 @@ class AccountGate:
             remaining = (ban_until - _now_ms()) / 1000.0
             return False, f"banned until {ban_until} ({remaining:.0f}s left)"
 
-        total_used = data.get("used_weight_1m", 0)
+        total_used = self._effective_weight(data)
         if not is_critical and total_used / self.weight_limit_1m > self.shed_at:
             self._deferred_count += 1
             self._maybe_log_stats()
@@ -233,7 +287,12 @@ class AccountGate:
     ) -> None:
         """Записать результат ответа (с дросселем 1 сек на запись)."""
         now = _now_sec()
-        data = {"ban_until_ms": 0, "used_weight_1m": weight_used, "ts": now}
+        data = {
+            "ban_until_ms": 0,
+            "used_weight_1m": weight_used,
+            "ts": now,
+            "local_weight_1m": self._local_window_weight(),
+        }
         if ban_until_ms and ban_until_ms > 0:
             data["ban_until_ms"] = ban_until_ms
         try:
@@ -245,7 +304,8 @@ class AccountGate:
     def record_ban(self, ban_until_ms: int) -> None:
         """Записать бан БЕЗ дросселя (сразу)."""
         now = _now_sec()
-        data = {"ban_until_ms": ban_until_ms, "used_weight_1m": 0, "ts": now}
+        data = {"ban_until_ms": ban_until_ms, "used_weight_1m": 0, "ts": now,
+                "local_weight_1m": self._local_window_weight()}
         try:
             self._write_file(self._my_path(), data)
             self._cache_ts = 0.0
@@ -273,8 +333,10 @@ class AccountGate:
         except Exception:
             return
         logger.warning(
-            f"[RATE_LIMIT] used_weight_1m={data.get('used_weight_1m', 0)}/"
-            f"{self.weight_limit_1m}, deferred={self._deferred_count}, "
+            f"[RATE_LIMIT] used_weight_1m={data.get('used_weight_1m', 0)} "
+            f"local={data.get('local_weight_1m', 0)} "
+            f"effective={self._effective_weight(data)}/{self.weight_limit_1m} "
+            f"source={self._weight_source}, deferred={self._deferred_count}, "
             f"banned_until={data.get('ban_until_ms', 0)}"
         )
 
@@ -283,6 +345,10 @@ class AccountGate:
     ) -> None:
         """Учесть запрос для диагностики спроса (ничего не решает)."""
         try:
+            # Локальный счётчик веса: учитываем и отклонённые gate'ом запросы
+            # (они не уходят в сеть, поэтому вес не тратят).
+            if allowed:
+                self._local_events.append((_now_sec(), int(weight)))
             self._maybe_log_demand()
             key = f"{method.upper()} {uri.split('?')[0]}"
             rec = self._demand.get(key)
