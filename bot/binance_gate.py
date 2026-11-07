@@ -166,10 +166,13 @@ class AccountGate:
                     d = self._read_one(Path(fpath))
                 except Exception:
                     continue
-                if d.get("ban_until_ms", 0) > best["ban_until_ms"]:
-                    best["ban_until_ms"] = d["ban_until_ms"]
                 dts = d.get("ts", 0.0)
                 if now - dts <= WEIGHT_TTL_SEC:
+                    # Только свежие файлы (не старше TTL) вливаются в агрегацию.
+                    # Это и для веса, и для бана — старый файл с баном не должен
+                    # вечно блокировать всех, если процесс давно не обновлял файл.
+                    if d.get("ban_until_ms", 0) > best["ban_until_ms"]:
+                        best["ban_until_ms"] = d["ban_until_ms"]
                     # Сумма локальных окон всех живых процессов = реальный
                     # расход IP за минуту, без опоры на заголовок Binance.
                     try:
