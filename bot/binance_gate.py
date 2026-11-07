@@ -537,6 +537,10 @@ def _wrap_client(client, gate: AccountGate):
             )
         except Exception as e:
             try:
+                # Не записывать бан для собственных блокировок gate (shed/ban),
+                # иначе gate сам себя банит при превышении лимита веса.
+                if isinstance(e, GateBlocked):
+                    raise
                 resp = getattr(client, "response", None)
                 status = getattr(e, "status_code", None)
                 code = getattr(e, "code", None)
@@ -552,6 +556,8 @@ def _wrap_client(client, gate: AccountGate):
                 if ban:
                     gate.record_ban(ban)
             except Exception:
+                if isinstance(e, GateBlocked):
+                    raise
                 pass
             raise
 
