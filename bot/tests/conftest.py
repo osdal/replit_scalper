@@ -12,3 +12,8 @@ import pytest
 @pytest.fixture(autouse=True)
 def _default_weight_source(monkeypatch):
     monkeypatch.setenv("BINANCE_WEIGHT_SOURCE", "header")
+    # .env репозитория может выставлять BINANCE_TESTNET=true. На testnet gate
+    # принудительно считает вес локально (заголовок там общий), и тесты с
+    # shed по заголовку ломались бы от порядка импорта. Тесты, которым нужен
+    # testnet-режим, выставляют переменную сами.
+    monkeypatch.setenv("BINANCE_TESTNET", "false")

@@ -3,8 +3,10 @@
 чтобы при ошибках -1003 (IP ban) и -429 (too many requests) бот НЕ падал,
 а ждал с backoff и повторял.
 
-- -1003 — IP забанен до определённого времени. Ждём до момента снятия бана + буфер.
-  После ожидания запрос НЕ повторяется в этом же вызове: caller пропускает цикл.
+- -1003 — IP забанен до определённого времени. По умолчанию НЕ ждём: фиксируем
+  окно бана и пропускаем цикл (блокирующий sleep останавливает WS-поток, см.
+  BAN_BLOCK_ON_BAN). Запросы во время бана отсекает AccountGate локально.
+  После снятия бана работа продолжается сама.
 - -429  — превышена частота запросов. Ждём с экспоненциальным backoff.
 - Прочие сетевые ошибки тоже ретраим несколько раз, чтобы случайные сбои не роняли бота.
 
@@ -14,12 +16,22 @@
 """
 import asyncio
 import logging
+import os
 import random
 import time
+from typing import Optional
 
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 
 logger = logging.getLogger("rate_limit")
+
+# Блокировать ли вызывающий код на всё время бана (await sleep до снятия).
+# В горячем пути (обработчик свечи, tick-цикл) это НЕЛЬЗЯ: сон останавливает
+# потребитель WS-очереди, очередь сокета переполняется (BinanceWebsocketQueueOverflow)
+# и бот слепнет до конца бана. Поэтому по умолчанию НЕ блокируем: фиксируем окно
+# бана, отдаём управление, а сетевые запросы отсекает AccountGate (ban_until_ms
+# в gate-файле), так что биржу мы не долбим.
+BAN_BLOCK_ON_BAN = os.getenv("RATE_LIMIT_BLOCK_ON_BAN", "false").lower() == "true"
 
 # Коды, при которых ждём снятия бана / освобождения лимита.
 _RATE_LIMIT_CODES = {-1003, -429}
@@ -117,18 +129,29 @@ def ban_wait_seconds(exc, now: float = None) -> float:
     return extra
 
 
-async def wait_for_ban(exc, log=None) -> bool:
+async def wait_for_ban(exc, log=None, *, block: Optional[bool] = None) -> bool:
     """
-    Если exc — бан (-1003), спит до снятия бана (+backoff) и возвращает True.
+    Если exc — бан (-1003), обрабатывает его и возвращает True.
     НЕ повторяет запрос: caller должен пропустить текущий цикл.
 
+    block=False (по умолчанию, см. BAN_BLOCK_ON_BAN) — НЕ спит: только
+    фиксирует окно бана и сразу возвращает управление. Это обязательно для
+    горячего пути: блокирующий sleep внутри обработчика свечи останавливает
+    чтение WS-сокета и бот теряет поток данных до конца бана.
+    Запросы в это время и так отсекает AccountGate по ban_until_ms.
+
+    block=True — прежнее поведение: спит до снятия бана + backoff. Годится
+    только для холодного пути, где ускорять нечего (например, ручные скрипты).
+
     Для уже обрабатываемого бана (тот же/более ранний ban_until) пауза повторно
-    НЕ эскалируется — ждём только остаток. Для не-бановых ошибок возвращает
-    False, ничего не делая.
+    НЕ эскалируется. Для не-бановых ошибок возвращает False, ничего не делая.
     """
     global _active_ban_until_wall
     if not is_ban_error(exc):
         return False
+
+    if block is None:
+        block = BAN_BLOCK_ON_BAN
 
     now = time.time()
     until_ms = _parse_ban_until(getattr(exc, "message", "") or "")
@@ -137,12 +160,29 @@ async def wait_for_ban(exc, log=None) -> bool:
     if ban_until_wall > now and ban_until_wall <= _active_ban_until_wall:
         remaining = max(0.0, _active_ban_until_wall - now)
         if log and remaining > 0:
-            log.warning(
-                f"[RATE_LIMIT] IP banned -1003 (same ban), waiting {remaining:.0f}s "
-                f"before next cycle"
-            )
-        if remaining > 0:
+            if block:
+                log.warning(
+                    f"[RATE_LIMIT] IP banned -1003 (same ban), waiting {remaining:.0f}s "
+                    f"before next cycle"
+                )
+            else:
+                log.warning(
+                    f"[RATE_LIMIT] IP banned -1003 (same ban), skipping cycle "
+                    f"({remaining:.0f}s left)"
+                )
+        if block and remaining > 0:
             await asyncio.sleep(remaining)
+        return True
+
+    if not block:
+        if ban_until_wall > 0:
+            _active_ban_until_wall = max(ban_until_wall, _active_ban_until_wall)
+        remaining = max(0.0, _active_ban_until_wall - now)
+        if log:
+            log.warning(
+                f"[RATE_LIMIT] IP banned -1003, skipping cycle "
+                f"({remaining:.0f}s left, no block)"
+            )
         return True
 
     delay = ban_wait_seconds(exc, now)

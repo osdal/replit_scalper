@@ -12,6 +12,12 @@ from rate_limit import with_retry
 
 logger = logging.getLogger("market_data")
 
+# Очередь закрытых свечей между читателем WS и обработчиком. Ограничена, чтобы
+# при занятом обработчике (бан/сеть) не копить историю: важна свежесть.
+CANDLE_QUEUE_MAXSIZE = 16
+# В эти моменты пишем warning о дропе (не спамим на каждой свече).
+_DROP_LOG_POINTS = {1, 10, 50, 100, 500, 1000}
+
 # WS-цена считается свежей не дольше этого порога; после — падаем на REST ticker.
 PRICE_WS_MAX_AGE_SEC = 5.0
 # Окно дедупликации klines: одинаковый запрос в пределах окна берётся из кэша,
@@ -227,6 +233,12 @@ async def start_kline_websocket(
     контракт тот же, что у start_kline_polling: callback(pd.Series) с полями
     open/high/low/close/volume и .name = open_time (pd.Timestamp).
 
+    ВАЖНО: обработчик свечи НЕ вызывается из цикла чтения сокета. Он ходит в
+    REST и может ждать/ретраить (бан, сеть), а блокировка чтения переполняет
+    внутреннюю очередь сокета (BinanceWebsocketQueueOverflow) и убивает поток
+    данных до конца бана. Поэтому читатель только кладёт свечи в ограниченную
+    очередь, а отдельная задача обрабатывает их последовательно.
+
     on_price вызывается на каждом markPrice-апдейте — используется ботом для
     SL/TP-тика и heartbeat, чтобы не дёргать REST ticker (mark также доступен
     через get_price_snapshot()).
@@ -251,106 +263,145 @@ async def start_kline_websocket(
             f"[WS] Starting market data socket | {symbol} streams={streams}"
         )
 
-    backoff = 1.0
-    while True:
-        if shutdown_event and shutdown_event.is_set():
-            break
-        try:
-            # category="market" — корректный путь для market-стримов USD-M.
-            # На реальном эндпоинте category=None даёт соединение БЕЗ данных
-            # (стрим не идёт), а на тестнете работает; "market" проверенно
-            # работает в обоих окружениях.
-            async with bm.futures_multiplex_socket(streams, category="market") as stream:
+    candle_queue: asyncio.Queue = asyncio.Queue(maxsize=CANDLE_QUEUE_MAXSIZE)
+    dropped = {"n": 0}
+
+    async def _consume_candles() -> None:
+        """Последовательная обработка закрытых свечей вне цикла чтения сокета."""
+        while True:
+            iv, candle, stream_key = await candle_queue.get()
+            cb = handlers.get(iv)
+            if cb is None:
+                continue
+            # Разнести обработку закрытия по времени: 40 ботов получают событие
+            # одновременно и бьют в REST одним залпом — биржа отвечает IP-баном.
+            # Детерминированная задержка 0–2 с на процесс (hash рандомизирован
+            # per-process) сглаживает пик. При накопившемся хвосте не спим:
+            # важнее догнать очередь.
+            if candle_queue.empty():
+                try:
+                    await asyncio.sleep((hash(stream_key) % 2000) / 1000.0)
+                except asyncio.CancelledError:
+                    raise
+            try:
+                result = cb(candle)
+                if asyncio.iscoroutine(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
                 if logger:
-                    logger.info(
-                        f"[WS] Connected | {symbol} intervals={list(handlers.keys())}"
-                    )
-                while True:
-                    if shutdown_event and shutdown_event.is_set():
-                        break
-                    try:
-                        msg = await asyncio.wait_for(stream.recv(), timeout=ping_timeout)
-                        # Соединение реально работает — только теперь сбрасываем backoff,
-                        # чтобы не крутить 1-секундный реконнект при «открылся и упал».
-                        backoff = 1.0
-                    except asyncio.TimeoutError:
-                        if logger:
-                            logger.warning(
-                                f"[WS] No message for {ping_timeout}s, reconnecting"
-                            )
-                        break
-                    if not isinstance(msg, dict):
-                        continue
-                    data = msg.get("data", msg)
-                    if not isinstance(data, dict):
-                        continue
-                    event = data.get("e")
-                    if event == "kline":
-                        k = data.get("k") or {}
-                        # Последняя торговая цена — на КАЖДОМ апдейте свечи
-                        # (в т.ч. незакрытой): k.c = close текущей свечи.
+                    logger.error(f"Candle handler error ({iv}): {e}", exc_info=True)
+
+    consumer_task = asyncio.create_task(_consume_candles())
+    backoff = 1.0
+    try:
+        while True:
+            if shutdown_event and shutdown_event.is_set():
+                break
+            try:
+                # category="market" — корректный путь для market-стримов USD-M.
+                # На реальном эндпоинте category=None даёт соединение БЕЗ данных
+                # (стрим не идёт), а на тестнете работает; "market" проверенно
+                # работает в обоих окружениях.
+                async with bm.futures_multiplex_socket(streams, category="market") as stream:
+                    if logger:
+                        logger.info(
+                            f"[WS] Connected | {symbol} intervals={list(handlers.keys())}"
+                        )
+                    while True:
+                        if shutdown_event and shutdown_event.is_set():
+                            break
                         try:
-                            traded = float(k.get("c", 0) or 0)
-                        except (TypeError, ValueError):
-                            traded = 0.0
-                        if traded > 0:
-                            _last_traded_price = traded
-                            _last_traded_ts = time.time()
-                        if not k.get("x"):
-                            continue
-                        iv = stream_to_interval.get(msg.get("stream", ""))
-                        cb = handlers.get(iv) if iv else None
-                        if cb is None:
-                            continue
-                        candle = _ws_kline_to_series(k)
-                        if logger:
-                            logger.info(
-                                f"Candle closed | {iv} "
-                                f"time={candle.name} close={candle['close']:.2f}"
-                            )
-                        # Разнести обработку закрытия по времени: 40 ботов
-                        # получают событие одновременно и бьют в REST одним
-                        # залпом — биржа отвечает IP-баном -1003 на ~4 минуты.
-                        # Детерминированная задержка 0–2 с на процесс (hash
-                        # рандомизирован per-process) сглаживает пик.
-                        try:
-                            await asyncio.sleep(
-                                (hash(msg.get("stream", "") or "") % 2000) / 1000.0
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        try:
-                            result = cb(candle)
-                            if asyncio.iscoroutine(result):
-                                await result
-                        except Exception as e:
+                            msg = await asyncio.wait_for(stream.recv(), timeout=ping_timeout)
+                            # Соединение реально работает — только теперь сбрасываем backoff,
+                            # чтобы не крутить 1-секундный реконнект при «открылся и упал».
+                            backoff = 1.0
+                        except asyncio.TimeoutError:
                             if logger:
-                                logger.error(
-                                    f"Candle handler error ({iv}): {e}",
-                                    exc_info=True,
+                                logger.warning(
+                                    f"[WS] No message for {ping_timeout}s, reconnecting"
                                 )
-                    elif event == "markPriceUpdate":
-                        try:
-                            price = float(data.get("p", 0) or 0)
-                        except (TypeError, ValueError):
-                            price = 0.0
-                        if price > 0:
-                            _mark_price = price
-                            _mark_price_ts = time.time()
-                            if on_price is not None:
-                                on_price(price)
+                            break
+                        if not isinstance(msg, dict):
+                            continue
+                        data = msg.get("data", msg)
+                        if not isinstance(data, dict):
+                            continue
+                        event = data.get("e")
+                        if event == "kline":
+                            k = data.get("k") or {}
+                            # Последняя торговая цена — на КАЖДОМ апдейте свечи
+                            # (в т.ч. незакрытой): k.c = close текущей свечи.
+                            try:
+                                traded = float(k.get("c", 0) or 0)
+                            except (TypeError, ValueError):
+                                traded = 0.0
+                            if traded > 0:
+                                _last_traded_price = traded
+                                _last_traded_ts = time.time()
+                            if not k.get("x"):
+                                continue
+                            stream_key = msg.get("stream", "") or ""
+                            iv = stream_to_interval.get(stream_key)
+                            if iv is None or iv not in handlers:
+                                continue
+                            candle = _ws_kline_to_series(k)
+                            if logger:
+                                logger.info(
+                                    f"Candle closed | {iv} "
+                                    f"time={candle.name} close={candle['close']:.2f}"
+                                )
+                            # Не блокируем чтение сокета: только ставим в очередь.
+                            try:
+                                candle_queue.put_nowait((iv, candle, stream_key))
+                            except asyncio.QueueFull:
+                                # Обработчик не успевает. Дропаем самую старую
+                                # свечу: актуальная важнее полноты истории.
+                                try:
+                                    candle_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                try:
+                                    candle_queue.put_nowait((iv, candle, stream_key))
+                                except asyncio.QueueFull:
+                                    pass
+                                dropped["n"] += 1
+                                if logger and dropped["n"] in _DROP_LOG_POINTS:
+                                    logger.warning(
+                                        f"[WS] candle queue full, dropped "
+                                        f"{dropped['n']} stale candle(s) (handler busy)"
+                                    )
+                        elif event == "markPriceUpdate":
+                            try:
+                                price = float(data.get("p", 0) or 0)
+                            except (TypeError, ValueError):
+                                price = 0.0
+                            if price > 0:
+                                _mark_price = price
+                                _mark_price_ts = time.time()
+                                if on_price is not None:
+                                    on_price(price)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if logger:
+                    logger.warning(
+                        f"[WS] socket error: {type(e).__name__}: {e!r}; "
+                        f"reconnecting in {backoff:.0f}s"
+                    )
+            if shutdown_event and shutdown_event.is_set():
+                break
+            await asyncio.sleep(backoff + random.random())
+            backoff = min(backoff * 2, 60.0)
+    finally:
+        consumer_task.cancel()
+        try:
+            await consumer_task
         except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            if logger:
-                logger.warning(
-                    f"[WS] socket error: {type(e).__name__}: {e!r}; "
-                    f"reconnecting in {backoff:.0f}s"
-                )
-        if shutdown_event and shutdown_event.is_set():
-            break
-        await asyncio.sleep(backoff + random.random())
-        backoff = min(backoff * 2, 60.0)
+            pass
+        except Exception:
+            pass
 
 
 async def start_kline_polling(

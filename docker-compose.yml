@@ -121,6 +121,9 @@ services:
       # Кэш positionRisk: 30с на testnet (запросов меньше, защитные проверки
       # инвалидируют кэш сами после сделок).
       - POSITION_CACHE_TTL_SEC=30
+      # Бан Binance (-1003) НЕ блокирует обработчик свечи: иначе читатель WS
+      # встаёт, очередь сокета переполняется и бот слепнет до конца бана.
+      - RATE_LIMIT_BLOCK_ON_BAN=false
       # Grid engine (server-side): включить движок сеток.
       - GRID_ENGINE_ENABLED=true
 
@@ -212,6 +215,8 @@ services:
       - BINANCE_WEIGHT_SOURCE=header
       - BINANCE_BAN_FALLBACK_SEC=30
       - POSITION_CACHE_TTL_SEC=20
+      # Бан Binance (-1003) НЕ блокирует обработчик свечи (см. testnet-стек).
+      - RATE_LIMIT_BLOCK_ON_BAN=false
       # Игнорировать позиции старше N часов для max_positions.
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
       # Глобальная пауза после 4 убытков подряд (yaml=35, т.е. выкл для testnet;
