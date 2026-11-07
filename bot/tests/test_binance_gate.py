@@ -85,6 +85,35 @@ def test_check_and_reserve_banned_critical_still_blocked(tmp_path):
     assert "banned" in reason
 
 
+def test_old_ban_file_still_blocks_until_expiry(tmp_path):
+    """Файл давно не обновлялся, но бан ещё не истёк — уважаем его.
+
+    Во время бана бот не делает запросов (gate блокирует локально) и файл не
+    обновляет. Если применять TTL к бану, через 60 с все процессы «забудут»
+    бан и снова ударят в сеть, продлевая его.
+    """
+    p = tmp_path / "gate.json"
+    import time
+    ban_until = int(time.time() * 1000) + 60000
+    write_gate(p, {"ban_until_ms": ban_until, "used_weight_1m": 0, "ts": time.time() - 600})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
+    allowed, reason = gate.check_and_reserve(weight=5, is_critical=True)
+    assert allowed is False
+    assert reason.startswith("banned until")
+
+
+def test_absurd_far_ban_is_ignored(tmp_path):
+    """Битый/абсурдно далёкий таймстамп бана не должен блокировать навсегда."""
+    p = tmp_path / "gate.json"
+    import time
+    write_gate(p, {"ban_until_ms": int(time.time() * 1000) + 48 * 3600 * 1000,
+                   "used_weight_1m": 0, "ts": time.time()})
+    gate = AccountGate(path=p, weight_limit_1m=2400, shed_at=0.75)
+    allowed, reason = gate.check_and_reserve(weight=1, is_critical=False)
+    assert allowed is True
+    assert reason == "ok"
+
+
 # --------------------------------------------------------------------------- #
 #  AccountGate: record_response + ban                                         #
 # --------------------------------------------------------------------------- #

@@ -29,6 +29,10 @@ SHED_AT = float(os.getenv("BINANCE_SHED_AT", "0.75"))
 STATS_INTERVAL_SEC = 60.0
 WRITE_INTERVAL_SEC = 1.0
 WEIGHT_TTL_SEC = 60.0
+# Бан берётся из gate-файлов БЕЗ привязки к возрасту файла (у бана есть явный
+# срок ban_until_ms). Это защита от мусора: абсурдно далёкие значения (битый
+# таймстамп) игнорируем.
+MAX_BAN_AHEAD_MS = 24 * 3600 * 1000
 RETRY_AFTER_DEFAULT_SEC = 10.0
 # Сколько держать общую паузу, если -1003 пришёл БЕЗ 'banned until' и без
 # Retry-After (типично для testnet). Бан общий на IP: без этого окна остальные
@@ -156,7 +160,11 @@ class AccountGate:
             return {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0}
 
     def _read_all(self) -> dict:
-        """Агрегирует все файлы <path>.*: бан = максимум, вес = самое свежее."""
+        """Агрегирует все файлы <path>.*.
+
+        Бан = максимум ban_until_ms (независимо от возраста файла: срок задан
+        самим баном). Вес = самое свежее показание не старше WEIGHT_TTL_SEC.
+        """
         best = {"ban_until_ms": 0, "used_weight_1m": 0, "ts": 0.0, "local_weight_1m": 0}
         try:
             now = _now_sec()
@@ -167,12 +175,18 @@ class AccountGate:
                 except Exception:
                     continue
                 dts = d.get("ts", 0.0)
+                # Бан не зависит от возраста файла: срок задан в ban_until_ms.
+                # TTL применять нельзя — во время бана процесс не делает запросов
+                # (gate блокирует локально) и файл не обновляет; через 60 с бан
+                # «забывался» бы всеми и каждый снова бил в сеть, продлевая бан.
+                try:
+                    ban = int(d.get("ban_until_ms", 0) or 0)
+                except (TypeError, ValueError):
+                    ban = 0
+                if ban > best["ban_until_ms"] and ban <= _now_ms() + MAX_BAN_AHEAD_MS:
+                    best["ban_until_ms"] = ban
                 if now - dts <= WEIGHT_TTL_SEC:
-                    # Только свежие файлы (не старше TTL) вливаются в агрегацию.
-                    # Это и для веса, и для бана — старый файл с баном не должен
-                    # вечно блокировать всех, если процесс давно не обновлял файл.
-                    if d.get("ban_until_ms", 0) > best["ban_until_ms"]:
-                        best["ban_until_ms"] = d["ban_until_ms"]
+                    # Вес — только из свежих файлов (старый счётчик неактуален).
                     # Сумма локальных окон всех живых процессов = реальный
                     # расход IP за минуту, без опоры на заголовок Binance.
                     try:
