@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +39,16 @@ RETRY_AFTER_DEFAULT_SEC = 10.0
 # Retry-After (типично для testnet). Бан общий на IP: без этого окна остальные
 # боты продолжают слать запросы и продлевают бан.
 BAN_FALLBACK_SEC = float(os.getenv("BINANCE_BAN_FALLBACK_SEC", "30"))
+
+# --- Post-ban resume stagger --------------------------------------------- #
+# После снятия бана НЕ выпускаем весь флот в сеть одновременно: иначе все
+# процессы бьют на первой же свече и мгновенно получают новый бан (проверено:
+# бан истёк 09:24:55 — в 09:25:30-09:25:51 все 8 ботов уже были забанены).
+# Сначала общий cooldown (всем), затем индивидуальная детерминированная
+# задержка 0..JITTER на процесс. По умолчанию выключено (0): включается в
+# testnet-стеке через env.
+POST_BAN_COOLDOWN_SEC = float(os.getenv("POST_BAN_COOLDOWN_SEC", "0") or 0)
+POST_BAN_JITTER_SEC = float(os.getenv("POST_BAN_JITTER_SEC", "0") or 0)
 
 # Откуда брать текущий вес для решения о shedding (env BINANCE_WEIGHT_SOURCE):
 #   header — X-MBX-USED-WEIGHT-1M из ответа (корректно на mainnet: проверено,
@@ -141,6 +152,32 @@ class AccountGate:
                 else "header"
             )
         self._weight_source = source
+        # Post-ban resume: читаем env в момент создания gate (тесты/скрипты
+        # меняют окружение после импорта модуля).
+        self.post_ban_cooldown = max(
+            0.0, float(os.getenv("POST_BAN_COOLDOWN_SEC", "0") or 0)
+        )
+        jitter = max(0.0, float(os.getenv("POST_BAN_JITTER_SEC", "0") or 0))
+        self._resume_jitter = self._calc_resume_jitter(jitter)
+
+    def _calc_resume_jitter(self, jitter_sec: float) -> float:
+        """Детерминированная задержка процесса в [0, jitter_sec).
+
+        Одинаковая для всех запросов этого процесса, но разная у процессов:
+        так флот растягивается по времени, а не идёт залпом. pid в seed —
+        после рестарта контейнера задержки пересчитываются.
+        """
+        if jitter_sec <= 0:
+            return 0.0
+        seed = f"{self.path}:{os.getpid()}".encode("utf-8", "ignore")
+        return (zlib.crc32(seed) % max(1, int(jitter_sec * 1000))) / 1000.0
+
+    def post_ban_resume_at_ms(self, ban_until_ms: int) -> int:
+        """Момент, раньше которого после бана запросы не отправляем."""
+        if ban_until_ms <= 0:
+            return 0
+        extra_ms = int((self.post_ban_cooldown + self._resume_jitter) * 1000)
+        return ban_until_ms + extra_ms
 
     # ------------------------------------------------------------------ #
     #  Файловые хелперы                                                  #
@@ -295,6 +332,14 @@ class AccountGate:
         if ban_until > _now_ms():
             remaining = (ban_until - _now_ms()) / 1000.0
             return False, f"banned until {ban_until} ({remaining:.0f}s left)"
+
+        # Post-ban resume: бан уже снят, но не выпускаем процесс в сеть раньше
+        # cooldown + индивидуальной задержки. Иначе все боты одновременно бьют
+        # на первой свече и получают новый бан.
+        resume_at = self.post_ban_resume_at_ms(int(ban_until or 0))
+        if resume_at > _now_ms():
+            remaining = (resume_at - _now_ms()) / 1000.0
+            return False, f"post-ban resume in {remaining:.0f}s"
 
         total_used = self._effective_weight(data)
         if not is_critical and total_used / self.weight_limit_1m > self.shed_at:
@@ -543,7 +588,13 @@ def _wrap_client(client, gate: AccountGate):
             pass
 
         if not allowed:
-            raise GateBlocked(reason, code=-1003 if reason.startswith("banned until") else -429)
+            # Бан и post-ban cooldown — это «подожди, не долби сеть», а не
+            # превышение частоты: -1003 заставляет with_retry сразу пропустить
+            # цикл (без сна в горячем пути), -429 ушёл бы в backoff со сном.
+            ban_like = reason.startswith("banned until") or reason.startswith(
+                "post-ban resume"
+            )
+            raise GateBlocked(reason, code=-1003 if ban_like else -429)
 
         try:
             response = await original_request(

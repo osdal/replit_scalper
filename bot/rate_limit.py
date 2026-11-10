@@ -150,6 +150,16 @@ async def wait_for_ban(exc, log=None, *, block: Optional[bool] = None) -> bool:
     if not is_ban_error(exc):
         return False
 
+    # Локальный post-ban cooldown (gate ещё не пускает в сеть после снятия
+    # бана) — это НЕ бан: ничего не фиксируем и не пишем «IP banned».
+    if "post-ban resume" in (getattr(exc, "message", "") or ""):
+        if log:
+            log.info(
+                "[RATE_LIMIT] post-ban cooldown, skipping cycle "
+                f"({getattr(exc, 'message', '')})"
+            )
+        return True
+
     if block is None:
         block = BAN_BLOCK_ON_BAN
 

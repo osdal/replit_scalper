@@ -201,13 +201,15 @@ class RecoveryClient:
 
     # ── Глобальное управление рисками (лимит позиций + пауза после серии убытков) ──
 
-    async def can_open(self, reserve: bool = False) -> dict:
+    async def can_open(self, reserve: bool = False, quiet: bool = False) -> dict:
         """
         Спрашивает сервер, можно ли открыть новую позицию с учётом
         глобального лимита позиций и паузы после серии убытков.
         Возвращает: {"allowed": bool, "reason": str|None, ...}
 
         reserve=False — информационная проверка, ничего не занимает.
+        quiet=True — не писать WARNING при отказе (используется для дешёвого
+        опроса «заняты ли слоты» на каждой свече, чтобы не спамить лог).
         reserve=True  — сервер АТОМАРНО занимает слот под этот символ (резерв живёт
         ограниченное время). Вызывать непосредственно перед отправкой ордера и,
         если ордер не ушёл, вернуть слот через release_slot(). Это устраняет
@@ -235,7 +237,7 @@ class RecoveryClient:
                     data = await resp.json()
                     if reserve:
                         self._slot_id = data.get("reservation_id") if data.get("allowed") else None
-                    if not data.get("allowed"):
+                    if not data.get("allowed") and not quiet:
                         reason = data.get("reason", "blocked")
                         self.log.warning(
                             f"[RISK] Trade blocked by server: reason={reason} "

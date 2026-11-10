@@ -194,6 +194,31 @@ _rejected_sims = []
 _REJECTED_SIM_MAX_CANDLES = 24  # максимум свечей ждём результат (24×5м = 2ч)
 SIM_COMMISSION_PCT = 0.05  # симулируемая комиссия Taker (%) для отклонённых сделок
 
+# Мягкая пауза, когда все слоты позиций заняты: бот продолжает получать свечи
+# по WS и обновляет индикаторы, но не считает сигналы и не делает запросов к
+# Binance/БД (иначе 7 из 8 ботов вхолостую пишут rejected-строки и дёргают REST
+# перед входом). Возобновление — на следующей свече после освобождения слота.
+SLOTS_FULL_SOFT_PAUSE = (
+    os.getenv("SLOTS_FULL_SOFT_PAUSE", "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+
+def _should_soft_pause(slot_state) -> bool:
+    """True, если сервер отклонил вход именно из-за лимита позиций.
+
+    Намеренно не паузим при loss_streak/pause/daily_limit/check_error: там
+    решение принимает обычный риск-путь на входе, а ошибка проверки не должна
+    «замораживать» бота.
+    """
+    if not isinstance(slot_state, dict):
+        return False
+    return (
+        not slot_state.get("allowed", True)
+        and slot_state.get("reason") == "max_positions"
+    )
+
+
 
 def _sim_commission(entry, exit_price, qty):
     """Комиссия для симуляции в USDT (0.05% на вход и выход)."""
@@ -2120,11 +2145,15 @@ async def _run_live_or_paper(
     _rejected_sims.extend(loaded)
     log.info(f"[STARTUP] Step 6: loaded {len(loaded)} rejected trades")
 
-    # Staggered startup: рандомная задержка 0-60с, чтобы 40 ботов не бьли
-    # API одновременно после рестарта контейнера (предотвращает -1003 бан).
-    # Только для live-режима (testnet тоже live по режиму).
+    # Staggered startup: рандомная задержка, чтобы боты не бьли API
+    # одновременно после рестарта контейнера (предотвращает -1003 бан).
+    # Ширина настраивается: testnet использует больше (флот 8 ботов), live — 60с.
     import random
-    _stagger = random.uniform(0.0, 60.0)
+    try:
+        _stagger_max = max(0.0, float(os.getenv("STARTUP_STAGGER_MAX_SEC") or "60"))
+    except ValueError:
+        _stagger_max = 60.0
+    _stagger = random.uniform(0.0, _stagger_max)
     log.info(f"[STARTUP] staggered delay {_stagger:.1f}s before warm-up")
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=_stagger)
@@ -3302,12 +3331,15 @@ async def _run_live_or_paper(
             _consecutive_losses = 0
             _last_loss_time = 0.0
 
+    # Счётчик подряд идущих «пустых» свечей из-за занятых слотов (для лога).
+    _slot_pause = [0]
+
     async def on_candle(candle: pd.Series):
         nonlocal df_buffer
         nonlocal _consecutive_losses, _last_loss_time
         last_candle_time[0] = time.time()
         _ = events  # capture events in closure
-        # Jitter 0–60 s после закрытия свечи: 40 ботов не долбят Binance API
+        # Jitter 0–60 s после закрытия свечи: боты не долбят Binance API
         # одновременно в :00/:05/:10, иначе упираемся в IP rate-limit (-1003).
         try:
             _jitter = random.uniform(0, 60)
@@ -3323,6 +3355,31 @@ async def _run_live_or_paper(
             candle_time_ms = int(candle.name.timestamp() * 1000)
             candle_count[0] += 1
             log.debug(f"on_candle #{candle_count[0]} price={current_price}")
+
+            # Мягкая пауза: слоты позиций заняты — свечу поглотили (буфер и
+            # индикаторы обновлены), но сигналы не считаем, rejected-строки не
+            # пишем и в Binance не лезем. Возобновление — на первой свече после
+            # освобождения слота (проверка локальная, без сети).
+            if (
+                SLOTS_FULL_SOFT_PAUSE
+                and recovery is not None
+                and not tracker.has_open_position()
+            ):
+                try:
+                    _slot = await recovery.can_open(quiet=True)
+                except Exception:
+                    _slot = None
+                if _should_soft_pause(_slot):
+                    _slot_pause[0] += 1
+                    if _slot_pause[0] == 1 or _slot_pause[0] % 12 == 0:
+                        log.info(
+                            f"[PAUSE] slots full "
+                            f"({_slot.get('positions_open')}/{_slot.get('max_positions')}) "
+                            f"— idling: candles buffered, no REST/DB writes"
+                        )
+                    await reporter.report_heartbeat(current_price)
+                    return
+                _slot_pause[0] = 0
 
             if tracker.has_open_position() and tracker.position.is_reverse:
                 should_close = await _check_reverse_cum_loss(
