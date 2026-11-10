@@ -635,13 +635,18 @@ class OrderManager:
         # депозит. Ограничиваем его paper_balance, иначе position_size_pct на
         # тестнете считается от $100 и вместо «$10-режима» даёт $40 нотионала.
         # Без этой поправки тестнёт не может проверить поведение live на $10.
+        # Если же баланс не удался получить (бан/сеть) — фоллбекаем на paper_balance,
+        # иначе free = 0 и бот не откроет позицию.
         if BOT_ENV == "testnet":
             try:
                 paper = float(self.cfg.paper_balance or 0.0)
             except (TypeError, ValueError):
                 paper = 0.0
             if paper > 0:
-                free = min(free, paper)
+                if free > 0:
+                    free = min(free, paper)
+                else:
+                    free = paper
         return free
 
     # ------------------------------------------------------------------ #
