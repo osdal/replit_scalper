@@ -229,10 +229,11 @@ services:
       - POSITION_CACHE_TTL_SEC=20
       # Бан Binance (-1003) НЕ блокирует обработчик свечи (см. testnet-стек).
       - RATE_LIMIT_BLOCK_ON_BAN=false
-      # Для live post-ban задержку НЕ включаем: задержка критичных запросов
-      # (закрытие позиции) после бана опаснее повторного бана.
-      - POST_BAN_COOLDOWN_SEC=0
-      - POST_BAN_JITTER_SEC=0
+      # Live: минимальная защита после бана — 30с общий cooldown + 0-60с jitter.
+      # Не блокирует критичные запросы (wait_for_ban не спит), но не пускает
+      # горячий путь в сеть раньше resume_at, иначе бан вернётся за 30-50с.
+      - POST_BAN_COOLDOWN_SEC=30
+      - POST_BAN_JITTER_SEC=60
       - SLOTS_FULL_SOFT_PAUSE=0
       # Игнорировать позиции старше N часов для max_positions.
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
