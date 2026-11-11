@@ -97,6 +97,11 @@ services:
       # ботов, у которых в БД не задан `slot_release_minutes`.
       - MAX_POSITIONS_IGNORE_AFTER_HOURS=6
       - EXPIRED_CLOSE_MIN_PROFIT_USD=0.02
+      # Глобальные лимиты позиций (для всего флота, не per-bot):
+      # max_positions = макс. одновременно открытых позиций
+      # max_positions_with_expired = макс. открытых включая протухшие
+      - MAX_POSITIONS=3
+      - MAX_POSITIONS_WITH_EXPIRED=10
       # Дневной лимит входа фиксированный ($10): testnet остаётся сопоставимым
       # с накопленной статистикой. Процентный режим (от баланса на начало дня
       # по Киеву) включён только на live через DAILY_LOSS_MODE=pct.
@@ -202,9 +207,10 @@ services:
       - BOT_ENV=live
       - PORT=5001
       - BINANCE_TESTNET=false
-      # Лимит позиций для live: 1 (старт на $10). ВАЖНО: .env.live тоже
+      # Лимит позиций для live: 3 (глобальный). ВАЖНО: .env.live тоже
       # содержит MAX_POSITIONS и переопределяет process env — менять в обоих.
-      - MAX_POSITIONS=1
+      - MAX_POSITIONS=3
+      - MAX_POSITIONS_WITH_EXPIRED=10
       - DASHBOARD_API_URL=http://localhost:5001/api
       # Дневной риск (единая формула lib/dailyRisk.ts):
       #   база = баланс кошелька на начало дня по Киеву (фиксируется в
