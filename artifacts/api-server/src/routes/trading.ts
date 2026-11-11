@@ -602,6 +602,7 @@ router.post("/close-and-reset", async (_req, res) => {
 router.get("/status", async (_req, res) => {
   try {
     const cfg = readConfig();
+    console.log("[trading] /status cfg:", JSON.stringify({ max_positions: cfg.max_positions, max_positions_with_expired: cfg.max_positions_with_expired }));
     const control = await getControlRow();
     // Автосброс устаревшей паузы/счётчика (аналогично /check).
     if (await autoResetStale(control, cfg.pause_timeout_minutes)) {
