@@ -85,13 +85,61 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_with
  * фиксированный DAILY_LOSS_LIMIT_USD (testnet).
  */
 
+const BOT_DIR = process.env.BOT_DIR || path.resolve(__dirname, "../../../bot");
+const BOT_ENV = (process.env.BOT_ENV || "testnet").trim().toLowerCase() || "testnet";
+const GLOBAL_LIMITS_FILE = path.resolve(BOT_DIR, "..", "data", `global_limits_${BOT_ENV}.json`);
+
+interface GlobalLimits {
+  max_positions: number;
+  max_positions_with_expired: number;
+}
+
+/** Читает глобальные лимиты из файла (приоритет) или из env (fallback). */
+function readGlobalLimits(): GlobalLimits {
+  // 1) Файл (можно менять через API без рестарта)
+  try {
+    const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
+    if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
+      return {
+        max_positions: Math.max(0, Math.floor(raw.max_positions)),
+        max_positions_with_expired: Math.max(0, Math.floor(raw.max_positions_with_expired)),
+      };
+    }
+  } catch {
+    // файл нет или битый — идём к env
+  }
+  // 2) Env (docker-compose / .env.live)
+  const envMax = process.env.MAX_POSITIONS;
+  const envMaxWithExpired = process.env.MAX_POSITIONS_WITH_EXPIRED;
+  const def = { max_positions: 2, max_positions_with_expired: 3 };
+  return {
+    max_positions: (envMax !== undefined && envMax !== null && envMax !== "")
+      ? sanitizeMaxPositions(envMax, def.max_positions)
+      : def.max_positions,
+    max_positions_with_expired: (envMaxWithExpired !== undefined && envMaxWithExpired !== null && envMaxWithExpired !== "")
+      ? Math.max(0, Math.floor(Number(envMaxWithExpired) || def.max_positions_with_expired))
+      : def.max_positions_with_expired,
+  };
+}
+
+/** Пишет глобальные лимиты в файл (per-env). */
+function writeGlobalLimits(limits: GlobalLimits): void {
+  try {
+    fs.mkdirSync(path.dirname(GLOBAL_LIMITS_FILE), { recursive: true });
+    fs.writeFileSync(GLOBAL_LIMITS_FILE, JSON.stringify(limits, null, 2));
+  } catch (e) {
+    console.error("[trading] write global limits failed:", String(e));
+  }
+}
+
 function readConfig(): { max_positions: number; max_positions_with_expired: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
   const def = { max_positions: 2, max_positions_with_expired: 3, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
+    const fileLimits = readGlobalLimits();
     const cfg = {
-      max_positions: Number(raw.max_positions) || def.max_positions,
-      max_positions_with_expired: Number(raw.max_positions_with_expired) || def.max_positions_with_expired,
+      max_positions: fileLimits.max_positions,
+      max_positions_with_expired: fileLimits.max_positions_with_expired,
       loss_streak_trigger: Number(raw.loss_streak_trigger) || def.loss_streak_trigger,
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
       max_free_debt_usd: Number(raw.max_free_debt_usd) || def.max_free_debt_usd,
@@ -105,7 +153,12 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
     };
     return applyEnvOverrides(cfg);
   } catch {
-    return applyEnvOverrides({ ...def });
+    const fileLimits = readGlobalLimits();
+    return applyEnvOverrides({
+      ...def,
+      max_positions: fileLimits.max_positions,
+      max_positions_with_expired: fileLimits.max_positions_with_expired,
+    });
   }
 }
 
