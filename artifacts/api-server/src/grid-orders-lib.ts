@@ -1,5 +1,9 @@
 import crypto from "crypto";
 import { logger } from "./lib/logger";
+import { GridOrderError } from "./lib/gridErrors";
+import { assertNotBanned, fallbackBanUntil, parseBanUntilMs, recordBan } from "./lib/binanceBan";
+
+export { GridOrderError };
 
 /**
  * Общая библиотека grid-ордеров: подпись/повторные попытки Binance, округление
@@ -15,16 +19,6 @@ export const MAX_RESIZE_ORDERS = 50;
 export const SYMBOL_RE = /^[A-Z0-9]{2,20}USDT$/;
 
 export type LevelSide = "BUY" | "SELL";
-
-/** Ошибка с HTTP-статусом: роуты мапят её напрямую в ответ, движок — в лог. */
-export class GridOrderError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.name = "GridOrderError";
-    this.status = status;
-  }
-}
 
 export function getBinanceEnv() {
   const apiKey = process.env.BINANCE_API_KEY || "";
@@ -56,6 +50,7 @@ let binanceTimeSyncedAt = 0;
 
 export async function syncBinanceTime(): Promise<number> {
   try {
+    assertNotBanned("GET /fapi/v1/time");
     const { baseUrl } = getBinanceEnv();
     const r = await fetch(`${baseUrl}/fapi/v1/time`);
     const j: any = await r.json();
@@ -149,6 +144,9 @@ export async function binanceRequest(
   body?: Record<string, unknown>
 ): Promise<any> {
   const { apiKey, apiSecret, baseUrl } = getBinanceEnv();
+  // Барьер бана: ни одного HTTP-запроса, пока IP забанен — иначе каждый
+  // ответ 418/-1003 продлевает бан и флот никогда не дождётся снятия.
+  assertNotBanned(`${method} ${path}`);
   const qs = signedQuery(body ? ({ ...params, ...body } as any) : params, apiSecret);
   const url = method === "POST" ? `${baseUrl}${path}` : `${baseUrl}${path}?${qs}`;
 
@@ -158,7 +156,6 @@ export async function binanceRequest(
   const NETWORK_BACKOFF_MS = [300, 900];
   const NETWORK_JITTER_MS = 150;
   const REQUEST_TIMEOUT_MS = 15000;
-  const MAX_BAN_WAIT_MS = 3000;
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -167,6 +164,8 @@ export async function binanceRequest(
   let networkAttempts = 0;
 
   for (let totalAttempt = 1; totalAttempt <= MAX_TOTAL_ATTEMPTS; totalAttempt++) {
+    // Бан мог быть записан другим процессом между попытками.
+    assertNotBanned(`${method} ${path}`);
     let res: Response;
     try {
       res = await fetch(url, {
@@ -216,31 +215,27 @@ export async function binanceRequest(
       text.includes("-1003") ||
       text.includes("-429");
 
-    rateLimitAttempts++;
-    if (!isRateLimit || rateLimitAttempts >= MAX_ATTEMPTS || totalAttempt >= MAX_TOTAL_ATTEMPTS) {
-      throw new Error(`Binance ${path} ${status}: ${text}`);
+    if (isRateLimit) {
+      // Ретрай во время бана только продлевает бан. Записываем срок в общий
+      // gate-файл (его читают python-боты и наш preflight) и выходим сразу.
+      const banUntil = parseBanUntilMs(text) || fallbackBanUntil();
+      recordBan(banUntil);
+      const left = Math.max(1, Math.ceil((banUntil - Date.now()) / 1000));
+      throw new GridOrderError(
+        429,
+        `Binance ${path} ${status}: rate limited, ban recorded (${left}s left)`,
+      );
     }
 
-    const banMatch = text.match(/banned until (\d+)/i);
-    let delay: number | null = null;
-    if (banMatch) {
-      const wait = Number(banMatch[1]) - Date.now();
-      if (Number.isFinite(wait) && wait > MAX_BAN_WAIT_MS) {
-        throw new Error(
-          `Binance ${path} ${status}: rate limit ban is too long (${wait}ms), aborting: ${text}`
-        );
-      }
-      if (Number.isFinite(wait) && wait > 0) {
-        delay = wait;
-      }
+    rateLimitAttempts++;
+    if (rateLimitAttempts >= MAX_ATTEMPTS || totalAttempt >= MAX_TOTAL_ATTEMPTS) {
+      throw new Error(`Binance ${path} ${status}: ${text}`);
     }
-    if (delay === null) {
-      delay = rateLimitAttempts === 1 ? 400 : 1200;
-    }
+    const delay = rateLimitAttempts === 1 ? 400 : 1200;
 
     logger.warn(
       { path, status, attempt: rateLimitAttempts },
-      "[grid-orders] Binance rate limit, retrying"
+      "[grid-orders] Binance error, retrying"
     );
     await sleep(delay);
   }

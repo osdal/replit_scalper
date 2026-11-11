@@ -16,6 +16,7 @@ import {
 } from "@workspace/db";
 import { desc, eq, sql } from "drizzle-orm";
 import { logger } from "./lib/logger";
+import { currentBan } from "./lib/binanceBan";
 import { computeAdxFor, getKlines } from "./adx-lib";
 import { getMarkPrice } from "./routes/ticker";
 import {
@@ -1955,6 +1956,13 @@ export function startGridEngine(): (() => void) | null {
     if (tickInFlight) return;
     tickInFlight = true;
     try {
+      // Пока IP забанен, не трогаем биржу вообще: любой запрос (даже 418)
+      // продлевает бан. Python-боты пишут бан в общий gate-файл.
+      const ban = currentBan();
+      if (ban.banUntilMs > Date.now()) {
+        logger.debug({ banUntilMs: ban.banUntilMs }, "[grid-engine] Binance ban active, skipping tick");
+        return;
+      }
       clearTickSizeCache();
       await ensureTables;
       const rows: GridRow[] = await db

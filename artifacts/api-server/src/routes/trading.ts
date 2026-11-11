@@ -19,6 +19,7 @@ import { stopAllBots } from "./bots";
 import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
 import { dailyRiskSnapshot } from "../lib/dailyRisk";
+import { currentBan } from "../lib/binanceBan";
 
 const router = Router();
 
@@ -558,6 +559,7 @@ router.get("/status", async (_req, res) => {
     const daily_net = daily.total;
     const daily_loss = Math.max(0, -daily_net);
     const free_debt = await getFreeDebt();
+    const ban = currentBan();
     res.json({
       positions_open: st.open,
       positions_reserved: st.reserved,
@@ -581,6 +583,7 @@ router.get("/status", async (_req, res) => {
       wallet_balance_usd: daily.baseline,
       daily_loss: Number(daily_loss.toFixed(2)),
       daily_net: Number(daily_net.toFixed(2)),
+      binance_ban_until_ms: ban.banUntilMs > Date.now() ? ban.banUntilMs : 0,
       pause_timeout_minutes: cfg.pause_timeout_minutes,
     });
   } catch (e) {
