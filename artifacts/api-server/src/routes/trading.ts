@@ -20,6 +20,7 @@ import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
 import { dailyRiskSnapshot } from "../lib/dailyRisk";
 import { currentBan } from "../lib/binanceBan";
+import { BOT_DIR, BOT_ENV } from "../botPaths";
 
 const router = Router();
 
@@ -28,6 +29,53 @@ const __dirname = path.dirname(__filename);
 
 const CONFIG_PATH = process.env.RECOVERY_CONFIG_PATH ||
   path.resolve(__dirname, "../../../../bot/recovery_config.yaml");
+
+const GLOBAL_LIMITS_FILE = path.resolve(BOT_DIR, "..", "data", `global_limits_${BOT_ENV}.json`);
+
+interface GlobalLimits {
+  max_positions: number;
+  max_positions_with_expired: number;
+}
+
+/** Читает глобальные лимиты из файла (приоритет) или из env (fallback). */
+function readGlobalLimits(): GlobalLimits {
+  // 1) Файл (можно менять через API без рестарта)
+  try {
+    const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
+    if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
+      return {
+        max_positions: Math.max(0, Math.floor(raw.max_positions)),
+        max_positions_with_expired: Math.max(0, Math.floor(raw.max_positions_with_expired)),
+      };
+    }
+  } catch {
+    // файл нет или битый — идём к env
+  }
+  // 2) Env (docker-compose / .env.live)
+  const envMax = process.env.MAX_POSITIONS;
+  const envMaxWithExpired = process.env.MAX_POSITIONS_WITH_EXPIRED;
+  const def = { max_positions: 2, max_positions_with_expired: 3 };
+  return {
+    max_positions: (envMax !== undefined && envMax !== null && envMax !== "")
+      ? sanitizeMaxPositions(envMax, def.max_positions)
+      : def.max_positions,
+    max_positions_with_expired: (envMaxWithExpired !== undefined && envMaxWithExpired !== null && envMaxWithExpired !== "")
+      ? Math.max(0, Math.floor(Number(envMaxWithExpired) || def.max_positions_with_expired))
+      : def.max_positions_with_expired,
+  };
+}
+
+/** Пишет глобальные лимиты в файл (per-env). */
+function writeGlobalLimits(limits: GlobalLimits): void {
+  try {
+    console.log("[trading] writeGlobalLimits called, file:", GLOBAL_LIMITS_FILE, "limits:", JSON.stringify(limits));
+    fs.mkdirSync(path.dirname(GLOBAL_LIMITS_FILE), { recursive: true });
+    fs.writeFileSync(GLOBAL_LIMITS_FILE, JSON.stringify(limits, null, 2));
+    console.log("[trading] writeGlobalLimits OK");
+  } catch (e) {
+    console.error("[trading] write global limits failed:", String(e));
+  }
+}
 
 function sanitizeIgnoreAfterHours(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -84,10 +132,6 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_with
  * net = realized + unrealized, порог = база × total_loss_pct (live) либо
  * фиксированный DAILY_LOSS_LIMIT_USD (testnet).
  */
-
-const BOT_DIR = process.env.BOT_DIR || path.resolve(__dirname, "../../../bot");
-const BOT_ENV = (process.env.BOT_ENV || "testnet").trim().toLowerCase() || "testnet";
-const GLOBAL_LIMITS_FILE = path.resolve(BOT_DIR, "..", "data", `global_limits_${BOT_ENV}.json`);
 
 interface GlobalLimits {
   max_positions: number;
