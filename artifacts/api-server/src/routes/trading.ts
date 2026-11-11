@@ -125,8 +125,10 @@ function readGlobalLimits(): GlobalLimits {
 /** Пишет глобальные лимиты в файл (per-env). */
 function writeGlobalLimits(limits: GlobalLimits): void {
   try {
+    console.log("[trading] writeGlobalLimits called, file:", GLOBAL_LIMITS_FILE, "limits:", JSON.stringify(limits));
     fs.mkdirSync(path.dirname(GLOBAL_LIMITS_FILE), { recursive: true });
     fs.writeFileSync(GLOBAL_LIMITS_FILE, JSON.stringify(limits, null, 2));
+    console.log("[trading] writeGlobalLimits OK");
   } catch (e) {
     console.error("[trading] write global limits failed:", String(e));
   }
@@ -658,9 +660,12 @@ router.post('/global-limits', async (req, res) => {
       return res.status(400).json({ error: 'max_positions_with_expired: 0-50' });
     }
     const limits = { max_positions: Math.floor(max_positions), max_positions_with_expired: Math.floor(max_positions_with_expired) };
+    console.log("[trading] /global-limits called with:", limits);
     writeGlobalLimits(limits);
+    console.log("[trading] /global-limits writeGlobalLimits returned");
     res.json({ success: true, ...limits });
   } catch (e) {
+    console.error("[trading] /global-limits error:", String(e));
     res.status(500).json({ error: String(e) });
   }
 });
