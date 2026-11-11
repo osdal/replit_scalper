@@ -41,15 +41,20 @@ interface GlobalLimits {
 function readGlobalLimits(): GlobalLimits {
   // 1) Файл (можно менять через API без рестарта)
   try {
+    console.log("[trading] readGlobalLimits: reading file:", GLOBAL_LIMITS_FILE);
     const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
+    console.log("[trading] readGlobalLimits: raw:", JSON.stringify(raw));
     if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
-      return {
+      const result = {
         max_positions: Math.max(0, Math.floor(raw.max_positions)),
         max_positions_with_expired: Math.max(0, Math.floor(raw.max_positions_with_expired)),
       };
+      console.log("[trading] readGlobalLimits: returning:", JSON.stringify(result));
+      return result;
     }
-  } catch {
-    // файл нет или битый — идём к env
+    console.log("[trading] readGlobalLimits: invalid raw values");
+  } catch (e) {
+    console.log("[trading] readGlobalLimits: error reading file:", String(e));
   }
   // 2) Env (docker-compose / .env.live)
   const envMax = process.env.MAX_POSITIONS;
