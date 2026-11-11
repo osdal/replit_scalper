@@ -41,20 +41,15 @@ interface GlobalLimits {
 function readGlobalLimits(): GlobalLimits {
   // 1) Файл (можно менять через API без рестарта)
   try {
-    console.log("[trading] readGlobalLimits: reading file:", GLOBAL_LIMITS_FILE);
     const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
-    console.log("[trading] readGlobalLimits: raw:", JSON.stringify(raw));
     if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
-      const result = {
+      return {
         max_positions: Math.max(0, Math.floor(raw.max_positions)),
         max_positions_with_expired: Math.max(0, Math.floor(raw.max_positions_with_expired)),
       };
-      console.log("[trading] readGlobalLimits: returning:", JSON.stringify(result));
-      return result;
     }
-    console.log("[trading] readGlobalLimits: invalid raw values");
-  } catch (e) {
-    console.log("[trading] readGlobalLimits: error reading file:", String(e));
+  } catch {
+    // файл нет или битый — идём к env
   }
   // 2) Env (docker-compose / .env.live)
   const envMax = process.env.MAX_POSITIONS;
@@ -73,10 +68,8 @@ function readGlobalLimits(): GlobalLimits {
 /** Пишет глобальные лимиты в файл (per-env). */
 function writeGlobalLimits(limits: GlobalLimits): void {
   try {
-    console.log("[trading] writeGlobalLimits called, file:", GLOBAL_LIMITS_FILE, "limits:", JSON.stringify(limits));
     fs.mkdirSync(path.dirname(GLOBAL_LIMITS_FILE), { recursive: true });
     fs.writeFileSync(GLOBAL_LIMITS_FILE, JSON.stringify(limits, null, 2));
-    console.log("[trading] writeGlobalLimits OK");
   } catch (e) {
     console.error("[trading] write global limits failed:", String(e));
   }
@@ -607,7 +600,6 @@ router.post("/close-and-reset", async (_req, res) => {
 router.get("/status", async (_req, res) => {
   try {
     const cfg = readConfig();
-    console.log("[trading] /status cfg:", JSON.stringify({ max_positions: cfg.max_positions, max_positions_with_expired: cfg.max_positions_with_expired }));
     const control = await getControlRow();
     // Автосброс устаревшей паузы/счётчика (аналогично /check).
     if (await autoResetStale(control, cfg.pause_timeout_minutes)) {
@@ -670,12 +662,9 @@ router.post('/global-limits', async (req, res) => {
       return res.status(400).json({ error: 'max_positions_with_expired: 0-50' });
     }
     const limits = { max_positions: Math.floor(max_positions), max_positions_with_expired: Math.floor(max_positions_with_expired) };
-    console.log("[trading] /global-limits called with:", limits);
     writeGlobalLimits(limits);
-    console.log("[trading] /global-limits writeGlobalLimits returned");
     res.json({ success: true, ...limits });
   } catch (e) {
-    console.error("[trading] /global-limits error:", String(e));
     res.status(500).json({ error: String(e) });
   }
 });
