@@ -114,5 +114,8 @@ reverse_profit_pct: 0.5
 reverse_fee_buffer_pct: 0.1
 reverse_chain_max: 10
 expired_after_minutes: 120
-max_positions: 1
-max_positions_with_expired: 3
+max_positions: 3
+max_positions_with_expired: 10
+slot_release_minutes: 360
+position_loss_pct: 5
+total_loss_pct: 10
