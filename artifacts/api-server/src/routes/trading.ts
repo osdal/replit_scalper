@@ -47,11 +47,15 @@ function sanitizeLossStreakTrigger(value: unknown, fallback: number): number {
  * только на одном стеке: yaml общий для api-testnet и api-live, а менять
  * поведение live нельзя.
  */
-function applyEnvOverrides<T extends { max_positions: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T): T {
+function applyEnvOverrides<T extends { max_positions: number; max_positions_with_expired: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T): T {
   const env_max = process.env.MAX_POSITIONS;
   if (env_max !== undefined && env_max !== null && env_max !== "") {
-    // sanitize: Number("abc")=NaN, а `x >= NaN` всегда false → лимит молча отключился бы.
     cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
+  }
+  const env_max_with_expired = process.env.MAX_POSITIONS_WITH_EXPIRED;
+  if (env_max_with_expired !== undefined && env_max_with_expired !== null && env_max_with_expired !== "") {
+    const n = Number(env_max_with_expired);
+    if (Number.isFinite(n) && n >= 0) cfg.max_positions_with_expired = n;
   }
   const env_ignore = process.env.MAX_POSITIONS_IGNORE_AFTER_HOURS;
   if (env_ignore !== undefined && env_ignore !== null && env_ignore !== "") {
@@ -81,12 +85,13 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_igno
  * фиксированный DAILY_LOSS_LIMIT_USD (testnet).
  */
 
-function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
-  const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
+function readConfig(): { max_positions: number; max_positions_with_expired: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
+  const def = { max_positions: 2, max_positions_with_expired: 3, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
     const cfg = {
       max_positions: Number(raw.max_positions) || def.max_positions,
+      max_positions_with_expired: Number(raw.max_positions_with_expired) || def.max_positions_with_expired,
       loss_streak_trigger: Number(raw.loss_streak_trigger) || def.loss_streak_trigger,
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
       max_free_debt_usd: Number(raw.max_free_debt_usd) || def.max_free_debt_usd,
@@ -241,23 +246,13 @@ router.post("/check", async (req, res) => {
     const control = await getControlRow();
     const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
 
-    // Per-bot лимиты из БД (fallback — глобальный yaml/env). Так дашборд может
-    // задать max_positions / max_positions_with_expired / slot_release_minutes
-    // индивидуально, без перезапуска контейнера.
-    let botMaxPositions = globalCfg.max_positions;
-    let botMaxWithExpired = 0;
-    // Слот освобождается через `slot_release_minutes` (360 = 6 ч), а НЕ через
-    // `expired_after_minutes` (120): протухание = «закрыть в минимальный плюс»,
-    // освобождение слота = «позиция перестаёт занимать лимит, но живёт дальше».
+    // Per-bot лимиты из БД: только slot_release_minutes и total_loss_pct.
+    // max_positions / max_positions_with_expired — ГЛОБАЛЬНЫЕ (из yaml/env).
     let botSlotReleaseMinutes = globalCfg.max_positions_ignore_after_hours * 60;
     let botTotalLossPct: number | undefined;
     if (symbol) {
       const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
       if (bot) {
-        if (bot.max_positions != null && bot.max_positions > 0) botMaxPositions = bot.max_positions;
-        if (bot.max_positions_with_expired != null && bot.max_positions_with_expired > 0) {
-          botMaxWithExpired = bot.max_positions_with_expired;
-        }
         if (bot.slot_release_minutes != null && bot.slot_release_minutes >= 0) {
           botSlotReleaseMinutes = bot.slot_release_minutes;
         }
@@ -332,11 +327,11 @@ router.post("/check", async (req, res) => {
     // окна протухания: старые цепочки не могут копиться бесконечно.
     let slot = await slots.check(
       symbol,
-      botMaxPositions,
+      globalCfg.max_positions,
       () => loadOccupiedSymbols(botSlotReleaseMinutes),
       wantReserve,
       {
-        max: botMaxWithExpired,
+        max: globalCfg.max_positions_with_expired,
         load: () => dbOpenSymbols(0),
       },
     );
@@ -357,8 +352,8 @@ router.post("/check", async (req, res) => {
         reason: slot.reason ?? "max_positions",
         positions_open: slot.occupied,
         positions_reserved: slot.reserved,
-        max_positions: botMaxPositions,
-        max_positions_with_expired: botMaxWithExpired,
+        max_positions: globalCfg.max_positions,
+        max_positions_with_expired: globalCfg.max_positions_with_expired,
         total_open: slot.totalOccupied ?? null,
         loss_streak: control.loss_streak,
         paused_remaining: control.paused_remaining,
@@ -372,8 +367,8 @@ router.post("/check", async (req, res) => {
       reason: null,
       positions_open: slot.occupied,
       positions_reserved: slot.reserved,
-      max_positions: botMaxPositions,
-      max_positions_with_expired: botMaxWithExpired,
+      max_positions: globalCfg.max_positions,
+      max_positions_with_expired: globalCfg.max_positions_with_expired,
       total_open: slot.totalOccupied ?? null,
       own_slot: slot.own,
       reservation_id: slot.reservationId,
@@ -564,6 +559,7 @@ router.get("/status", async (_req, res) => {
       positions_open: st.open,
       positions_reserved: st.reserved,
       max_positions: cfg.max_positions,
+      max_positions_with_expired: cfg.max_positions_with_expired,
       exchange_check: EXCHANGE_CHECK,
       max_positions_ignore_after_hours: cfg.max_positions_ignore_after_hours,
       loss_streak: control.loss_streak,

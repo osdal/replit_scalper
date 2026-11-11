@@ -975,8 +975,6 @@ export default function Dashboard() {
 
   // Position limits (testnet only): apply to all bots
   const [expiredMinutesAll, setExpiredMinutesAll] = useState("");
-  const [maxPositionsAll, setMaxPositionsAll] = useState("");
-  const [maxPositionsWithExpiredAll, setMaxPositionsWithExpiredAll] = useState("");
   const [slotReleaseAll, setSlotReleaseAll] = useState("");
   const [positionLossPctAll, setPositionLossPctAll] = useState("");
   const [totalLossPctAll, setTotalLossPctAll] = useState("");
@@ -992,8 +990,6 @@ export default function Dashboard() {
   };
 
   const displayExpiredMinutes = getCommonValue(bots, "expired_after_minutes", 120);
-  const displayMaxPositions = getCommonValue(bots, "max_positions", 1);
-  const displayMaxPositionsWithExpired = getCommonValue(bots, "max_positions_with_expired", 3);
   const displaySlotReleaseMinutes = getCommonValue(bots, "slot_release_minutes", 360);
   const displayPositionLossPct = getCommonValue(bots, "position_loss_pct", 5);
   const displayTotalLossPct = getCommonValue(bots, "total_loss_pct", 10);
@@ -1262,97 +1258,7 @@ export default function Dashboard() {
     await load();
   };
 
-  /**
-   * Задать max_positions сразу ВСЕМ ботам.
-   */
-  const handleApplyMaxPositionsToAll = async () => {
-    const raw = maxPositionsAll.trim().replace(",", ".");
-    const maxPos = Number(raw);
-    if (!raw || !Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
-      setNotice("Укажите корректное число (0 = без лимита, например 1).");
-      return;
-    }
-    const targets = bots.map(b => b.symbol);
-    if (targets.length === 0) {
-      setNotice("Нет ботов для обновления.");
-      return;
-    }
-    if (!confirm(
-      `Задать max_positions = ${maxPos} сразу ${targets.length} ботам?\n\n` +
-      "Макс. одновременно открытых позиций (включая recovery). 0 = без лимита.\n\n" +
-      "Изменение запишется в БД и в config_*.yaml. Применится к новым позициям."
-    )) return;
-
-    setApplyingLimits(true);
-    setNotice(null);
-    const failed: string[] = [];
-    const CONCURRENCY = 4;
-    for (let i = 0; i < targets.length; i += CONCURRENCY) {
-      const chunk = targets.slice(i, i + CONCURRENCY);
-      await Promise.all(chunk.map(async (symbol) => {
-        try {
-          await updateConfig(symbol, { max_positions: maxPos });
-        } catch {
-          failed.push(symbol);
-        }
-      }));
-      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
-    }
-    setApplyingLimits(false);
-    setMaxPositionsAll("");
-    setNotice(
-      failed.length
-        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
-        : `Готово: max_positions = ${maxPos} задано всем ${targets.length} ботам.`
-    );
-    await load();
-  };
-
-  /**
-   * Задать max_positions_with_expired сразу ВСЕМ ботам.
-   */
-  const handleApplyMaxPositionsWithExpiredToAll = async () => {
-    const raw = maxPositionsWithExpiredAll.trim().replace(",", ".");
-    const maxPos = Number(raw);
-    if (!raw || !Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
-      setNotice("Укажите корректное число (0 = без лимита, например 3).");
-      return;
-    }
-    const targets = bots.map(b => b.symbol);
-    if (targets.length === 0) {
-      setNotice("Нет ботов для обновления.");
-      return;
-    }
-    if (!confirm(
-      `Задать max_positions_with_expired = ${maxPos} сразу ${targets.length} ботам?\n\n` +
-      "Макс. открытых позиций включая протухшие. 0 = без лимита.\n\n" +
-      "Изменение запишется в БД и в config_*.yaml. Применится к новым позициям."
-    )) return;
-
-    setApplyingLimits(true);
-    setNotice(null);
-    const failed: string[] = [];
-    const CONCURRENCY = 4;
-    for (let i = 0; i < targets.length; i += CONCURRENCY) {
-      const chunk = targets.slice(i, i + CONCURRENCY);
-      await Promise.all(chunk.map(async (symbol) => {
-        try {
-          await updateConfig(symbol, { max_positions_with_expired: maxPos });
-        } catch {
-          failed.push(symbol);
-        }
-      }));
-      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
-    }
-    setApplyingLimits(false);
-    setMaxPositionsWithExpiredAll("");
-    setNotice(
-      failed.length
-        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
-        : `Готово: max_positions_with_expired = ${maxPos} задано всем ${targets.length} ботам.`
-    );
-    await load();
-  };
+  
 
   /**
    * Задать числовое риск-поле сразу ВСЕМ ботам.
@@ -1645,60 +1551,6 @@ export default function Dashboard() {
                 size="sm"
                 variant="outline"
                 onClick={handleApplyExpiredMinutesToAll}
-                disabled={applyingLimits}
-                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
-              >
-                {applyingLimits ? "Working..." : "Apply"}
-              </Button>
-            </div>
-          )}
-          {!IS_LIVE && (
-            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
-              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Макс. одновременно открытых позиций (включая recovery). 0 = без лимита. Применится к новым позициям.">
-                Max поз. · всем
-              </label>
-              <input
-                type="number"
-                step="1"
-                min="0"
-                max="50"
-                placeholder={String(displayMaxPositions)}
-                value={maxPositionsAll || String(displayMaxPositions)}
-                onChange={e => setMaxPositionsAll(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsToAll(); }}
-                className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleApplyMaxPositionsToAll}
-                disabled={applyingLimits}
-                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
-              >
-                {applyingLimits ? "Working..." : "Apply"}
-              </Button>
-            </div>
-          )}
-          {!IS_LIVE && (
-            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
-              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Макс. открытых позиций включая протухшие. 0 = без лимита. Применится к новым позициям.">
-                Max поз. + протух. · всем
-              </label>
-              <input
-                type="number"
-                step="1"
-                min="0"
-                max="50"
-                placeholder={String(displayMaxPositionsWithExpired)}
-                value={maxPositionsWithExpiredAll || String(displayMaxPositionsWithExpired)}
-                onChange={e => setMaxPositionsWithExpiredAll(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") void handleApplyMaxPositionsWithExpiredToAll(); }}
-                className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleApplyMaxPositionsWithExpiredToAll}
                 disabled={applyingLimits}
                 className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
               >

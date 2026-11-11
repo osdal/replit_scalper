@@ -268,8 +268,10 @@ for (const file of configs) {
       max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
       max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
       expired_after_minutes: (raw.expired_after_minutes as number) ?? 120,
-      max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
-      max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
+      // max_positions / max_positions_with_expired — ГЛОБАЛЬНЫЕ (ENV_MAX_POSITIONS),
+      // per-bot поля убраны. Не перезаписываем из YAML.
+      // max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
+      // max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
       // Новые риск-поля перезаписываем только если ключ реально есть в yaml:
       // иначе UI-значения из БД затирались бы дефолтами при каждом рестарте.
       ...(raw.slot_release_minutes !== undefined
@@ -310,11 +312,13 @@ for (const file of configs) {
     max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
     max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
     expired_after_minutes: (raw.expired_after_minutes as number) ?? 120,
-    max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
-    max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
-    armed: BOT_ENV !== "live",
-    relay_only: BOT_ENV === "live",
-    updated_at: new Date().toISOString(),
+      // max_positions / max_positions_with_expired — ГЛОБАЛЬНЫЕ (ENV_MAX_POSITIONS),
+      // per-bot поля убраны. БД оставляет 0, читаются из env в trading.ts.
+      max_positions: 0,
+      max_positions_with_expired: 0,
+      armed: BOT_ENV !== "live",
+      relay_only: BOT_ENV === "live",
+      updated_at: new Date().toISOString(),
   });
   console.log(`  Added ${symbol} from ${file}`);
 }

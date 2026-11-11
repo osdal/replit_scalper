@@ -41,10 +41,10 @@ export const botsTable = sqliteTable("bots", {
   max_position_notional_usd: real("max_position_notional_usd").notNull().default(0),
   max_position_pct_equity:   real("max_position_pct_equity").notNull().default(0),
   // Лимиты позиций (per-bot, настраиваются через дашборд без перезапуска контейнера):
+  // max_positions и max_positions_with_expired — ГЛОБАЛЬНЫЕ (из .env / .env.live),
+  // per-bot поля убраны — у одной монеты может быть только 1 позиция.
   expired_after_minutes: integer("expired_after_minutes").notNull().default(120),
-  max_positions:           integer("max_positions").notNull().default(1),
-  max_positions_with_expired: integer("max_positions_with_expired").notNull().default(3),
-  // Через сколько минут позиция перестаёт занимать слот max_positions (0 = никогда).
+  // Через сколько минут позиция перестаёт занимать слот глобального max_positions (0 = никогда).
   // Отдельно от expired_after_minutes: 120 мин = «протухла, закрыть в мин. плюс»,
   // 360 мин = «слот освобождён», принудительно НЕ закрываем.
   slot_release_minutes:    integer("slot_release_minutes").notNull().default(360),
