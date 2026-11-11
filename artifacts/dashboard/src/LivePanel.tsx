@@ -1,5 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Component, ReactNode } from "react";
 import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
+
+// Error boundary to catch render errors in LivePanel
+class LivePanelErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("[LivePanel] Error caught by boundary:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-md border-2 border-red-600 bg-red-950/40 p-3 text-red-300">
+          <div className="font-semibold">LIVE Panel Error</div>
+          <pre className="text-xs mt-2 overflow-auto">{this.state.error?.message || "Unknown error"}</pre>
+          <pre className="text-xs mt-2 overflow-auto">{this.state.error?.stack || ""}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 type AnyBot = {
   symbol: string;
