@@ -33,7 +33,12 @@ import { DAILY_TZ, dayKey, dayStartUtcIso, tzOffsetMinutes } from "./dayBoundary
 
 export { DAILY_TZ, dayKey, dayStartUtcIso, tzOffsetMinutes };
 
-const BASELINE_FILE = path.resolve(BOT_DIR, "..", "data", "daily_baseline.json");
+// ВАЖНО: файл базы — per-env. Оба стека монтируют один ./data, поэтому общий
+// файл приводил к тому, что live читал базу TESTNET (101.98 вместо 9.54) и
+// дневной лимит на реальном счёте фактически отключался.
+const BASELINE_FILE = path.resolve(
+  BOT_DIR, "..", "data", `daily_baseline_${BOT_ENV}.json`,
+);
 
 export type BaselineSource = "auto" | "manual";
 

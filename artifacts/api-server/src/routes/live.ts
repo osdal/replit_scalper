@@ -22,7 +22,9 @@ const router = Router();
  * API флаг `dailyLossTripped` сбрасывался бы и боты могли снова открывать входы
  * в тот же день, уже потеряв дневной лимит.
  */
-const TRIP_FILE = path.resolve(BOT_DIR, "..", "data", "live_daily_loss_state.json");
+const TRIP_FILE = path.resolve(
+  BOT_DIR, "..", "data", `live_daily_loss_state_${BOT_ENV}.json`,
+);
 
 type TripState = { day: string; tripped: boolean; symbols: string[] };
 
