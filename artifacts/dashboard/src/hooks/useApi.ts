@@ -165,3 +165,11 @@ export async function fetchRelayStats(symbol?: string): Promise<{
 export async function setRelayOnly(symbol: string, value: boolean): Promise<unknown> {
   return updateConfig(symbol, { relay_only: value });
 }
+
+// Глобальный статус торговли: max_positions, max_positions_with_expired, и др.
+export async function fetchTradingStatus(): Promise<{
+  max_positions: number;
+  max_positions_with_expired: number;
+}> {
+  return apiFetch(`${API}/trading/status`);
+}

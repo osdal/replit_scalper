@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig } from "./hooks/useApi";
+import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus } from "./hooks/useApi";
 
 type AnyBot = {
   symbol: string;
@@ -26,6 +26,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [loss, setLoss] = useState<Awaited<ReturnType<typeof fetchDailyLoss>> | null>(null);
   const [dd, setDd] = useState<{ drawdown_pct: number; threshold_pct: number; equity: number; reference: number; enabled: boolean } | null>(null);
   const [relay, setRelay] = useState<{ pending: number; consumed: number; skipped: number; last: any | null } | null>(null);
+  const [tradingStatus, setTradingStatus] = useState<{ max_positions: number; max_positions_with_expired: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadLoss = async () => {
@@ -37,11 +38,15 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const loadRelay = async () => {
     try { setRelay(await fetchRelayStats()); } catch { /* ignore */ }
   };
+  const loadTradingStatus = async () => {
+    try { setTradingStatus(await fetchTradingStatus()); } catch { /* ignore */ }
+  };
   useEffect(() => {
     loadLoss();
     loadDd();
     loadRelay();
-    const id = setInterval(() => { loadLoss(); loadDd(); loadRelay(); }, 15000);
+    loadTradingStatus();
+    const id = setInterval(() => { loadLoss(); loadDd(); loadRelay(); loadTradingStatus(); }, 15000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -83,6 +88,20 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
           {relay?.last
             ? `${relay.last.symbol} ${relay.last.direction} ${relay.last.preset ?? ""} @ ${String(relay.last.created_at).slice(11, 19)} (${relay.last.status ?? "pending"})`
             : "—"}
+        </div>
+      </div>
+
+      <div className="rounded-md border border-zinc-800 bg-zinc-900 p-3 text-xs">
+        <div className="font-semibold text-zinc-300">Глобальные лимиты позиций (все боты)</div>
+        <div className="flex flex-wrap gap-4 mt-2 text-zinc-400">
+          <div>
+            <span className="text-zinc-500">Max поз.: </span>
+            <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions ?? "—"}</span>
+          </div>
+          <div>
+            <span className="text-zinc-500">Max поз. + протух.: </span>
+            <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions_with_expired ?? "—"}</span>
+          </div>
         </div>
       </div>
 
