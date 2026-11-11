@@ -70,7 +70,7 @@ htf_ema_fast: 10
 htf_ema_slow: 50
 htf_enabled: false
 htf_timeframe: 1h
-leverage: 20
+leverage: 75
 llm_api_key: ''
 llm_backoff_sec: 60.0
 llm_calls_per_min: 20
@@ -113,7 +113,7 @@ volume_multiplier: 1.0
 reverse_breakeven_pct: 1.5
 reverse_profit_pct: 0.5
 reverse_fee_buffer_pct: 0.1
-reverse_chain_max: 3
+reverse_chain_max: 10
 expired_after_minutes: 120
 max_positions: 1
 max_positions_with_expired: 3

@@ -130,7 +130,21 @@ export async function closeAllLive() {
   return apiFetch(`${API}/live/close-all`, { method: "POST" });
 }
 
-export async function fetchDailyLoss(): Promise<{ bot_env: string; limit: number; net: number; tripped: boolean }> {
+export async function fetchDailyLoss(): Promise<{
+  bot_env: string;
+  day?: string;
+  limit: number;
+  limit_pct?: number;
+  limit_source?: string;
+  net: number;
+  realized?: number;
+  unrealized?: number;
+  baseline?: number;
+  baseline_source?: string;
+  remaining_usd?: number;
+  degraded?: boolean;
+  tripped: boolean;
+}> {
   return apiFetch(`${API}/live/daily-loss`);
 }
 

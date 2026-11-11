@@ -56,6 +56,9 @@ interface Bot {
   expired_after_minutes?: number;
   max_positions?: number;
   max_positions_with_expired?: number;
+  slot_release_minutes?: number;
+  position_loss_pct?: number;
+  total_loss_pct?: number;
   paper_balance?: number;
   position_size_pct?: number;
 }
@@ -974,6 +977,9 @@ export default function Dashboard() {
   const [expiredMinutesAll, setExpiredMinutesAll] = useState("");
   const [maxPositionsAll, setMaxPositionsAll] = useState("");
   const [maxPositionsWithExpiredAll, setMaxPositionsWithExpiredAll] = useState("");
+  const [slotReleaseAll, setSlotReleaseAll] = useState("");
+  const [positionLossPctAll, setPositionLossPctAll] = useState("");
+  const [totalLossPctAll, setTotalLossPctAll] = useState("");
   const [applyingLimits, setApplyingLimits] = useState(false);
 
   // Computed display values for "Apply to all" inputs — show most common value among bots
@@ -988,6 +994,9 @@ export default function Dashboard() {
   const displayExpiredMinutes = getCommonValue(bots, "expired_after_minutes", 120);
   const displayMaxPositions = getCommonValue(bots, "max_positions", 1);
   const displayMaxPositionsWithExpired = getCommonValue(bots, "max_positions_with_expired", 3);
+  const displaySlotReleaseMinutes = getCommonValue(bots, "slot_release_minutes", 360);
+  const displayPositionLossPct = getCommonValue(bots, "position_loss_pct", 5);
+  const displayTotalLossPct = getCommonValue(bots, "total_loss_pct", 10);
   const displaySizePct = getCommonValue(bots, "position_size_pct", 1);
 
   useEffect(() => {
@@ -1345,6 +1354,58 @@ export default function Dashboard() {
     await load();
   };
 
+  /**
+   * Задать числовое риск-поле сразу ВСЕМ ботам.
+   * Используется для slot_release_minutes / position_loss_pct / total_loss_pct.
+   */
+  const applyRiskFieldToAll = async (
+    field: "slot_release_minutes" | "position_loss_pct" | "total_loss_pct",
+    rawInput: string,
+    opts: { min: number; max: number; label: string; hint: string; unit: string },
+  ) => {
+    const raw = rawInput.trim().replace(",", ".");
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value < opts.min || value > opts.max) {
+      setNotice(`Укажите корректное значение «${opts.label}» (${opts.min}–${opts.max} ${opts.unit}).`);
+      return;
+    }
+    const targets = bots.map(b => b.symbol);
+    if (targets.length === 0) {
+      setNotice("Нет ботов для обновления.");
+      return;
+    }
+    if (!confirm(
+      `Задать «${opts.label}» = ${value} ${opts.unit} сразу ${targets.length} ботам?\n\n` +
+      `${opts.hint}\n\nИзменение запишется в БД и в config_*.yaml. Применится к новым позициям.`
+    )) return;
+
+    setApplyingLimits(true);
+    setNotice(null);
+    const failed: string[] = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (symbol) => {
+        try {
+          await updateConfig(symbol, { [field]: value });
+        } catch {
+          failed.push(symbol);
+        }
+      }));
+      setNotice(`Применяю… ${Math.min(i + CONCURRENCY, targets.length)}/${targets.length}`);
+    }
+    setApplyingLimits(false);
+    if (field === "slot_release_minutes") setSlotReleaseAll("");
+    if (field === "position_loss_pct") setPositionLossPctAll("");
+    if (field === "total_loss_pct") setTotalLossPctAll("");
+    setNotice(
+      failed.length
+        ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
+        : `Готово: «${opts.label}» = ${value} ${opts.unit} задано всем ${targets.length} ботам.`
+    );
+    await load();
+  };
+
   const handleCloseAllReset = async () => {
     if (!confirm(
       "Close ALL open positions (real + rejected), reset open-position counter and " +
@@ -1645,6 +1706,105 @@ export default function Dashboard() {
               </Button>
             </div>
           )}
+          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Через сколько минут позиция перестаёт занимать слот max_positions. 0 = никогда. Позиция при этом НЕ закрывается: живёт до TP / минимального плюса / 5% cap.">
+              Слот, мин · всем
+            </label>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="10080"
+              placeholder={String(displaySlotReleaseMinutes)}
+              value={slotReleaseAll || String(displaySlotReleaseMinutes)}
+              onChange={e => setSlotReleaseAll(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") {
+                void applyRiskFieldToAll("slot_release_minutes", slotReleaseAll || String(displaySlotReleaseMinutes), {
+                  min: 0, max: 10080, unit: "мин", label: "Слот, мин",
+                  hint: "Позиция старше N минут перестаёт занимать слот max_positions, но продолжает жить и закрывается по TP / минимальному плюсу. 0 = никогда.",
+                });
+              } }}
+              className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void applyRiskFieldToAll("slot_release_minutes", slotReleaseAll || String(displaySlotReleaseMinutes), {
+                min: 0, max: 10080, unit: "мин", label: "Слот, мин",
+                hint: "Позиция старше N минут перестаёт занимать слот max_positions, но продолжает жить и закрывается по TP / минимальному плюсу. 0 = никогда.",
+              })}
+              disabled={applyingLimits}
+              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+            >
+              {applyingLimits ? "Working..." : "Apply"}
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита (live).">
+              Убыток позиции, % · всем
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="100"
+              placeholder={String(displayPositionLossPct)}
+              value={positionLossPctAll || String(displayPositionLossPct)}
+              onChange={e => setPositionLossPctAll(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") {
+                void applyRiskFieldToAll("position_loss_pct", positionLossPctAll || String(displayPositionLossPct), {
+                  min: 0, max: 100, unit: "%", label: "Убыток позиции, %",
+                  hint: "Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита. 0 = выкл.",
+                });
+              } }}
+              className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void applyRiskFieldToAll("position_loss_pct", positionLossPctAll || String(displayPositionLossPct), {
+                min: 0, max: 100, unit: "%", label: "Убыток позиции, %",
+                hint: "Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита. 0 = выкл.",
+              })}
+              disabled={applyingLimits}
+              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+            >
+              {applyingLimits ? "Working..." : "Apply"}
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Дневной стоп: net за день (прибыль минус убыток) ≤ -N% баланса на начало дня по Киеву → боты останавливаются до следующего дня.">
+              Дневной убыток, % · всем
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="100"
+              placeholder={String(displayTotalLossPct)}
+              value={totalLossPctAll || String(displayTotalLossPct)}
+              onChange={e => setTotalLossPctAll(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") {
+                void applyRiskFieldToAll("total_loss_pct", totalLossPctAll || String(displayTotalLossPct), {
+                  min: 0, max: 100, unit: "%", label: "Дневной убыток, %",
+                  hint: "Дневной стоп: если net за день (прибыль минус убыток, в реальном времени) ≤ -N% баланса на начало дня (Europe/Kyiv), боты останавливаются и позиции закрываются. На смене дня боты поднимаются автоматически. 0 = выкл.",
+                });
+              } }}
+              className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void applyRiskFieldToAll("total_loss_pct", totalLossPctAll || String(displayTotalLossPct), {
+                min: 0, max: 100, unit: "%", label: "Дневной убыток, %",
+                hint: "Дневной стоп: если net за день (прибыль минус убыток, в реальном времени) ≤ -N% баланса на начало дня (Europe/Kyiv), боты останавливаются и позиции закрываются. На смене дня боты поднимаются автоматически. 0 = выкл.",
+              })}
+              disabled={applyingLimits}
+              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+            >
+              {applyingLimits ? "Working..." : "Apply"}
+            </Button>
+          </div>
           <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
             <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing...' : 'Sync Binance'}

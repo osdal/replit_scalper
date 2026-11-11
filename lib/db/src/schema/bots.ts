@@ -44,6 +44,15 @@ export const botsTable = sqliteTable("bots", {
   expired_after_minutes: integer("expired_after_minutes").notNull().default(120),
   max_positions:           integer("max_positions").notNull().default(1),
   max_positions_with_expired: integer("max_positions_with_expired").notNull().default(3),
+  // Через сколько минут позиция перестаёт занимать слот max_positions (0 = никогда).
+  // Отдельно от expired_after_minutes: 120 мин = «протухла, закрыть в мин. плюс»,
+  // 360 мин = «слот освобождён», принудительно НЕ закрываем.
+  slot_release_minutes:    integer("slot_release_minutes").notNull().default(360),
+  // Закрыть позицию, когда её плавающий убыток >= pct% депозита (0 = выкл).
+  position_loss_pct:       real("position_loss_pct").notNull().default(5),
+  // Дневной стоп: если net за день (прибыль минус убыток) <= -pct% баланса на
+  // начало дня — остановить ботов до следующего дня (0 = выкл).
+  total_loss_pct:          real("total_loss_pct").notNull().default(10),
   // Live arm-gate: торговля разрешена только при armed=1. В testnet по умолчанию 1.
   armed:              integer("armed", { mode: "boolean" }).notNull().default(true),
   // Причина последней самоостановки бота (напр. "watchdog_no_candles"); null если нет.

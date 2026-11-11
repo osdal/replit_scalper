@@ -70,7 +70,7 @@ htf_ema_fast: 8
 htf_ema_slow: 24
 htf_enabled: false
 htf_timeframe: 1h
-leverage: 20
+leverage: 75
 llm_api_key: ''
 llm_backoff_sec: 60.0
 llm_calls_per_min: 20
@@ -98,7 +98,7 @@ rsi_low: 30
 rsi_period: 14
 signal_cooldown_min: 0
 sl_pct: 0.5
-reverse_chain_max: 3
+reverse_chain_max: 10
 symbol: LTCUSDT
 time_profit_close_hours: 0
 timeframe: 5m

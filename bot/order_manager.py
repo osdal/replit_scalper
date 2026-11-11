@@ -708,6 +708,50 @@ class OrderManager:
     # офлайн/забанен и виртуальный SL некому обработать. Он всегда матчится с
     # размером позиции (closePosition=true), поэтому qty в ордер не передаётся.
 
+    def _max_safe_backstop_pct(self) -> float:
+        """Макс. дистанция биржевого backstop ЗА виртуальным SL (в %), ещё до ликвидации.
+
+        При изолированной марже ликвидация наступает примерно на `100/leverage` %
+        от входа минус maintenance margin. Виртуальный SL стоит на `sl_pct` от
+        входа, поэтому запас «за SL» = `100/lev - mmr - sl_pct`. Берём 60% этого
+        запаса: стоп обязан сработать ДО ликвидации даже при проскальзывании.
+
+        При плече 75 и sl_pct=0.5: (1.333 - 0.5 - 0.5) * 0.6 ≈ 0.20% — старый
+        фиксированный `exchange_sl_backstop_pct: 2` оказался бы за ликвидацией
+        (≈0.83%) и не защитил бы вообще ничего.
+        """
+        try:
+            lev = max(1, int(float(getattr(self.cfg, "leverage", 1) or 1)))
+        except (TypeError, ValueError):
+            lev = 1
+        try:
+            sl_pct = max(0.0, float(getattr(self.cfg, "sl_pct", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            sl_pct = 0.0
+        # Типичный maintenance margin для мелкого нотионала USDT-M.
+        mmr_pct = 0.5
+        room = (100.0 / lev) - mmr_pct - sl_pct
+        if room <= 0:
+            return 0.0
+        return 0.6 * room
+
+    def _effective_backstop_pct(self, configured: float) -> float:
+        """Клампит заданный backstop до безопасного (до ликвидации) значения."""
+        configured = float(configured or 0.0)
+        cap = self._max_safe_backstop_pct()
+        if cap <= 0:
+            return 0.0
+        if configured <= 0:
+            return cap
+        if configured > cap:
+            self.log.info(
+                f"[BACKSTOP] pct clamped {configured:.3f}% -> {cap:.3f}% "
+                f"(leverage={getattr(self.cfg, 'leverage', '?')}, "
+                f"sl_pct={getattr(self.cfg, 'sl_pct', '?')}) — иначе стоп за ликвидацией"
+            )
+            return cap
+        return configured
+
     async def _place_exchange_backstop(
         self, direction: str, sl_price: float, qty: float = 0.0,
         exact_trigger: Optional[float] = None,
@@ -733,7 +777,16 @@ class OrderManager:
             # если он почему-то ещё жив (entry/reverse обычно уже отменили его).
             if self.backstop_algo_id:
                 await self._cancel_exchange_backstop(self.backstop_algo_id)
-            pct = float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            pct = self._effective_backstop_pct(
+                float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            )
+            if pct <= 0:
+                self.log.error(
+                    f"[BACKSTOP] no safe distance before liquidation "
+                    f"(leverage={getattr(self.cfg, 'leverage', '?')}, "
+                    f"sl_pct={getattr(self.cfg, 'sl_pct', '?')}) — skipping backstop"
+                )
+                return None
             use_exact = exact_trigger is not None and exact_trigger > 0
             if direction == "LONG":
                 trigger_raw = float(exact_trigger) if use_exact else sl_price * (1 - pct / 100)
@@ -1117,7 +1170,9 @@ class OrderManager:
             p_cap_raw = (-x * ref - float(net_realized) + q * entry + fee_in) / denom
 
             sl = float(virtual_sl) if (virtual_sl and virtual_sl > 0) else 0.0
-            pct_bs = float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            pct_bs = self._effective_backstop_pct(
+                float(getattr(self.cfg, "exchange_sl_backstop_pct", 2.0) or 0.0)
+            )
             if sl > 0 and new_dir == "LONG":
                 gap = sl * (1 - pct_bs / 100.0)
                 if p_cap_raw < sl:

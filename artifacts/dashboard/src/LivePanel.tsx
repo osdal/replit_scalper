@@ -12,6 +12,9 @@ type AnyBot = {
   expired_after_minutes?: number;
   max_positions?: number;
   max_positions_with_expired?: number;
+  slot_release_minutes?: number;
+  position_loss_pct?: number;
+  total_loss_pct?: number;
 };
 
 export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChanged: () => void }) {
@@ -21,7 +24,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [expiredMins, setExpiredMins] = useState<Record<string, string>>({});
   const [maxPos, setMaxPos] = useState<Record<string, string>>({});
   const [maxPosWithExpired, setMaxPosWithExpired] = useState<Record<string, string>>({});
-  const [loss, setLoss] = useState<{ limit: number; net: number; tripped: boolean } | null>(null);
+  const [slotRelease, setSlotRelease] = useState<Record<string, string>>({});
+  const [positionLossPct, setPositionLossPct] = useState<Record<string, string>>({});
+  const [totalLossPct, setTotalLossPct] = useState<Record<string, string>>({});
+  const [loss, setLoss] = useState<Awaited<ReturnType<typeof fetchDailyLoss>> | null>(null);
   const [dd, setDd] = useState<{ drawdown_pct: number; threshold_pct: number; equity: number; reference: number; enabled: boolean } | null>(null);
   const [relay, setRelay] = useState<{ pending: number; consumed: number; skipped: number; last: any | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +66,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
           позиция = маржа × плечо; либо маржа = % от СВОБОДНОГО депозита (availableBalance)
           — по умолчанию 1%. Приоритет: явный margin_usd важнее процента. Дневной лимит:{" "}
           {loss ? `${loss.net.toFixed(2)} / -${loss.limit}` : "—"}
+          {loss?.baseline ? ` (база дня $${loss.baseline.toFixed(2)}${loss.day ? `, ${loss.day}` : ""})` : ""}
+          {loss?.remaining_usd !== undefined ? `, осталось $${loss.remaining_usd.toFixed(2)}` : ""}
           {loss?.tripped ? " — ЛИМИТ СРАБОТАЛ (боты остановлены)" : ""}
+          {loss?.degraded ? " · ВНИМАНИЕ: биржа не ответила, плавающий PnL не учтён" : ""}
           <br />
           Просадка:{" "}
           {dd ? `${dd.drawdown_pct.toFixed(1)}% / ${dd.threshold_pct}% (equity $${dd.equity.toFixed(2)}, ref $${dd.reference.toFixed(2)})` : "—"}
@@ -110,6 +119,9 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               <th className="pr-3">протухание, мин</th>
               <th className="pr-3">max поз.</th>
               <th className="pr-3">max поз. + протух.</th>
+              <th className="pr-3" title="Через сколько минут позиция перестаёт занимать слот max_positions (не закрывается)">слот, мин</th>
+              <th className="pr-3" title="Закрыть позицию при её плавающем убытке ≥ N% депозита">убыток позиции, %</th>
+              <th className="pr-3" title="Дневной стоп: net за день ≤ -N% баланса на начало дня (Киев)">дневной убыток, %</th>
               <th className="pr-3">actions</th>
             </tr>
           </thead>
@@ -236,6 +248,60 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       onClick={() =>
                         void run(`mpe-${b.symbol}`, () =>
                           updateConfig(b.symbol, { max_positions_with_expired: Number(maxPosWithExpired[b.symbol]) || 0 }),
+                        )
+                      }
+                    >
+                      set
+                    </button>
+                  </td>
+                  <td className="pr-3">
+                    <input
+                      value={slotRelease[b.symbol] ?? String(b.slot_release_minutes ?? 360)}
+                      onChange={(e) => setSlotRelease((s) => ({ ...s, [b.symbol]: e.target.value }))}
+                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                    />
+                    <button
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(`slot-${b.symbol}`, () =>
+                          updateConfig(b.symbol, { slot_release_minutes: Number(slotRelease[b.symbol]) || 0 }),
+                        )
+                      }
+                    >
+                      set
+                    </button>
+                  </td>
+                  <td className="pr-3">
+                    <input
+                      value={positionLossPct[b.symbol] ?? String(b.position_loss_pct ?? 5)}
+                      onChange={(e) => setPositionLossPct((s) => ({ ...s, [b.symbol]: e.target.value }))}
+                      className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                    />
+                    <button
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(`plp-${b.symbol}`, () =>
+                          updateConfig(b.symbol, { position_loss_pct: Number(positionLossPct[b.symbol]) || 0 }),
+                        )
+                      }
+                    >
+                      set
+                    </button>
+                  </td>
+                  <td className="pr-3">
+                    <input
+                      value={totalLossPct[b.symbol] ?? String(b.total_loss_pct ?? 10)}
+                      onChange={(e) => setTotalLossPct((s) => ({ ...s, [b.symbol]: e.target.value }))}
+                      className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                    />
+                    <button
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(`tlp-${b.symbol}`, () =>
+                          updateConfig(b.symbol, { total_loss_pct: Number(totalLossPct[b.symbol]) || 0 }),
                         )
                       }
                     >

@@ -2,193 +2,196 @@ import { Router } from "express";
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
-import { db, tradesTable } from "@workspace/db";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { db, botsTable } from "@workspace/db";
+import { sql } from "drizzle-orm";
 import { BOT_DIR, BOT_ENV } from "../botPaths";
 import { binanceRequest, syncBinanceTime } from "../grid-orders-lib";
 import { getWalletBalanceUsd } from "../lib/account-balance";
-import { stopAllBots } from "./bots";
+import {
+  dailyRiskSnapshot,
+  dayKey,
+  resetBaselineTo,
+  resolvePositionLossPct,
+} from "../lib/dailyRisk";
+import { startBotProcess, stopAllBots } from "./bots";
 
 const router = Router();
-let dailyLossTripped = false;
-
-// Дневной лимит считается не от нуля, а от «базы» (baseline): при сбросе лимита
-// или в новый UTC-день база обнуляется/перезаписывается, давая свежий бюджет.
-const BASELINE_FILE = path.resolve(BOT_DIR, "..", "data", "live_daily_loss_baseline.json");
-
-function utcDate(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function loadBaseline(): { date: string; baseline: number } {
-  try {
-    const raw = JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"));
-    if (raw && raw.date === utcDate()) {
-      return { date: raw.date, baseline: Number(raw.baseline) || 0 };
-    }
-  } catch { /* no file — start from 0 */ }
-  return { date: utcDate(), baseline: 0 };
-}
-
-function saveBaseline(state: { date: string; baseline: number }): void {
-  try {
-    fs.mkdirSync(path.dirname(BASELINE_FILE), { recursive: true });
-    fs.writeFileSync(BASELINE_FILE, JSON.stringify(state));
-  } catch (e) {
-    console.error("[live] baseline save failed:", String(e));
-  }
-}
-
-let lossState = loadBaseline();
-
-function utcDayStartIso(): string {
-  const now = new Date();
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  return start.toISOString();
-}
-
-async function todayRealizedNet(): Promise<number> {
-  const start = utcDayStartIso();
-  const [row] = await db
-    .select({ net: sql<number>`COALESCE(SUM(pnl),0)` })
-    .from(tradesTable)
-    .where(and(eq(tradesTable.is_open, false), gte(tradesTable.exit_time, start)));
-  return Number(row?.net ?? 0);
-}
-
-/** Суммарный НЕреализованный PnL открытых позиций с биржи (live). */
-async function exchangeUnrealized(): Promise<number> {
-  try {
-    const raw = await binanceRequest("GET", "/fapi/v2/positionRisk", {});
-    const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
-    let sum = 0;
-    for (const p of list) {
-      const amt = Number(p?.positionAmt ?? 0) || 0;
-      if (Math.abs(amt) <= 0) continue;
-      sum += Number(p?.unRealizedProfit ?? 0) || 0;
-    }
-    return sum;
-  } catch (e) {
-    console.error("[live] unrealized fetch failed:", String(e));
-    return 0;
-  }
-}
-
-/** Итоговый дневной результат = реализованный net + нереализованный по открытым. */
-async function todayTotalNet(): Promise<{ realized: number; unrealized: number; total: number }> {
-  const realized = await todayRealizedNet();
-  const unrealized = BOT_ENV === "live" ? await exchangeUnrealized() : 0;
-  return { realized, unrealized, total: realized + unrealized };
-}
 
 /**
- * Лимит kill-switch в USD.
- *
- * Если задан LIVE_DAILY_LOSS_LIMIT_PCT (> 0) — это процент от ТЕКУЩЕГО баланса
- * счёта (кэш 60с, fallback DEPOSIT_USD). Иначе — фиксированный
- * LIVE_DAILY_LOSS_LIMIT_USD (историческое поведение). Проценты включаются
- * только на live-стеке, где они заданы в env.
+ * Состояние kill-switch переживает рестарт контейнера: иначе после перезапуска
+ * API флаг `dailyLossTripped` сбрасывался бы и боты могли снова открывать входы
+ * в тот же день, уже потеряв дневной лимит.
  */
-async function resolveKillSwitchLimit(): Promise<{
-  limit: number;
-  pct: number;
-  balance: number | null;
-  source: "pct" | "usd";
-}> {
-  const pct = Number(process.env.LIVE_DAILY_LOSS_LIMIT_PCT || "0");
-  if (Number.isFinite(pct) && pct > 0) {
-    const balance = await getWalletBalanceUsd();
-    const limit = (balance * pct) / 100;
-    if (limit > 0) return { limit, pct, balance, source: "pct" };
+const TRIP_FILE = path.resolve(BOT_DIR, "..", "data", "live_daily_loss_state.json");
+
+type TripState = { day: string; tripped: boolean; symbols: string[] };
+
+function loadTripState(): TripState {
+  try {
+    const raw = JSON.parse(fs.readFileSync(TRIP_FILE, "utf8")) as Partial<TripState>;
+    return {
+      day: String(raw?.day ?? ""),
+      tripped: Boolean(raw?.tripped),
+      symbols: Array.isArray(raw?.symbols) ? raw.symbols.map((s) => String(s).toUpperCase()) : [],
+    };
+  } catch {
+    return { day: "", tripped: false, symbols: [] };
   }
-  const limit = Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0");
-  return { limit, pct: 0, balance: null, source: "usd" };
 }
 
+function saveTripState(state: TripState): void {
+  try {
+    fs.mkdirSync(path.dirname(TRIP_FILE), { recursive: true });
+    fs.writeFileSync(TRIP_FILE, JSON.stringify(state, null, 2));
+  } catch (e) {
+    console.error("[live] trip state save failed:", String(e));
+  }
+}
+
+let tripState = loadTripState();
+// Флаг активен только в «свой» день: на смене дня лимит снова доступен.
+let dailyLossTripped = tripState.tripped && tripState.day === dayKey();
+
 /**
- * Дневной лимит убытка: если итог за текущие UTC-сутки (реализованный net +
- * нереализованный по открытым) опустился ниже -limit, останавливаем всех ботов
- * и закрываем позиции. Только для live-окружения.
- * Сброс базы — POST /api/live/daily-loss/reset.
+ * Дневной стоп (kill-switch).
+ *
+ * Единая формула с гейтом входов (`lib/dailyRisk.ts`): net за день по Киеву
+ * (реализованный + плавающий) против базы на начало дня × total_loss_pct.
+ * При срабатывании: останавливаем ботов, закрываем позиции, запоминаем список
+ * ботов (чтобы поднять их на смене дня) и состояние на диск.
  */
 export async function checkDailyLossLimit(): Promise<void> {
-  if (BOT_ENV !== "live" || dailyLossTripped) return;
-  let resolved: Awaited<ReturnType<typeof resolveKillSwitchLimit>>;
+  if (BOT_ENV !== "live") return;
+  await checkDayRollover();
+  if (dailyLossTripped) return;
+
+  let snap: Awaited<ReturnType<typeof dailyRiskSnapshot>>;
   try {
-    resolved = await resolveKillSwitchLimit();
+    snap = await dailyRiskSnapshot({
+      configuredUsd: Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0"),
+    });
   } catch (e) {
-    console.error("[live] kill-switch limit resolve failed:", String(e));
+    console.error("[live] daily loss snapshot failed:", String(e));
     return;
   }
-  const limit = resolved.limit;
-  if (!Number.isFinite(limit) || limit <= 0) return;
+  if (!Number.isFinite(snap.limit_usd) || snap.limit_usd <= 0) return;
+  if (!snap.tripped) return;
+
+  dailyLossTripped = true;
+
+  // Кого поднимать завтра: снимок запущенных ДО остановки.
+  let symbols: string[] = [];
   try {
-    if (lossState.date !== utcDate()) {
-      lossState = { date: utcDate(), baseline: 0 };
-      saveBaseline(lossState);
-    }
-    const { realized, unrealized, total } = await todayTotalNet();
-    const delta = total - lossState.baseline;
-    if (delta <= -Math.abs(limit)) {
-      dailyLossTripped = true;
-      console.error(
-        `[live] DAILY LOSS LIMIT reached: delta=${delta.toFixed(2)} ` +
-        `(realized=${realized.toFixed(2)} unrealized=${unrealized.toFixed(2)} total=${total.toFixed(2)} ` +
-        `baseline=${lossState.baseline.toFixed(2)}) <= -${Math.abs(limit).toFixed(2)} ` +
-        `[${resolved.source}${resolved.pct > 0 ? ` ${resolved.pct}%` : ""}` +
-        `${resolved.balance !== null ? ` of ${resolved.balance.toFixed(2)}` : ""}] — ` +
-        `stopping all bots and flattening positions`,
-      );
-      const summary = await flattenAll();
-      console.error(
-        `[live] daily loss flatten ${summary.ok ? "OK" : "FAILED"}: ${summary.output.slice(0, 400)}`,
-      );
-    }
+    const rows = await db.select({ symbol: botsTable.symbol }).from(botsTable)
+      .where(sql`is_running = 1`);
+    symbols = rows.map((r) => String(r.symbol).toUpperCase()).filter(Boolean);
   } catch (e) {
-    console.error("[live] daily loss check failed:", String(e));
+    console.error("[live] running bots snapshot failed:", String(e));
+  }
+
+  tripState = { day: dayKey(), tripped: true, symbols };
+  saveTripState(tripState);
+
+  console.error(
+    `[live] DAILY LOSS LIMIT reached: net=${snap.total.toFixed(2)} ` +
+    `(realized=${snap.realized.toFixed(2)} unrealized=${snap.unrealized.toFixed(2)}) ` +
+    `<= -${snap.limit_usd.toFixed(2)} (=${snap.pct}% of ${snap.baseline.toFixed(2)} ` +
+    `at day start ${snap.day}, mode=${snap.mode}) — stopping all bots and flattening positions`,
+  );
+
+  const summary = await flattenAll();
+  console.error(
+    `[live] daily loss flatten ${summary.ok ? "OK" : "FAILED"}: ${summary.output.slice(0, 400)}`,
+  );
+}
+
+/**
+ * Смена дня по Киеву: снимает дневной стоп и (если боты были остановлены
+ * лимитом) поднимает их автоматически. Вызывается каждую минуту из
+ * checkDailyLossLimit и при старте API.
+ */
+export async function checkDayRollover(): Promise<void> {
+  if (BOT_ENV !== "live") return;
+  const today = dayKey();
+  if (tripState.day === today) return;
+
+  const wasTripped = tripState.tripped;
+  const symbols = tripState.symbols;
+  tripState = { day: today, tripped: false, symbols: [] };
+  saveTripState(tripState);
+  dailyLossTripped = false;
+  if (!wasTripped) return;
+
+  const autoStart = String(process.env.DAILY_LOSS_AUTO_RESTART ?? "true").toLowerCase() !== "false";
+  console.log(
+    `[live] NEW DAY ${today}: daily loss limit reset` +
+    (autoStart ? `, restarting ${symbols.length} bots` : " (auto-restart disabled)"),
+  );
+  if (!autoStart) return;
+
+  for (const symbol of symbols) {
+    try {
+      const result = await startBotProcess(symbol);
+      console.log(
+        `[live] day rollover start ${symbol}: ${result.ok ? "OK" : "FAILED"}` +
+        (result.message ? ` — ${result.message}` : ""),
+      );
+    } catch (e) {
+      console.error(`[live] day rollover start ${symbol} failed:`, String(e));
+    }
   }
 }
 
 router.get("/daily-loss", async (_req, res) => {
   try {
-    const resolved = await resolveKillSwitchLimit();
-    const { realized, unrealized, total } = await todayTotalNet();
+    const snap = await dailyRiskSnapshot({
+      configuredUsd: Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0"),
+    });
     res.json({
       bot_env: BOT_ENV,
-      limit: Number(resolved.limit.toFixed(2)),
-      limit_pct: resolved.pct,
-      limit_source: resolved.source,
-      wallet_balance_usd: resolved.balance === null
-        ? null
-        : Number(resolved.balance.toFixed(2)),
-      net: total,
-      realized,
-      unrealized,
-      baseline: lossState.baseline,
-      delta: total - lossState.baseline,
-      tripped: dailyLossTripped,
+      day: snap.day,
+      limit: snap.limit_usd,
+      limit_pct: snap.pct,
+      limit_source: snap.mode,
+      wallet_balance_usd: snap.baseline,
+      net: snap.total,
+      realized: snap.realized,
+      unrealized: snap.unrealized,
+      baseline: snap.baseline,
+      baseline_source: snap.baseline_source,
+      remaining_usd: snap.remaining_usd,
+      delta: snap.total,
+      degraded: snap.degraded,
+      tripped: dailyLossTripped || snap.tripped,
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
 
-/** Сброс дневного лимита: свежий бюджет в `limit` USD от текущего net. */
+/**
+ * Ручной сброс дневного лимита: новая база = текущий equity (wallet + unrealized),
+ * т.е. полный бюджет заново. Флаг снимается, состояние на диске очищается.
+ */
 router.post("/daily-loss/reset", async (_req, res) => {
   try {
-    const { total } = await todayTotalNet();
-    lossState = { date: utcDate(), baseline: total };
-    saveBaseline(lossState);
+    const snap = await dailyRiskSnapshot({
+      configuredUsd: Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0"),
+    });
+    const wallet = await getWalletBalanceUsd({ fresh: true });
+    const baseline = await resetBaselineTo(wallet + snap.unrealized, "manual");
     dailyLossTripped = false;
-    const resolved = await resolveKillSwitchLimit();
+    tripState = { day: dayKey(), tripped: false, symbols: [] };
+    saveTripState(tripState);
     res.json({
       success: true,
-      baseline: total,
-      net: total,
+      day: baseline.day,
+      baseline: baseline.balance,
+      net: snap.total,
       delta: 0,
-      limit: Number(resolved.limit.toFixed(2)),
-      limit_pct: resolved.pct,
-      limit_source: resolved.source,
+      limit: snap.limit_usd,
+      limit_pct: snap.pct,
+      limit_source: snap.mode,
       tripped: false,
     });
   } catch (e) {
@@ -291,8 +294,7 @@ async function closePositionSymbol(symbol: string): Promise<{ ok: boolean; outpu
 }
 
 export async function checkMaxDrawdown(): Promise<void> {
-  const threshold = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "10");
-  if (BOT_ENV !== "live" || !Number.isFinite(threshold) || threshold <= 0) return;
+  if (BOT_ENV !== "live") return;
   try {
     await syncBinanceTime();
     const acct = await liveAccount();
@@ -302,6 +304,9 @@ export async function checkMaxDrawdown(): Promise<void> {
     const now = Date.now();
     for (const p of positions) {
       if (p.upnl >= 0) continue;                 // только убыточные
+      // Порог — per-bot `position_loss_pct` (% депозита), fallback env/5%.
+      const threshold = await resolvePositionLossPct(p.symbol);
+      if (!Number.isFinite(threshold) || threshold <= 0) continue;
       if (p.lossPct < threshold) continue;       // < порога — не трогаем
       const last = lastCloseBySymbol.get(p.symbol) || 0;
       if (now - last < 60_000) continue;          // не чаще раза в минуту на символ
@@ -319,7 +324,7 @@ export async function checkMaxDrawdown(): Promise<void> {
 }
 
 router.get("/drawdown", async (_req, res) => {
-  const threshold = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "10");
+  const defaultThreshold = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "5");
   try {
     await syncBinanceTime();
     const acct = await liveAccount();
@@ -328,12 +333,23 @@ router.get("/drawdown", async (_req, res) => {
       (a, b) => (b.lossPct > (a ? a.lossPct : -Infinity) ? b : a),
       null as LivePosition | null,
     );
+    // Пороги per-bot: показываем их в ответе, чтобы UI/диагностика видели, по
+    // какому проценту реально закроется позиция.
+    const detailed = await Promise.all(positions.map(async (p) => ({
+      symbol: p.symbol,
+      upnl: p.upnl,
+      loss_pct: p.lossPct,
+      threshold_pct: await resolvePositionLossPct(p.symbol),
+    })));
     res.json({
       bot_env: BOT_ENV, wallet: acct.wallet, upnl: acct.upnl, equity: acct.equity,
-      reference: acct.wallet, threshold_pct: threshold, enabled: threshold > 0,
+      reference: acct.wallet,
+      threshold_pct: worst ? await resolvePositionLossPct(worst.symbol) : defaultThreshold,
+      default_threshold_pct: defaultThreshold,
+      enabled: true,
       drawdown_pct: worst ? worst.lossPct : 0,
       worst_symbol: worst ? worst.symbol : null,
-      positions: positions.map((p) => ({ symbol: p.symbol, upnl: p.upnl, loss_pct: p.lossPct })),
+      positions: detailed,
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });

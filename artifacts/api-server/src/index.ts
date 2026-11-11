@@ -35,7 +35,7 @@ import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates, rest
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
 import { configPath, assertEnvMatchesExchange } from "./botPaths";
-import { checkDailyLossLimit, checkMaxDrawdown } from "./routes/live";
+import { checkDailyLossLimit, checkDayRollover, checkMaxDrawdown } from "./routes/live";
 import { syncBinanceTime } from "./grid-orders-lib";
 
 const execAsync = promisify(exec);
@@ -143,6 +143,8 @@ resetStaleRunningBots()
       logger.info({ port }, "Server listening");
       stopGridEngine = startGridEngine();
       // Дневной лимит убытка (только live) — проверяем раз в минуту.
+      // Тот же тик снимает дневной стоп на смене дня по Киеву и поднимает ботов.
+      void checkDayRollover();
       setInterval(() => { void checkDailyLossLimit(); }, 60_000);
       // Лимит просадки (только live): при достижении порога закрываем самую
       // убыточную позицию. Проверяем часто (каждые 20с).

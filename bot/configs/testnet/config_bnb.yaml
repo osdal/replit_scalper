@@ -70,7 +70,7 @@ htf_ema_fast: 11
 htf_ema_slow: 24
 htf_enabled: false
 htf_timeframe: 1h
-leverage: 20
+leverage: 75
 llm_api_key: ''
 llm_backoff_sec: 60.0
 llm_calls_per_min: 20
@@ -95,7 +95,7 @@ mode: live
 paper_balance: 10.0
 position_size_pct: 2.0
 position_size_usd: 0
-reverse_chain_max: 3
+reverse_chain_max: 10
 risk_pct: 1.0
 rsi_high: 70
 rsi_low: 30

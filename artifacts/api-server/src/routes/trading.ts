@@ -10,7 +10,7 @@
  */
 import { Router } from "express";
 import { db, tradesTable, tradingControlTable, recoveryChainsTable, botsTable } from "@workspace/db";
-import { eq, sql, gte } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -18,7 +18,7 @@ import yaml from "js-yaml";
 import { stopAllBots } from "./bots";
 import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
-import { getWalletBalanceUsd } from "../lib/account-balance";
+import { dailyRiskSnapshot } from "../lib/dailyRisk";
 
 const router = Router();
 
@@ -74,27 +74,11 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_igno
 }
 
 /**
- * Дневной лимит убытка в USD, привязанный к проценту от баланса.
- *
- * Если задан DAILY_LOSS_LIMIT_PCT (> 0), лимит = pct% × текущий totalWalletBalance
- * (кэш 60с, fallback DEPOSIT_USD). Иначе — историческое поведение: значение из
- * env DAILY_LOSS_LIMIT_USD / yaml. Процент включается только там, где он задан,
- * поэтому testnet (DAILY_LOSS_LIMIT_USD=10) не меняется.
+ * Дневной лимит убытка теперь живёт в `lib/dailyRisk.ts` (единая формула для
+ * гейта входов и kill-switch): база = баланс на начало дня по Киеву,
+ * net = realized + unrealized, порог = база × total_loss_pct (live) либо
+ * фиксированный DAILY_LOSS_LIMIT_USD (testnet).
  */
-async function resolveDailyLossLimitUsd(configuredLimit: number): Promise<{
-  limit: number;
-  pct: number;
-  balance: number | null;
-  source: "pct" | "usd";
-}> {
-  const pct = Number(process.env.DAILY_LOSS_LIMIT_PCT || "0");
-  if (Number.isFinite(pct) && pct > 0) {
-    const balance = await getWalletBalanceUsd();
-    const limit = (balance * pct) / 100;
-    if (limit > 0) return { limit, pct, balance, source: "pct" };
-  }
-  return { limit: configuredLimit, pct: 0, balance: null, source: "usd" };
-}
 
 function readConfig(): { max_positions: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
   const def = { max_positions: 2, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
@@ -191,10 +175,10 @@ async function exchangeOpenSymbols(): Promise<string[] | null> {
   }
 }
 
-/** Символы с открытой принятой позицией в БД. ignoreAfterHours=0 — считать все. */
-async function dbOpenSymbols(ignoreAfterHours: number): Promise<string[]> {
-  const cutoff = ignoreAfterHours > 0
-    ? new Date(Date.now() - ignoreAfterHours * 60 * 60 * 1000).toISOString()
+/** Символы с открытой принятой позицией в БД. ignoreMinutes=0 — считать все. */
+async function dbOpenSymbols(ignoreMinutes: number): Promise<string[]> {
+  const cutoff = ignoreMinutes > 0
+    ? new Date(Date.now() - ignoreMinutes * 60 * 1000).toISOString()
     : null;
   const rows = cutoff
     ? await db.selectDistinct({ symbol: tradesTable.symbol })
@@ -206,8 +190,8 @@ async function dbOpenSymbols(ignoreAfterHours: number): Promise<string[]> {
   return rows.map((r) => String(r.symbol || "").toUpperCase()).filter(Boolean);
 }
 
-async function loadOccupiedSymbols(ignoreAfterHours: number): Promise<string[]> {
-  const fromDb = await dbOpenSymbols(ignoreAfterHours);
+async function loadOccupiedSymbols(ignoreMinutes: number): Promise<string[]> {
+  const fromDb = await dbOpenSymbols(ignoreMinutes);
   if (!EXCHANGE_CHECK) return fromDb;
   const fromExchange = await exchangeOpenSymbols();
   return fromExchange ? [...new Set([...fromDb, ...fromExchange])] : fromDb;
@@ -235,21 +219,6 @@ async function exchangeHasPosition(symbol: string): Promise<boolean> {
   }
 }
 
-/**
- * Чистый реализованный результат закрытых сделок за текущий UTC-день.
- * `pnl` в БД уже net of fees (комиссия вычитается при закрытии), поэтому
- * SUM(pnl) — это фактический дневной результат. Отрицательное значение =
- * убыток дня, положительное = прибыль.
- */
-async function getDailyNet(): Promise<number> {
-  const startToday = new Date();
-  startToday.setUTCHours(0, 0, 0, 0);
-  const [res] = await db.select({ net: sql<number>`COALESCE(SUM(pnl),0)` })
-    .from(tradesTable)
-    .where(sql`is_open = 0 AND exit_time >= ${startToday.toISOString()}`);
-  return Number(res?.net || 0);
-}
-
 /** Сумма всех неразрешённых долгов recovery (free + locked). */
 async function getFreeDebt(): Promise<number> {
   const [res] = await db.select({ debt: sql<number>`COALESCE(SUM(debt_amount),0)` })
@@ -272,11 +241,15 @@ router.post("/check", async (req, res) => {
     const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
 
     // Per-bot лимиты из БД (fallback — глобальный yaml/env). Так дашборд может
-    // задать max_positions / max_positions_with_expired / expired_after_minutes
+    // задать max_positions / max_positions_with_expired / slot_release_minutes
     // индивидуально, без перезапуска контейнера.
     let botMaxPositions = globalCfg.max_positions;
     let botMaxWithExpired = 0;
-    let botIgnoreAfterHours = globalCfg.max_positions_ignore_after_hours;
+    // Слот освобождается через `slot_release_minutes` (360 = 6 ч), а НЕ через
+    // `expired_after_minutes` (120): протухание = «закрыть в минимальный плюс»,
+    // освобождение слота = «позиция перестаёт занимать лимит, но живёт дальше».
+    let botSlotReleaseMinutes = globalCfg.max_positions_ignore_after_hours * 60;
+    let botTotalLossPct: number | undefined;
     if (symbol) {
       const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
       if (bot) {
@@ -284,9 +257,11 @@ router.post("/check", async (req, res) => {
         if (bot.max_positions_with_expired != null && bot.max_positions_with_expired > 0) {
           botMaxWithExpired = bot.max_positions_with_expired;
         }
-        if (bot.expired_after_minutes != null && bot.expired_after_minutes >= 0) {
-          // Convert minutes to hours for server logic
-          botIgnoreAfterHours = Math.max(0, Math.round(bot.expired_after_minutes / 60));
+        if (bot.slot_release_minutes != null && bot.slot_release_minutes >= 0) {
+          botSlotReleaseMinutes = bot.slot_release_minutes;
+        }
+        if (bot.total_loss_pct != null && bot.total_loss_pct > 0) {
+          botTotalLossPct = bot.total_loss_pct;
         }
       }
     }
@@ -295,11 +270,17 @@ router.post("/check", async (req, res) => {
     // ордером). Без флага запрос «информационный» и ничего не занимает.
     const wantReserve = req.body?.reserve === true && symbol !== "";
     const { occupied: positions } = await slots.inspect(
-      () => loadOccupiedSymbols(botIgnoreAfterHours),
+      () => loadOccupiedSymbols(botSlotReleaseMinutes),
     );
-    // Дневной лимит считаем по НЕТТО: прибыль компенсирует убыток. Блокируем
-    // входы только если день реально закрыт в минус на величину лимита.
-    const daily_net = await getDailyNet();
+    // Дневной лимит: NET (прибыль минус убыток) в реальном времени —
+    // реализованные сделки дня + плавающий результат открытых позиций.
+    // База — баланс на начало дня по Киеву, порог — bot.total_loss_pct (live)
+    // либо DAILY_LOSS_LIMIT_USD (testnet). Единая формула с kill-switch.
+    const daily = await dailyRiskSnapshot({
+      pct: botTotalLossPct,
+      configuredUsd: globalCfg.daily_loss_limit_usd,
+    });
+    const daily_net = daily.total;
     const daily_loss = Math.max(0, -daily_net);
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
@@ -310,8 +291,7 @@ router.post("/check", async (req, res) => {
     }
 
     // Дневной лимит убытков — жёсткая остановка на день (по нетто-результату).
-    const daily_limit = await resolveDailyLossLimitUsd(globalCfg.daily_loss_limit_usd);
-    if (daily_limit.limit > 0 && daily_net <= -daily_limit.limit) {
+    if (daily.tripped) {
       return res.json({
         allowed: false,
         reason: "daily_loss_limit",
@@ -320,8 +300,10 @@ router.post("/check", async (req, res) => {
         paused_remaining: control.paused_remaining,
         daily_loss: Number(daily_loss.toFixed(2)),
         daily_net: Number(daily_net.toFixed(2)),
-        daily_loss_limit_usd: Number(daily_limit.limit.toFixed(2)),
-        daily_loss_limit_pct: daily_limit.pct,
+        daily_loss_limit_usd: daily.limit_usd,
+        daily_loss_limit_pct: daily.pct,
+        daily_day: daily.day,
+        daily_baseline_usd: daily.baseline,
       });
     }
 
@@ -350,14 +332,14 @@ router.post("/check", async (req, res) => {
     let slot = await slots.check(
       symbol,
       botMaxPositions,
-      () => loadOccupiedSymbols(botIgnoreAfterHours),
+      () => loadOccupiedSymbols(botSlotReleaseMinutes),
       wantReserve,
       {
         max: botMaxWithExpired,
         load: () => dbOpenSymbols(0),
       },
     );
-    // «Протухшая» позиция (старше max_positions_ignore_after_hours) исключена из
+    // «Протухшая» позиция (старше slot_release_minutes) исключена из
     // occupied и потому не опознаётся как own по БД. Из-за этого следующая
     // reverse-нога такого символа упиралась в max_positions, если слот занял
     // свежий символ, хотя на бирже позиция ЕСТЬ — это добор, а не новый вход.
@@ -571,10 +553,10 @@ router.get("/status", async (_req, res) => {
       control.loss_streak = 0;
       control.paused_remaining = 0;
     }
-    const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours));
-    const daily_net = await getDailyNet();
+    const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours * 60));
+    const daily = await dailyRiskSnapshot({ configuredUsd: cfg.daily_loss_limit_usd });
+    const daily_net = daily.total;
     const daily_loss = Math.max(0, -daily_net);
-    const daily_limit = await resolveDailyLossLimitUsd(cfg.daily_loss_limit_usd);
     const free_debt = await getFreeDebt();
     res.json({
       positions_open: st.open,
@@ -588,12 +570,15 @@ router.get("/status", async (_req, res) => {
       loss_pause_signals: cfg.loss_pause_signals,
       max_free_debt_usd: cfg.max_free_debt_usd,
       free_debt: Number(free_debt.toFixed(2)),
-      daily_loss_limit_usd: Number(daily_limit.limit.toFixed(2)),
-      daily_loss_limit_pct: daily_limit.pct,
-      daily_loss_limit_source: daily_limit.source,
-      wallet_balance_usd: daily_limit.balance === null
-        ? null
-        : Number(daily_limit.balance.toFixed(2)),
+      daily_loss_limit_usd: daily.limit_usd,
+      daily_loss_limit_pct: daily.pct,
+      daily_loss_limit_source: daily.mode,
+      daily_day: daily.day,
+      daily_baseline_usd: daily.baseline,
+      daily_realized: daily.realized,
+      daily_unrealized: daily.unrealized,
+      daily_remaining_usd: daily.remaining_usd,
+      wallet_balance_usd: daily.baseline,
       daily_loss: Number(daily_loss.toFixed(2)),
       daily_net: Number(daily_net.toFixed(2)),
       pause_timeout_minutes: cfg.pause_timeout_minutes,

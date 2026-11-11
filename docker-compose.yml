@@ -91,22 +91,20 @@ services:
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
       - REVERSE_CUM_LOSS_PCT=5
       - REVERSE_CUM_REF_DEPOSIT_USD=0
-      # «Протухание» позиций: открытая дольше 2 ч позиция не занимает слот
-      # max_positions. В общем recovery_config.yaml стоит 0 (выкл) ради live;
-      # здесь включаем только на testnet, чтобы зависшая reverse-цепочка не
-      # блокировала новые входы навсегда. Тот же порог бот использует, чтобы
-      # закрыть протухшую цепочку рынком, как только её net по всем ногам
-      # покроет комиссию выхода + EXPIRED_CLOSE_MIN_PROFIT_USD (не ждать TP).
-      - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
+      # Освобождение слота max_positions: позиция старше 6 ч (360 мин) больше не
+      # занимает слот, но продолжает жить и закрывается по TP / минимальному плюсу
+      # (120 мин, `expired_after_minutes`) / 5% cap. Значение по умолчанию для
+      # ботов, у которых в БД не задан `slot_release_minutes`.
+      - MAX_POSITIONS_IGNORE_AFTER_HOURS=6
       - EXPIRED_CLOSE_MIN_PROFIT_USD=0.02
       # Дневной лимит входа фиксированный ($10): testnet остаётся сопоставимым
-      # с накопленной статистикой. Процентный режим (DAILY_LOSS_LIMIT_PCT)
-      # включён только на live.
+      # с накопленной статистикой. Процентный режим (от баланса на начало дня
+      # по Киеву) включён только на live через DAILY_LOSS_MODE=pct.
+      - DAILY_LOSS_MODE=usd
       - DAILY_LOSS_LIMIT_USD=10
-      # Жёсткий дедлайн для протухших позиций: если цикл старше 6ч не вышел в
-      # минимальный плюс — закрываем принудительно, даже в минусе. Включаем на
-      # testnet для сбора статистики (live тоже 6ч).
-      - EXPIRED_HARD_CLOSE_HOURS=6
+      # Принудительного закрытия «протухших» позиций по дедлайну НЕТ (0):
+      # протухание = только закрытие при минимальном плюсе.
+      - EXPIRED_HARD_CLOSE_HOURS=0
       # Общий шлюз Binance rate-limit (bot/binance_gate.py). 40 ботов делят
       # один IP. ВАЖНО: на testnet заголовок X-MBX-USED-WEIGHT-1M для signed-
       # запросов отдаёт общий счётчик среды (3000-5000 при реальных ~50), поэтому
@@ -208,10 +206,14 @@ services:
       # содержит MAX_POSITIONS и переопределяет process env — менять в обоих.
       - MAX_POSITIONS=1
       - DASHBOARD_API_URL=http://localhost:5001/api
-      # Риск от ТЕКУЩЕГО баланса счёта (кэш 60с, fallback DEPOSIT_USD).
-      #   5%  — стоп НОВЫХ входов по нетто-PnL за UTC-день;
-      #   10% — kill-switch: стоп всех ботов + закрытие позиций (realized+unrealized).
-      - DAILY_LOSS_LIMIT_PCT=5
+      # Дневной риск (единая формула lib/dailyRisk.ts):
+      #   база = баланс кошелька на начало дня по Киеву (фиксируется в
+      #          data/daily_baseline.json, переживает рестарт);
+      #   net  = реализованный за день + плавающий по открытым (real-time);
+      #   стоп = net <= -(база × total_loss_pct из карточки бота, по умолчанию 10%).
+      # При стопе: закрыть позиции, остановить ботов, поднять их на смене дня.
+      - DAILY_LOSS_MODE=pct
+      - DAILY_LOSS_AUTO_RESTART=true
       - LIVE_DAILY_LOSS_LIMIT_PCT=10
       - DEPOSIT_USD=10
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
@@ -235,14 +237,15 @@ services:
       - POST_BAN_COOLDOWN_SEC=30
       - POST_BAN_JITTER_SEC=60
       - SLOTS_FULL_SOFT_PAUSE=0
-      # Игнорировать позиции старше N часов для max_positions.
-      - MAX_POSITIONS_IGNORE_AFTER_HOURS=2
+      # Позиция старше 6 ч (360 мин) перестаёт занимать слот max_positions,
+      # но НЕ закрывается принудительно (см. slot_release_minutes в карточке).
+      - MAX_POSITIONS_IGNORE_AFTER_HOURS=6
       # Глобальная пауза после 4 убытков подряд (yaml=35, т.е. выкл для testnet;
       # live получает строгий порог через ENV).
       - LOSS_STREAK_TRIGGER=4
-      # Жёсткий дедлайн для протухших позиций: если цикл старше 6ч не вышел в
-      # минимальный плюс — закрываем принудительно, даже в минусе. Только для live.
-      - EXPIRED_HARD_CLOSE_HOURS=6
+      # Принудительный дедлайн «протухших» позиций отключён (0): закрываем
+      # только при минимальном плюсе, слот освобождается по времени.
+      - EXPIRED_HARD_CLOSE_HOURS=0
 
   dashboard-live:
     <<: *dashboard-base

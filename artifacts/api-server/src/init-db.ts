@@ -66,6 +66,9 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
   expired_after_minutes INTEGER NOT NULL DEFAULT 120,
   max_positions INTEGER NOT NULL DEFAULT 1,
   max_positions_with_expired INTEGER NOT NULL DEFAULT 3,
+  slot_release_minutes INTEGER NOT NULL DEFAULT 360,
+  position_loss_pct REAL NOT NULL DEFAULT 5,
+  total_loss_pct REAL NOT NULL DEFAULT 10,
   armed INTEGER NOT NULL DEFAULT 1,
   stop_reason TEXT,
   stop_requested INTEGER NOT NULL DEFAULT 0,
@@ -78,6 +81,10 @@ await db.run(sql`ALTER TABLE bots ADD COLUMN llm_status TEXT`).catch(() => { /* 
 await db.run(sql`ALTER TABLE bots ADD COLUMN expired_after_minutes INTEGER NOT NULL DEFAULT 120`).catch(() => { /* уже есть */ });
 await db.run(sql`ALTER TABLE bots ADD COLUMN max_positions INTEGER NOT NULL DEFAULT 1`).catch(() => { /* уже есть */ });
 await db.run(sql`ALTER TABLE bots ADD COLUMN max_positions_with_expired INTEGER NOT NULL DEFAULT 3`).catch(() => { /* уже есть */ });
+// Миграция: освобождение слота (отдельно от протухания) + проценты убытка.
+await db.run(sql`ALTER TABLE bots ADD COLUMN slot_release_minutes INTEGER NOT NULL DEFAULT 360`).catch(() => { /* уже есть */ });
+await db.run(sql`ALTER TABLE bots ADD COLUMN position_loss_pct REAL NOT NULL DEFAULT 5`).catch(() => { /* уже есть */ });
+await db.run(sql`ALTER TABLE bots ADD COLUMN total_loss_pct REAL NOT NULL DEFAULT 10`).catch(() => { /* уже есть */ });
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
@@ -263,6 +270,14 @@ for (const file of configs) {
       expired_after_minutes: (raw.expired_after_minutes as number) ?? 120,
       max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
       max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
+      // Новые риск-поля перезаписываем только если ключ реально есть в yaml:
+      // иначе UI-значения из БД затирались бы дефолтами при каждом рестарте.
+      ...(raw.slot_release_minutes !== undefined
+        ? { slot_release_minutes: Number(raw.slot_release_minutes) } : {}),
+      ...(raw.position_loss_pct !== undefined
+        ? { position_loss_pct: Number(raw.position_loss_pct) } : {}),
+      ...(raw.total_loss_pct !== undefined
+        ? { total_loss_pct: Number(raw.total_loss_pct) } : {}),
       updated_at:       new Date().toISOString(),
     }).where(eq(botsTable.symbol, symbol));
     console.log(`  ${symbol} updated from ${file}`);
