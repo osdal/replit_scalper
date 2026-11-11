@@ -20,6 +20,7 @@ const { db } = await import("@workspace/db");
 const { botsTable } = await import("@workspace/db/schema");
 const { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } =
   await import("@workspace/db");
+const { sanitizeMaxPositions } = await import("./lib/slotReservations");
 
 // Use absolute paths from .env for reliability
 const projectRoot = path.resolve(__dirname, "../../../");
@@ -33,6 +34,13 @@ const BOT_CONFIG_DIR = process.env.BOT_CONFIG_DIR
       ? process.env.BOT_CONFIG_DIR
       : path.join(projectRoot, process.env.BOT_CONFIG_DIR))
   : path.join(BOT_DIR, "configs", BOT_ENV);
+
+// Слоты на бота: приоритет у ключа max_positions в yaml, иначе — MAX_POSITIONS
+// из docker-compose. Раньше фолбэком был жёсткий 1: init-db запускается
+// ПРИ КАЖДОМ старте контейнера и затирал bots.max_positions обратно в 1, хотя
+// MAX_POSITIONS=3. Бот получал 1 слот из /check и писал «[PAUSE] slots full
+// (2/1)», хотя /trading/status показывал 3.
+const ENV_MAX_POSITIONS = sanitizeMaxPositions(process.env.MAX_POSITIONS, 1);
 
 // Создаём таблицы
 await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
@@ -253,7 +261,7 @@ for (const file of configs) {
       max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
       max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
       expired_after_minutes: (raw.expired_after_minutes as number) ?? 120,
-      max_positions: (raw.max_positions as number) ?? 1,
+      max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
       max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
       updated_at:       new Date().toISOString(),
     }).where(eq(botsTable.symbol, symbol));
@@ -287,7 +295,7 @@ for (const file of configs) {
     max_position_notional_usd: (raw.max_position_notional_usd as number) || 0,
     max_position_pct_equity: (raw.max_position_pct_equity as number) || 0,
     expired_after_minutes: (raw.expired_after_minutes as number) ?? 120,
-    max_positions: (raw.max_positions as number) ?? 1,
+    max_positions: (raw.max_positions as number) ?? ENV_MAX_POSITIONS,
     max_positions_with_expired: (raw.max_positions_with_expired as number) ?? 3,
     armed: BOT_ENV !== "live",
     relay_only: BOT_ENV === "live",
