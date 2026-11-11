@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus } from "./hooks/useApi";
+import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
 
 type AnyBot = {
   symbol: string;
@@ -27,6 +27,9 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [dd, setDd] = useState<{ drawdown_pct: number; threshold_pct: number; equity: number; reference: number; enabled: boolean } | null>(null);
   const [relay, setRelay] = useState<{ pending: number; consumed: number; skipped: number; last: any | null } | null>(null);
   const [tradingStatus, setTradingStatus] = useState<{ max_positions: number; max_positions_with_expired: number } | null>(null);
+  const [globalMaxPos, setGlobalMaxPos] = useState("");
+  const [globalMaxPosWithExpired, setGlobalMaxPosWithExpired] = useState("");
+  const [applyingGlobalLimits, setApplyingGlobalLimits] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadLoss = async () => {
@@ -39,7 +42,13 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
     try { setRelay(await fetchRelayStats()); } catch { /* ignore */ }
   };
   const loadTradingStatus = async () => {
-    try { setTradingStatus(await fetchTradingStatus()); } catch { /* ignore */ }
+    try { 
+      const status = await fetchTradingStatus();
+      setTradingStatus(status);
+      // Prefill inputs with current values
+      setGlobalMaxPos(String(status.max_positions ?? 3));
+      setGlobalMaxPosWithExpired(String(status.max_positions_with_expired ?? 10));
+    } catch { /* ignore */ }
   };
   useEffect(() => {
     loadLoss();
@@ -54,6 +63,27 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key); setError(null);
     try { await fn(); onChanged(); } catch (e) { setError(String(e)); } finally { setBusy(null); }
+  };
+
+  const applyGlobalLimits = async () => {
+    const maxPos = Number(globalMaxPos);
+    const maxPosWithExpired = Number(globalMaxPosWithExpired);
+    if (!Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
+      setError("Max поз.: 0–50"); return;
+    }
+    if (!Number.isFinite(maxPosWithExpired) || maxPosWithExpired < 0 || maxPosWithExpired > 50) {
+      setError("Max поз. + протух.: 0–50"); return;
+    }
+    setApplyingGlobalLimits(true); setError(null);
+    try {
+      await updateGlobalLimits(maxPos, maxPosWithExpired);
+      setError(null);
+      await loadTradingStatus();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApplyingGlobalLimits(false);
+    }
   };
 
   const sorted = [...bots].sort((a, b) => a.symbol.localeCompare(b.symbol));
@@ -94,14 +124,48 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
       <div className="rounded-md border border-zinc-800 bg-zinc-900 p-3 text-xs">
         <div className="font-semibold text-zinc-300">Глобальные лимиты позиций (все боты)</div>
         <div className="flex flex-wrap gap-4 mt-2 text-zinc-400">
-          <div>
+          <div className="flex items-center gap-1.5">
             <span className="text-zinc-500">Max поз.: </span>
             <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions ?? "—"}</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="50"
+              value={globalMaxPos}
+              onChange={e => setGlobalMaxPos(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              title="Новое значение"
+            />
           </div>
-          <div>
+          <div className="flex items-center gap-1.5">
             <span className="text-zinc-500">Max поз. + протух.: </span>
             <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions_with_expired ?? "—"}</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="50"
+              value={globalMaxPosWithExpired}
+              onChange={e => setGlobalMaxPosWithExpired(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              title="Новое значение"
+            />
           </div>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={applyGlobalLimits}
+            disabled={applyingGlobalLimits || busy !== null}
+            className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+          >
+            {applyingGlobalLimits ? "Working..." : "Apply"}
+          </Button>
+          {error && <span className="text-xs text-red-400">{error}</span>}
         </div>
       </div>
 

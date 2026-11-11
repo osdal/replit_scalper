@@ -173,3 +173,12 @@ export async function fetchTradingStatus(): Promise<{
 }> {
   return apiFetch(`${API}/trading/status`);
 }
+
+// Обновление глобальных лимитов позиций
+export async function updateGlobalLimits(max_positions: number, max_positions_with_expired: number): Promise<{ success: boolean; max_positions: number; max_positions_with_expired: number }> {
+  return apiFetch(`${API}/trading/global-limits`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_positions, max_positions_with_expired }),
+  });
+}
