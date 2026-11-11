@@ -100,15 +100,20 @@ function sanitizeLossStreakTrigger(value: unknown, fallback: number): number {
  * только на одном стеке: yaml общий для api-testnet и api-live, а менять
  * поведение live нельзя.
  */
-function applyEnvOverrides<T extends { max_positions: number; max_positions_with_expired: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T): T {
+function applyEnvOverrides<T extends { max_positions: number; max_positions_with_expired: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T, defaults: T): T {
   const env_max = process.env.MAX_POSITIONS;
   if (env_max !== undefined && env_max !== null && env_max !== "") {
-    cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
+    // Only override if value hasn't been set from file (i.e., still equals default)
+    if (cfg.max_positions === defaults.max_positions) {
+      cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
+    }
   }
   const env_max_with_expired = process.env.MAX_POSITIONS_WITH_EXPIRED;
   if (env_max_with_expired !== undefined && env_max_with_expired !== null && env_max_with_expired !== "") {
     const n = Number(env_max_with_expired);
-    if (Number.isFinite(n) && n >= 0) cfg.max_positions_with_expired = n;
+    if (Number.isFinite(n) && n >= 0 && cfg.max_positions_with_expired === defaults.max_positions_with_expired) {
+      cfg.max_positions_with_expired = n;
+    }
   }
   const env_ignore = process.env.MAX_POSITIONS_IGNORE_AFTER_HOURS;
   if (env_ignore !== undefined && env_ignore !== null && env_ignore !== "") {
@@ -157,14 +162,14 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
         ? sanitizeIgnoreAfterHours(raw.max_positions_ignore_after_hours, def.max_positions_ignore_after_hours)
         : def.max_positions_ignore_after_hours,
     };
-    return applyEnvOverrides(cfg);
+    return applyEnvOverrides(cfg, def);
   } catch {
     const fileLimits = readGlobalLimits();
     return applyEnvOverrides({
       ...def,
       max_positions: fileLimits.max_positions,
       max_positions_with_expired: fileLimits.max_positions_with_expired,
-    });
+    }, def);
   }
 }
 
