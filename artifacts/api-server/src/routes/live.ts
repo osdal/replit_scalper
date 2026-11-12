@@ -336,7 +336,8 @@ async function checkMaxDrawdownLegacy(): Promise<void> {
 }
 
 router.get("/drawdown", async (_req, res) => {
-  const defaultThreshold = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "5");
+  // Порог — глобальный max_position_loss_pct (файл лимитов), он же в дашборде.
+  const globalThreshold = await resolvePositionLossPct();
   try {
     await syncBinanceTime();
     const acct = await liveAccount();
@@ -345,8 +346,8 @@ router.get("/drawdown", async (_req, res) => {
       (a, b) => (b.lossPct > (a ? a.lossPct : -Infinity) ? b : a),
       null as LivePosition | null,
     );
-    // Пороги per-bot: показываем их в ответе, чтобы UI/диагностика видели, по
-    // какому проценту реально закроется позиция.
+    // Пороги — глобальные (max_position_loss_pct из дашборда), показываем их
+    // в ответе, чтобы UI/диагностика видели, по какому проценту закрывается позиция.
     const detailed = await Promise.all(positions.map(async (p) => ({
       symbol: p.symbol,
       upnl: p.upnl,
@@ -356,8 +357,8 @@ router.get("/drawdown", async (_req, res) => {
     res.json({
       bot_env: BOT_ENV, wallet: acct.wallet, upnl: acct.upnl, equity: acct.equity,
       reference: acct.wallet,
-      threshold_pct: worst ? await resolvePositionLossPct(worst.symbol) : defaultThreshold,
-      default_threshold_pct: defaultThreshold,
+      threshold_pct: worst ? await resolvePositionLossPct(worst.symbol) : globalThreshold,
+      default_threshold_pct: globalThreshold,
       enabled: true,
       drawdown_pct: worst ? worst.lossPct : 0,
       worst_symbol: worst ? worst.symbol : null,
