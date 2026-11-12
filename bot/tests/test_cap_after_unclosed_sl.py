@@ -78,21 +78,23 @@ def test_ignores_non_sl_hits(cap_enabled, monkeypatch, hit):
     assert stub.calls == []
 
 
-def test_ignores_non_reverse_and_closed_position(cap_enabled, monkeypatch):
+def test_checks_non_reverse_and_skips_closed_position(cap_enabled, monkeypatch):
+    """Лимит общий: не-reverse (первая нога) тоже проверяется."""
     stub = CapStub(result=True)
     monkeypatch.setattr(main, "_check_reverse_cum_loss", stub)
     tracker = FakeTracker(_pos(is_reverse=False))
-    assert run(main._cap_after_unclosed_sl("SL", "UNIUSDT", object(), tracker, LOG)) is False
+    assert run(main._cap_after_unclosed_sl("SL", "UNIUSDT", object(), tracker, LOG)) is True
     assert run(main._cap_after_unclosed_sl("SL", "UNIUSDT", object(), FakeTracker(None), LOG)) is False
-    assert stub.calls == []
+    assert stub.calls == ["UNIUSDT"]
 
 
-def test_disabled_cap_is_noop(monkeypatch):
+def test_enabled_flag_is_enforced_inside_check(monkeypatch):
+    """Флаг enabled проверяет _check_reverse_cum_loss, а не обёртка."""
     monkeypatch.setattr(main, "_CUM_CAP", SimpleNamespace(enabled=False, interval_sec=1.0))
-    stub = CapStub(result=True)
+    stub = CapStub(result=False)
     monkeypatch.setattr(main, "_check_reverse_cum_loss", stub)
     assert run(main._cap_after_unclosed_sl("SL", "UNIUSDT", object(), FakeTracker(_pos()), LOG)) is False
-    assert stub.calls == []
+    assert stub.calls == ["UNIUSDT"]
 
 
 def test_cap_error_does_not_break_tick(cap_enabled, monkeypatch):

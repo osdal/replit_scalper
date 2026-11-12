@@ -260,12 +260,17 @@ def test_realized_cached_per_step_and_refreshed(log):
     assert tr.calls == 4                                   # TTL истёк
 
 
-def test_non_reverse_or_closed_position_resets_and_skips(log):
+def test_non_reverse_position_is_checked_and_closed_position_skipped(log):
     cap, _ = make_cap()
     om = FakeOrderMgr(wallet=38.6, upnl=-9.0)
-    assert run(cap.should_close("X", om, FakeTracker(is_reverse=False), log)) is None
+    # Одиночная (не-reverse) позиция тоже под лимитом: закрытых ног нет,
+    # поэтому считается только плавающий убыток.
+    snap = run(cap.should_close("X", om, FakeTracker(is_reverse=False), log))
+    assert snap is not None and snap.hit
+    assert om.upnl_calls == 1
+    # Нет открытой позиции — проверок нет.
     assert run(cap.should_close("X", om, FakeTracker(open_=False), log)) is None
-    assert om.upnl_calls == 0
+    assert om.upnl_calls == 1
 
 
 def test_disabled_when_pct_zero(log):

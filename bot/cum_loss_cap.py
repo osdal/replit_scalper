@@ -157,13 +157,21 @@ class CumLossCap:
         pos = tracker.position
         step = int(getattr(pos, "reverse_chain_step", 0) or 0) if pos is not None else 0
         now = self._clock()
+        is_reverse = bool(getattr(pos, "is_reverse", False)) if pos is not None else False
 
         # Помечаем, что реверс-цепочка активна, если есть реверс-позиция
-        if pos is not None and getattr(pos, "is_reverse", False):
+        if is_reverse:
             self._in_reverse_chain[symbol] = True
 
         # --- реализованный net цикла ---------------------------------------
         stale_used = False
+        synthetic_single = False
+        if not is_reverse and net_realized is None:
+            # Одиночная позиция (первая нога цикла): закрытых ног ещё нет,
+            # суммировать нечего — считаем только плавающий результат. Так
+            # лимит работает и для обычного (не reverse) входа.
+            net_realized = 0.0
+            synthetic_single = True
         if net_realized is None:
             cached = self._realized.get(symbol)
             if (not fresh and cached is not None and cached[0] == step
@@ -197,8 +205,10 @@ class CumLossCap:
                         return None
         net_realized = float(net_realized)
         # «Протухшее» значение не продлеваем: иначе оно навсегда останется
-        # «свежим» и cap застрянет на устаревшем net.
-        if not stale_used:
+        # «свежим» и cap застрянет на устаревшем net. Для одиночной позиции
+        # (0.0 синтетический) кэш не пишем: когда откроется reverse-нога,
+        # step ещё может быть 0, и закэшированный 0.0 занизил бы убыток цикла.
+        if not stale_used and not synthetic_single:
             self._realized[symbol] = (step, now, net_realized)
 
         # --- плавающий результат -------------------------------------------
@@ -259,9 +269,8 @@ class CumLossCap:
         if not self.enabled:
             return None
         pos = tracker.position
-        if (not tracker.has_open_position() or pos is None
-                or not getattr(pos, "is_reverse", False)):
-            # Нет открытой реверс-позиции - цепочка могла закончиться
+        if not tracker.has_open_position() or pos is None:
+            # Нет открытой позиции (первая нога или реверс) - цепочка могла закончиться
             if self._in_reverse_chain.get(symbol, False):
                 # Цепочка была активна, но теперь позиции нет - цепочка закончилась
                 self._in_reverse_chain.pop(symbol, None)

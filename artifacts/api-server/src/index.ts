@@ -35,7 +35,7 @@ import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates, rest
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
 import { configPath, assertEnvMatchesExchange } from "./botPaths";
-import { checkDailyLossLimit, checkDayRollover, checkMaxDrawdown } from "./routes/live";
+import { checkDailyLossLimit, checkDayRollover } from "./routes/live";
 import { syncBinanceTime } from "./grid-orders-lib";
 
 const execAsync = promisify(exec);
@@ -146,11 +146,10 @@ resetStaleRunningBots()
       // Тот же тик снимает дневной стоп на смене дня по Киеву и поднимает ботов.
       void checkDayRollover();
       setInterval(() => { void checkDailyLossLimit(); }, 60_000);
-      // Лимит просадки (только live): при достижении порога закрываем самую
-      // убыточную позицию. Проверяем часто (каждые 20с).
-      setInterval(() => { void checkMaxDrawdown(); }, 20_000);
-      // Синк часов с Binance (иначе подписанные запросы падают с -1021 и
-      // проверка просадки не может получить equity). Обновляем раз в 5 мин.
+      // Лимит просадки позиции убран из API: единственный ограничитель —
+      // глобальный max_position_loss_pct, который применяет сам бот
+      // (bot/cum_loss_cap.py). Интервал не нужен, чтобы не плодить второй порог.
+      // Синк часов с Binance (иначе подписанные запросы падают с -1021).
       void syncBinanceTime();
       setInterval(() => { void syncBinanceTime(); }, 300_000);
       // Сверяем is_running с реальными процессами ботов, чтобы дашборд всегда

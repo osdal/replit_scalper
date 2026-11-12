@@ -35,6 +35,22 @@ const GLOBAL_LIMITS_FILE = path.resolve(BOT_DIR, "..", "data", `global_limits_${
 interface GlobalLimits {
   max_positions: number;
   max_positions_with_expired: number;
+  /** Максимальный убыток ОДНОЙ позиции (цикла) в % от депозита. 0 = выкл. */
+  max_position_loss_pct: number;
+}
+
+/** Дефолт лимита убытка позиции: env стека, иначе 5 (как REVERSE_CUM_LOSS_PCT). */
+function defaultPositionLossPct(): number {
+  const raw = process.env.MAX_POSITION_LOSS_PCT ?? process.env.REVERSE_CUM_LOSS_PCT;
+  const n = Number(raw);
+  if (raw !== undefined && raw !== null && raw !== "" && Number.isFinite(n) && n >= 0) return n;
+  return 5;
+}
+
+function sanitizePct(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+  return n;
 }
 
 /**
@@ -47,9 +63,13 @@ function readGlobalLimitsFromFile(): GlobalLimits | null {
   try {
     const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
     if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
+      // Старые файлы без max_position_loss_pct — берём env/дефолт, чтобы не
+      // менять риск-профиль молча.
+      const pct = sanitizePct(raw.max_position_loss_pct);
       return {
         max_positions: Math.max(0, Math.floor(Number(raw.max_positions))),
         max_positions_with_expired: Math.max(0, Math.floor(Number(raw.max_positions_with_expired))),
+        max_position_loss_pct: pct ?? defaultPositionLossPct(),
       };
     }
   } catch {
@@ -74,6 +94,7 @@ function readGlobalLimits(): GlobalLimits {
     max_positions_with_expired: (envMaxWithExpired !== undefined && envMaxWithExpired !== null && envMaxWithExpired !== "")
       ? Math.max(0, Math.floor(Number(envMaxWithExpired) || def.max_positions_with_expired))
       : def.max_positions_with_expired,
+    max_position_loss_pct: defaultPositionLossPct(),
   };
 }
 
@@ -155,8 +176,8 @@ function applyEnvOverrides<T extends { max_positions: number; max_positions_with
  * фиксированный DAILY_LOSS_LIMIT_USD (testnet).
  */
 
-function readConfig(): { max_positions: number; max_positions_with_expired: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
-  const def = { max_positions: 2, max_positions_with_expired: 3, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
+function readConfig(): { max_positions: number; max_positions_with_expired: number; max_position_loss_pct: number; loss_streak_trigger: number; loss_pause_signals: number; max_free_debt_usd: number; daily_loss_limit_usd: number; pause_timeout_minutes: number; max_positions_ignore_after_hours: number } {
+  const def = { max_positions: 2, max_positions_with_expired: 3, max_position_loss_pct: defaultPositionLossPct(), loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
     const fileLimits = readGlobalLimitsFromFile();
@@ -164,6 +185,7 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
     const cfg = {
       max_positions: limits.max_positions,
       max_positions_with_expired: limits.max_positions_with_expired,
+      max_position_loss_pct: limits.max_position_loss_pct,
       loss_streak_trigger: Number(raw.loss_streak_trigger) || def.loss_streak_trigger,
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
       max_free_debt_usd: Number(raw.max_free_debt_usd) || def.max_free_debt_usd,
@@ -183,6 +205,7 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
       ...def,
       max_positions: limits.max_positions,
       max_positions_with_expired: limits.max_positions_with_expired,
+      max_position_loss_pct: limits.max_position_loss_pct,
     }, def, { positionLimitsFromFile: Boolean(fileLimits) });
   }
 }
@@ -638,6 +661,7 @@ router.get("/status", async (_req, res) => {
       positions_reserved: st.reserved,
       max_positions: cfg.max_positions,
       max_positions_with_expired: cfg.max_positions_with_expired,
+      max_position_loss_pct: cfg.max_position_loss_pct,
       exchange_check: EXCHANGE_CHECK,
       max_positions_ignore_after_hours: cfg.max_positions_ignore_after_hours,
       loss_streak: control.loss_streak,
@@ -668,9 +692,13 @@ router.get("/status", async (_req, res) => {
 
 /**
  * POST /api/trading/global-limits
- * Обновляет глобальные лимиты позиций (max_positions, max_positions_with_expired).
+ * Обновляет глобальные лимиты (все боты):
+ *   max_positions, max_positions_with_expired — слоты;
+ *   max_position_loss_pct — максимальный убыток одной позиции (цикла) в % от
+ *   депозита (0 = выкл). Именно это значение читают боты на каждом тике.
  * Сохраняет в файл data/global_limits_<env>.json — применяется сразу без рестарта.
- * body: { max_positions: number, max_positions_with_expired: number }
+ * body: { max_positions, max_positions_with_expired, max_position_loss_pct? }
+ * (если max_position_loss_pct не передан — сохраняется текущее значение)
  */
 router.post('/global-limits', async (req, res) => {
   try {
@@ -682,7 +710,18 @@ router.post('/global-limits', async (req, res) => {
     if (!Number.isFinite(max_positions_with_expired) || max_positions_with_expired < 0 || max_positions_with_expired > 50) {
       return res.status(400).json({ error: 'max_positions_with_expired: 0-50' });
     }
-    const limits = { max_positions: Math.floor(max_positions), max_positions_with_expired: Math.floor(max_positions_with_expired) };
+    const current = readGlobalLimits();
+    let lossPct = current.max_position_loss_pct;
+    if (req.body?.max_position_loss_pct !== undefined && req.body?.max_position_loss_pct !== null) {
+      const parsed = sanitizePct(req.body.max_position_loss_pct);
+      if (parsed === null) return res.status(400).json({ error: 'max_position_loss_pct: 0-100' });
+      lossPct = parsed;
+    }
+    const limits: GlobalLimits = {
+      max_positions: Math.floor(max_positions),
+      max_positions_with_expired: Math.floor(max_positions_with_expired),
+      max_position_loss_pct: lossPct,
+    };
     writeGlobalLimits(limits);
     res.json({ success: true, ...limits });
   } catch (e) {

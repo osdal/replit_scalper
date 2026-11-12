@@ -296,6 +296,16 @@ async function closePositionSymbol(symbol: string): Promise<{ ok: boolean; outpu
 }
 
 export async function checkMaxDrawdown(): Promise<void> {
+  // Второй ограничитель убытка позиции УДАЛЁН намеренно: риск по позиции
+  // контролирует только бот (bot/cum_loss_cap.py, глобальный
+  // max_position_loss_pct из dashboard). Раньше здесь раз в 20с закрывалась
+  // «убыточная» позиция по per-bot position_loss_pct — это давало два разных
+  // порога на один риск и закрывало позиции раньше ожидаемого.
+  return;
+}
+
+/** @deprecated оставлено для истории; не вызывается. */
+async function checkMaxDrawdownLegacy(): Promise<void> {
   if (BOT_ENV !== "live") return;
   try {
     await syncBinanceTime();

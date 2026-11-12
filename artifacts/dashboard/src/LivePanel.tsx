@@ -48,14 +48,14 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [pcts, setPcts] = useState<Record<string, string>>({});
   const [expiredMins, setExpiredMins] = useState<Record<string, string>>({});
   const [slotRelease, setSlotRelease] = useState<Record<string, string>>({});
-  const [positionLossPct, setPositionLossPct] = useState<Record<string, string>>({});
   const [totalLossPct, setTotalLossPct] = useState<Record<string, string>>({});
   const [loss, setLoss] = useState<Awaited<ReturnType<typeof fetchDailyLoss>> | null>(null);
   const [dd, setDd] = useState<{ drawdown_pct: number; threshold_pct: number; equity: number; reference: number; enabled: boolean } | null>(null);
   const [relay, setRelay] = useState<{ pending: number; consumed: number; skipped: number; last: any | null } | null>(null);
-  const [tradingStatus, setTradingStatus] = useState<{ max_positions: number; max_positions_with_expired: number } | null>(null);
+  const [tradingStatus, setTradingStatus] = useState<{ max_positions: number; max_positions_with_expired: number; max_position_loss_pct: number } | null>(null);
   const [globalMaxPos, setGlobalMaxPos] = useState("");
   const [globalMaxPosWithExpired, setGlobalMaxPosWithExpired] = useState("");
+  const [globalPositionLossPct, setGlobalPositionLossPct] = useState("");
   const [applyingGlobalLimits, setApplyingGlobalLimits] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +81,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
       if (!editedRef.current) {
         setGlobalMaxPos(String(status.max_positions ?? 3));
         setGlobalMaxPosWithExpired(String(status.max_positions_with_expired ?? 10));
+        setGlobalPositionLossPct(String(status.max_position_loss_pct ?? 5));
       }
     } catch { /* ignore */ }
   };
@@ -102,24 +103,33 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const applyGlobalLimits = async () => {
     const maxPos = Number(globalMaxPos);
     const maxPosWithExpired = Number(globalMaxPosWithExpired);
+    const positionLoss = Number(globalPositionLossPct);
     if (!Number.isFinite(maxPos) || maxPos < 0 || maxPos > 50) {
       setError("Max поз.: 0–50"); return;
     }
     if (!Number.isFinite(maxPosWithExpired) || maxPosWithExpired < 0 || maxPosWithExpired > 50) {
       setError("Max поз. + протух.: 0–50"); return;
     }
+    if (!Number.isFinite(positionLoss) || positionLoss < 0 || positionLoss > 100) {
+      setError("Max убыток по позиции: 0–100 %"); return;
+    }
     setApplyingGlobalLimits(true); setError(null); setSavedMsg(null);
     try {
-      const res = await updateGlobalLimits(maxPos, maxPosWithExpired);
+      const res = await updateGlobalLimits(maxPos, maxPosWithExpired, positionLoss);
       const saved = {
         max_positions: res?.max_positions ?? maxPos,
         max_positions_with_expired: res?.max_positions_with_expired ?? maxPosWithExpired,
+        max_position_loss_pct: res?.max_position_loss_pct ?? positionLoss,
       };
       setTradingStatus(saved);
       setGlobalMaxPos(String(saved.max_positions));
       setGlobalMaxPosWithExpired(String(saved.max_positions_with_expired));
+      setGlobalPositionLossPct(String(saved.max_position_loss_pct));
       editedRef.current = false;
-      setSavedMsg(`Сохранено: ${saved.max_positions} / ${saved.max_positions_with_expired}`);
+      setSavedMsg(
+        `Сохранено: ${saved.max_positions} / ${saved.max_positions_with_expired} / ` +
+        `убыток позиции ${saved.max_position_loss_pct}%`,
+      );
       // Перечитываем /status: показываем то, что реально применилось.
       await loadTradingStatus();
     } catch (e) {
@@ -146,9 +156,9 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
           {loss?.tripped ? " — ЛИМИТ СРАБОТАЛ (боты остановлены)" : ""}
           {loss?.degraded ? " · ВНИМАНИЕ: биржа не ответила, плавающий PnL не учтён" : ""}
           <br />
-          Просадка:{" "}
+          Просадка депозита (справочно):{" "}
           {dd ? `${dd.drawdown_pct.toFixed(1)}% / ${dd.threshold_pct}% (equity $${dd.equity.toFixed(2)}, ref $${dd.reference.toFixed(2)})` : "—"}
-          {dd && dd.enabled && dd.drawdown_pct >= dd.threshold_pct ? " — закрытие убыточной позиции" : ""}
+          {dd ? " — не закрывает позиции: закрытие делает бот по «Max убыток по позиции»" : ""}
         </div>
       </div>
 
@@ -198,6 +208,21 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               title="Новое значение"
             />
           </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Max убыток по позиции, %: </span>
+            <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_position_loss_pct ?? "—"}</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              value={globalPositionLossPct}
+              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalPositionLossPct(e.target.value); }}
+              onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              title="Убыток всей позиции (сумма всех ног цикла) в % от депозита: при достижении — принудительное закрытие. 0 = выкл."
+            />
+          </div>
         </div>
         <div className="mt-2 flex items-center gap-2">
           <Button
@@ -243,7 +268,6 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               <th className="pr-3">free % (маржа от своб. депозита)</th>
               <th className="pr-3">протухание, мин</th>
               <th className="pr-3" title="Через сколько минут позиция перестаёт занимать слот max_positions (не закрывается)">слот, мин</th>
-              <th className="pr-3" title="Закрыть позицию при её плавающем убытке ≥ N% депозита">убыток позиции, %</th>
               <th className="pr-3" title="Дневной стоп: net за день ≤ -N% баланса на начало дня (Киев)">дневной убыток, %</th>
               <th className="pr-3">actions</th>
             </tr>
@@ -353,24 +377,6 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       onClick={() =>
                         void run(`slot-${b.symbol}`, () =>
                           updateConfig(b.symbol, { slot_release_minutes: Number(slotRelease[b.symbol]) || 0 }),
-                        )
-                      }
-                    >
-                      set
-                    </button>
-                  </td>
-                  <td className="pr-3">
-                    <input
-                      value={positionLossPct[b.symbol] ?? String(b.position_loss_pct ?? 5)}
-                      onChange={(e) => setPositionLossPct((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
-                    />
-                    <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
-                      disabled={busy !== null}
-                      onClick={() =>
-                        void run(`plp-${b.symbol}`, () =>
-                          updateConfig(b.symbol, { position_loss_pct: Number(positionLossPct[b.symbol]) || 0 }),
                         )
                       }
                     >

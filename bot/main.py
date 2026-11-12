@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -139,6 +140,50 @@ _CUM_CAP = CumLossCap(
     fixed_ref_usd=_REVERSE_CUM_REF_DEPOSIT_USD,
     interval_sec=_REVERSE_CUM_LOSS_INTERVAL,
 )
+
+
+# --- Глобальный лимит убытка позиции (правится из дашборда) -----------------
+# Единственный ограничитель убытка позиции. Значение живёт в
+# data/global_limits_<env>.json (поле max_position_loss_pct) — тот же файл, что
+# пишет API (POST /api/trading/global-limits), поэтому изменение из UI
+# применяется без рестарта ботов.
+# Fallback: env REVERSE_CUM_LOSS_PCT (старое поведение).
+_CUM_PCT_CACHE = {"ts": 0.0, "pct": None}
+_CUM_PCT_CACHE_SEC = 5.0
+
+
+def _global_limits_file() -> str:
+    """Путь к общему файлу лимитов (API и боты видят один и тот же)."""
+    explicit = os.getenv("GLOBAL_LIMITS_FILE")
+    if explicit:
+        return explicit
+    env = (os.getenv("BOT_ENV") or "").strip().lower()
+    if env not in ("live", "testnet"):
+        env = "live" if os.getenv("BINANCE_TESTNET", "false").lower() != "true" else "testnet"
+    # cwd бота = BOT_DIR (…/bot), файл лежит на уровень выше: …/data/
+    return os.path.join(os.getcwd(), "..", "data", f"global_limits_{env}.json")
+
+
+def _resolve_cum_loss_pct() -> float:
+    """Текущий лимит убытка позиции (% депозита), кэш 5с."""
+    now = time.time()
+    cached = _CUM_PCT_CACHE["pct"]
+    if cached is not None and now - _CUM_PCT_CACHE["ts"] < _CUM_PCT_CACHE_SEC:
+        return cached
+    pct = None
+    try:
+        with open(_global_limits_file(), "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        value = raw.get("max_position_loss_pct")
+        if value is not None:
+            pct = max(0.0, float(value))
+    except Exception:
+        pct = None
+    if pct is None:
+        pct = max(0.0, float(_REVERSE_CUM_LOSS_PCT))
+    _CUM_PCT_CACHE["ts"] = now
+    _CUM_PCT_CACHE["pct"] = pct
+    return pct
 # Защита от параллельного закрытия цикла из тика и из on_candle.
 _CUM_CAP_CLOSING: set = set()
 
@@ -1353,11 +1398,15 @@ async def _close_stale_db_trade(
 async def _check_reverse_cum_loss(
     symbol: str, order_mgr: OrderManager, tracker: PositionTracker, log
 ) -> bool:
-    """Периодическая проверка cumulative loss cap для reverse-цепочки.
+    """Периодическая проверка cumulative loss cap (и для первой ноги, и для reverse).
 
-    Returns True, если нужно принудительно закрыть цикл. Вызывается на каждом
-    тике цены (не только на закрытии свечи); троттлинг — _REVERSE_CUM_LOSS_INTERVAL.
+    Returns True, если нужно принудительно закрыть позицию/цикл. Вызывается на
+    каждом тике цены (не только на закрытии свечи); троттлинг — интервал
+    `_CUM_CAP` (минимум CUM_CAP_MIN_INTERVAL_SEC).
     """
+    # Лимит убытка позиции — глобальный, читаем из файла (кэш 5с): изменение
+    # из дашборда применяется без рестарта бота.
+    _CUM_CAP.pct = _resolve_cum_loss_pct()
     if not _CUM_CAP.enabled:
         return False
     pos = tracker.position
@@ -1367,7 +1416,9 @@ async def _check_reverse_cum_loss(
     snap = await _CUM_CAP.should_close(symbol, order_mgr, tracker, log)
     if snap is None:
         return False
-    log.error(f"[REVERSE] cumulative loss cap | symbol={symbol} {snap.describe()} — force-closing")
+    log.error(
+        f"[CUM_CAP] cumulative loss cap | symbol={symbol} {snap.describe()} — force-closing"
+    )
     return True
 
 
@@ -1383,14 +1434,14 @@ async def _cap_after_unclosed_sl(
     backstop вместо закрытия на разрешённом минусе. Здесь добираем проверку после
     неудавшегося SL.
 
-    Возвращает False, если хитом была не SL, позиция закрылась, она не reverse
-    или cap выключен. Троттлинг (не чаще `REVERSE_CUM_LOSS_INTERVAL_SEC`) и
+    Возвращает False, если хитом была не SL, позиция закрылась или cap выключен.
+    Троттлинг (не чаще `_CUM_CAP.interval_sec`) и
     защита от параллельного закрытия — внутри `_CUM_CAP`.
     """
-    if str(hit or "") != "SL" or not _CUM_CAP.enabled:
+    if str(hit or "") != "SL":
         return False
     pos = tracker.position
-    if pos is None or not getattr(pos, "is_reverse", False):
+    if pos is None:
         return False
     try:
         return await _check_reverse_cum_loss(symbol, order_mgr, tracker, log)
@@ -2464,7 +2515,10 @@ async def _run_live_or_paper(
                             if getattr(leg, "is_reverse", False) else "EXPIRED_CLOSE"
                         )
                         if exit_reason == "expired_profit"
-                        else "REVERSE_CUM_LOSS_CAP"
+                        else (
+                            "REVERSE_CUM_LOSS_CAP"
+                            if getattr(leg, "is_reverse", False) else "CUM_LOSS_CAP"
+                        )
                     )
                 )
                 if is_live_close:
@@ -3381,7 +3435,9 @@ async def _run_live_or_paper(
                     return
                 _slot_pause[0] = 0
 
-            if tracker.has_open_position() and tracker.position.is_reverse:
+            if tracker.has_open_position():
+                # Лимит убытка позиции — общий (и для первой ноги, и для
+                # reverse-цепочки): сумма реализованных ног + текущий unrealized.
                 should_close = await _check_reverse_cum_loss(
                     cfg.symbol, order_mgr, tracker, log
                 )
@@ -5034,11 +5090,11 @@ async def _run_live_or_paper(
                             )
                         except Exception as e:
                             log.debug(f"[TICK_SL_TP] reverse TP recalc error: {e}")
-                if not hit and _CUM_CAP.enabled and tracker.position is not None \
-                        and tracker.position.is_reverse:
-                    # Cumulative loss cap на КАЖДОМ тике (а не раз в свечу): суммарный
-                    # убыток цикла пересчитывается постоянно; при достижении лимита
-                    # цикл закрывается немедленно, не дожидаясь закрытия ноги.
+                if not hit and tracker.position is not None:
+                    # Лимит убытка позиции на КАЖДОМ тике (а не раз в свечу):
+                    # суммарный убыток (реализованные ноги + текущий unrealized)
+                    # пересчитывается постоянно; при достижении лимита позиция
+                    # закрывается немедленно. Работает для любой позиции.
                     if await _check_reverse_cum_loss(cfg.symbol, order_mgr, tracker, log):
                         await process_hit(
                             "CUM_LOSS_CAP", current_price, int(time.time() * 1000)

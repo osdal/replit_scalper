@@ -976,7 +976,6 @@ export default function Dashboard() {
   // Position limits (testnet only): apply to all bots
   const [expiredMinutesAll, setExpiredMinutesAll] = useState("");
   const [slotReleaseAll, setSlotReleaseAll] = useState("");
-  const [positionLossPctAll, setPositionLossPctAll] = useState("");
   const [totalLossPctAll, setTotalLossPctAll] = useState("");
   const [applyingLimits, setApplyingLimits] = useState(false);
 
@@ -991,7 +990,6 @@ export default function Dashboard() {
 
   const displayExpiredMinutes = getCommonValue(bots, "expired_after_minutes", 120);
   const displaySlotReleaseMinutes = getCommonValue(bots, "slot_release_minutes", 360);
-  const displayPositionLossPct = getCommonValue(bots, "position_loss_pct", 5);
   const displayTotalLossPct = getCommonValue(bots, "total_loss_pct", 10);
   const displaySizePct = getCommonValue(bots, "position_size_pct", 1);
 
@@ -1262,10 +1260,10 @@ export default function Dashboard() {
 
   /**
    * Задать числовое риск-поле сразу ВСЕМ ботам.
-   * Используется для slot_release_minutes / position_loss_pct / total_loss_pct.
+   * Используется для slot_release_minutes / total_loss_pct.
    */
   const applyRiskFieldToAll = async (
-    field: "slot_release_minutes" | "position_loss_pct" | "total_loss_pct",
+    field: "slot_release_minutes" | "total_loss_pct",
     rawInput: string,
     opts: { min: number; max: number; label: string; hint: string; unit: string },
   ) => {
@@ -1302,7 +1300,6 @@ export default function Dashboard() {
     }
     setApplyingLimits(false);
     if (field === "slot_release_minutes") setSlotReleaseAll("");
-    if (field === "position_loss_pct") setPositionLossPctAll("");
     if (field === "total_loss_pct") setTotalLossPctAll("");
     setNotice(
       failed.length
@@ -1559,7 +1556,7 @@ export default function Dashboard() {
             </div>
           )}
           <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
-            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Через сколько минут позиция перестаёт занимать слот max_positions. 0 = никогда. Позиция при этом НЕ закрывается: живёт до TP / минимального плюса / 5% cap.">
+            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Через сколько минут позиция перестаёт занимать слот max_positions. 0 = никогда. Позиция при этом НЕ закрывается: живёт до TP / минимального плюса / лимита убытка позиции.">
               Слот, мин · всем
             </label>
             <input
@@ -1584,39 +1581,6 @@ export default function Dashboard() {
               onClick={() => void applyRiskFieldToAll("slot_release_minutes", slotReleaseAll || String(displaySlotReleaseMinutes), {
                 min: 0, max: 10080, unit: "мин", label: "Слот, мин",
                 hint: "Позиция старше N минут перестаёт занимать слот max_positions, но продолжает жить и закрывается по TP / минимальному плюсу. 0 = никогда.",
-              })}
-              disabled={applyingLimits}
-              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
-            >
-              {applyingLimits ? "Working..." : "Apply"}
-            </Button>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
-            <label className="text-xs text-zinc-400 whitespace-nowrap" title="Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита (live).">
-              Убыток позиции, % · всем
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max="100"
-              placeholder={String(displayPositionLossPct)}
-              value={positionLossPctAll || String(displayPositionLossPct)}
-              onChange={e => setPositionLossPctAll(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") {
-                void applyRiskFieldToAll("position_loss_pct", positionLossPctAll || String(displayPositionLossPct), {
-                  min: 0, max: 100, unit: "%", label: "Убыток позиции, %",
-                  hint: "Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита. 0 = выкл.",
-                });
-              } }}
-              className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void applyRiskFieldToAll("position_loss_pct", positionLossPctAll || String(displayPositionLossPct), {
-                min: 0, max: 100, unit: "%", label: "Убыток позиции, %",
-                hint: "Позиция закрывается рынком, когда её плавающий убыток достигает N% депозита. 0 = выкл.",
               })}
               disabled={applyingLimits}
               className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"

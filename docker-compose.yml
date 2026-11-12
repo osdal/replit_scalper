@@ -89,7 +89,10 @@ services:
       # Релей сигналов testnet -> live уходит на соседний контейнер.
       - SIGNAL_RELAY_URL=http://api-live:5000/api
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
-      - REVERSE_CUM_LOSS_PCT=5
+      # Fallback лимита убытка позиции. Рабочее значение — в
+      # data/global_limits_<env>.json (поле max_position_loss_pct), его пишет
+      # дашборд (POST /api/trading/global-limits).
+      - REVERSE_CUM_LOSS_PCT=20
       - REVERSE_CUM_REF_DEPOSIT_USD=0
       # Освобождение слота max_positions: позиция старше 6 ч (360 мин) больше не
       # занимает слот, но продолжает жить и закрывается по TP / минимальному плюсу
@@ -223,7 +226,10 @@ services:
       - LIVE_DAILY_LOSS_LIMIT_PCT=10
       - DEPOSIT_USD=10
       # Cumulative loss cap для reverse-цепочки (0 = выкл).
-      - REVERSE_CUM_LOSS_PCT=5
+      # Fallback лимита убытка позиции. Рабочее значение — в
+      # data/global_limits_<env>.json (поле max_position_loss_pct), его пишет
+      # дашборд (POST /api/trading/global-limits).
+      - REVERSE_CUM_LOSS_PCT=20
       - REVERSE_CUM_REF_DEPOSIT_USD=0
       # Reverse step doubling (testnet-like): удваивание цели на каждом шаге цепочки.
       - REVERSE_STEP_DOUBLING=true

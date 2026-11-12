@@ -170,15 +170,26 @@ export async function setRelayOnly(symbol: string, value: boolean): Promise<unkn
 export async function fetchTradingStatus(): Promise<{
   max_positions: number;
   max_positions_with_expired: number;
+  max_position_loss_pct: number;
 }> {
   return apiFetch(`${API}/trading/status`);
 }
 
-// Обновление глобальных лимитов позиций
-export async function updateGlobalLimits(max_positions: number, max_positions_with_expired: number): Promise<{ success: boolean; max_positions: number; max_positions_with_expired: number }> {
+// Обновление глобальных лимитов позиций (max_position_loss_pct — убыток всей
+// позиции в % от депозита; один порог на всех ботов)
+export async function updateGlobalLimits(
+  max_positions: number,
+  max_positions_with_expired: number,
+  max_position_loss_pct?: number,
+): Promise<{
+  success: boolean;
+  max_positions: number;
+  max_positions_with_expired: number;
+  max_position_loss_pct: number;
+}> {
   return apiFetch(`${API}/trading/global-limits`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_positions, max_positions_with_expired }),
+    body: JSON.stringify({ max_positions, max_positions_with_expired, max_position_loss_pct }),
   });
 }

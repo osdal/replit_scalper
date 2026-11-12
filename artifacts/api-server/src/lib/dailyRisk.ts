@@ -211,24 +211,27 @@ export async function resolveTotalLossPct(explicit?: number): Promise<number> {
   return 10;
 }
 
-/** Порог просадки ОДНОЙ позиции (в % от депозита) для конкретного символа. */
-export async function resolvePositionLossPct(symbol?: string): Promise<number> {
+/**
+ * Порог убытка ОДНОЙ позиции (в % от депозита) — ГЛОБАЛЬНЫЙ, один на весь флот.
+ *
+ * Источник истины — `data/global_limits_<env>.json` (поле `max_position_loss_pct`),
+ * его правит дашборд (POST /api/trading/global-limits). Per-bot `position_loss_pct`
+ * больше не используется: несколько ограничителей на один риск давали
+ * неожиданные закрытия (например, 5% вместо выставленных 20%).
+ *
+ * Здесь значение нужно только для отображения (/api/live/drawdown). Само
+ * закрытие делает бот (bot/cum_loss_cap.py) — он читает тот же файл.
+ */
+export async function resolvePositionLossPct(_symbol?: string): Promise<number> {
   try {
-    if (symbol) {
-      const [bot] = await db.select({ pct: botsTable.position_loss_pct })
-        .from(botsTable).where(eq(botsTable.symbol, symbol.toUpperCase()));
-      const n = Number(bot?.pct);
-      // 0 = выкл (проверяющий пропускает порог <= 0), поэтому возвращаем как есть.
-      if (Number.isFinite(n) && n >= 0) return n;
-    } else {
-      const rows = await db.select({ pct: botsTable.position_loss_pct }).from(botsTable);
-      const vals = rows.map((r) => Number(r.pct)).filter((v) => Number.isFinite(v) && v > 0);
-      if (vals.length) return Math.min(...vals);
-    }
+    const p = path.resolve(BOT_DIR, "..", "data", `global_limits_${BOT_ENV}.json`);
+    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+    const n = Number(raw.max_position_loss_pct);
+    if (Number.isFinite(n) && n >= 0) return n;
   } catch (e) {
-    console.error("[dailyRisk] position_loss_pct read failed:", String(e));
+    console.error("[dailyRisk] global max_position_loss_pct read failed:", String(e));
   }
-  const envPct = Number(process.env.LIVE_MAX_DRAWDOWN_PCT || "0");
+  const envPct = Number(process.env.MAX_POSITION_LOSS_PCT ?? process.env.REVERSE_CUM_LOSS_PCT ?? "0");
   if (Number.isFinite(envPct) && envPct > 0) return envPct;
   return 5;
 }
