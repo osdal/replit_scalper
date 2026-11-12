@@ -1,4 +1,4 @@
-import { useEffect, useState, Component, ReactNode } from "react";
+import { useEffect, useRef, useState, Component, ReactNode } from "react";
 import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
 import { Button } from "./components/ui/button";
 
@@ -57,7 +57,11 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [globalMaxPos, setGlobalMaxPos] = useState("");
   const [globalMaxPosWithExpired, setGlobalMaxPosWithExpired] = useState("");
   const [applyingGlobalLimits, setApplyingGlobalLimits] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Пользователь начал править инпуты: фоновый опрос (раз в 15с) не должен
+  // затирать введённое значение. Сбрасывается после успешного Apply.
+  const editedRef = useRef(false);
 
   const loadLoss = async () => {
     try { setLoss(await fetchDailyLoss()); } catch { /* ignore */ }
@@ -72,9 +76,12 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
     try { 
       const status = await fetchTradingStatus();
       setTradingStatus(status);
-      // Prefill inputs with current values
-      setGlobalMaxPos(String(status.max_positions ?? 3));
-      setGlobalMaxPosWithExpired(String(status.max_positions_with_expired ?? 10));
+      // Prefill inputs with current values, но не затираем то, что сейчас правит
+      // пользователь (иначе значение «прыгает» обратно на серверное).
+      if (!editedRef.current) {
+        setGlobalMaxPos(String(status.max_positions ?? 3));
+        setGlobalMaxPosWithExpired(String(status.max_positions_with_expired ?? 10));
+      }
     } catch { /* ignore */ }
   };
   useEffect(() => {
@@ -101,10 +108,19 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
     if (!Number.isFinite(maxPosWithExpired) || maxPosWithExpired < 0 || maxPosWithExpired > 50) {
       setError("Max поз. + протух.: 0–50"); return;
     }
-    setApplyingGlobalLimits(true); setError(null);
+    setApplyingGlobalLimits(true); setError(null); setSavedMsg(null);
     try {
-      await updateGlobalLimits(maxPos, maxPosWithExpired);
-      setError(null);
+      const res = await updateGlobalLimits(maxPos, maxPosWithExpired);
+      const saved = {
+        max_positions: res?.max_positions ?? maxPos,
+        max_positions_with_expired: res?.max_positions_with_expired ?? maxPosWithExpired,
+      };
+      setTradingStatus(saved);
+      setGlobalMaxPos(String(saved.max_positions));
+      setGlobalMaxPosWithExpired(String(saved.max_positions_with_expired));
+      editedRef.current = false;
+      setSavedMsg(`Сохранено: ${saved.max_positions} / ${saved.max_positions_with_expired}`);
+      // Перечитываем /status: показываем то, что реально применилось.
       await loadTradingStatus();
     } catch (e) {
       setError(String(e));
@@ -161,7 +177,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               min="0"
               max="50"
               value={globalMaxPos}
-              onChange={e => setGlobalMaxPos(e.target.value)}
+              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalMaxPos(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
               className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
               title="Новое значение"
@@ -176,7 +192,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               min="0"
               max="50"
               value={globalMaxPosWithExpired}
-              onChange={e => setGlobalMaxPosWithExpired(e.target.value)}
+              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalMaxPosWithExpired(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
               className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
               title="Новое значение"
@@ -193,6 +209,8 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
           >
             {applyingGlobalLimits ? "Working..." : "Apply"}
           </Button>
+          <span className="text-zinc-500">(пишет оба значения сразу)</span>
+          {savedMsg && <span className="text-xs text-green-400">{savedMsg}</span>}
           {error && <span className="text-xs text-red-400">{error}</span>}
         </div>
       </div>

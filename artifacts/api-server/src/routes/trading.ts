@@ -37,20 +37,32 @@ interface GlobalLimits {
   max_positions_with_expired: number;
 }
 
-/** Читает глобальные лимиты из файла (приоритет) или из env (fallback). */
-function readGlobalLimits(): GlobalLimits {
-  // 1) Файл (можно менять через API без рестарта)
+/**
+ * Лимиты ТОЛЬКО из файла (его правит UI через POST /global-limits).
+ * null — файла нет или он битый. Отдельная функция нужна, чтобы отличать
+ * «значение пришло из файла» от «значение пришло из env»: env-оверрайды
+ * не должны затирать то, что пользователь сохранил из дашборда.
+ */
+function readGlobalLimitsFromFile(): GlobalLimits | null {
   try {
     const raw = JSON.parse(fs.readFileSync(GLOBAL_LIMITS_FILE, "utf8")) as Partial<GlobalLimits>;
     if (Number.isFinite(raw.max_positions) && Number.isFinite(raw.max_positions_with_expired)) {
       return {
-        max_positions: Math.max(0, Math.floor(raw.max_positions)),
-        max_positions_with_expired: Math.max(0, Math.floor(raw.max_positions_with_expired)),
+        max_positions: Math.max(0, Math.floor(Number(raw.max_positions))),
+        max_positions_with_expired: Math.max(0, Math.floor(Number(raw.max_positions_with_expired))),
       };
     }
   } catch {
-    // файл нет или битый — идём к env
+    // файла нет или он битый
   }
+  return null;
+}
+
+/** Читает глобальные лимиты из файла (приоритет) или из env (fallback). */
+function readGlobalLimits(): GlobalLimits {
+  // 1) Файл (можно менять через API без рестарта)
+  const fromFile = readGlobalLimitsFromFile();
+  if (fromFile) return fromFile;
   // 2) Env (docker-compose / .env.live)
   const envMax = process.env.MAX_POSITIONS;
   const envMaxWithExpired = process.env.MAX_POSITIONS_WITH_EXPIRED;
@@ -93,19 +105,26 @@ function sanitizeLossStreakTrigger(value: unknown, fallback: number): number {
  * только на одном стеке: yaml общий для api-testnet и api-live, а менять
  * поведение live нельзя.
  */
-function applyEnvOverrides<T extends { max_positions: number; max_positions_with_expired: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(cfg: T, defaults: T): T {
-  const env_max = process.env.MAX_POSITIONS;
-  if (env_max !== undefined && env_max !== null && env_max !== "") {
-    // Only override if value hasn't been set from file (i.e., still equals default)
-    if (cfg.max_positions === defaults.max_positions) {
+function applyEnvOverrides<T extends { max_positions: number; max_positions_with_expired: number; max_positions_ignore_after_hours: number; loss_streak_trigger: number; daily_loss_limit_usd: number }>(
+  cfg: T,
+  defaults: T,
+  opts: { positionLimitsFromFile?: boolean } = {},
+): T {
+  // max_positions / max_positions_with_expired: если файл global_limits_<env>.json
+  // уже содержит значения (их сохранил пользователь из дашборда), env их НЕ
+  // трогает. Раньше здесь сравнивалось с дефолтом, из-за чего сохранённое
+  // значение, совпавшее с дефолтом (например 3 для max_positions_with_expired),
+  // молча затиралось env-ом (MAX_POSITIONS_WITH_EXPIRED=10) и в UI
+  // «сбрасывалось на 10».
+  if (!opts.positionLimitsFromFile) {
+    const env_max = process.env.MAX_POSITIONS;
+    if (env_max !== undefined && env_max !== null && env_max !== "") {
       cfg.max_positions = sanitizeMaxPositions(env_max, cfg.max_positions);
     }
-  }
-  const env_max_with_expired = process.env.MAX_POSITIONS_WITH_EXPIRED;
-  if (env_max_with_expired !== undefined && env_max_with_expired !== null && env_max_with_expired !== "") {
-    const n = Number(env_max_with_expired);
-    if (Number.isFinite(n) && n >= 0 && cfg.max_positions_with_expired === defaults.max_positions_with_expired) {
-      cfg.max_positions_with_expired = n;
+    const env_max_with_expired = process.env.MAX_POSITIONS_WITH_EXPIRED;
+    if (env_max_with_expired !== undefined && env_max_with_expired !== null && env_max_with_expired !== "") {
+      const n = Number(env_max_with_expired);
+      if (Number.isFinite(n) && n >= 0) cfg.max_positions_with_expired = Math.floor(n);
     }
   }
   const env_ignore = process.env.MAX_POSITIONS_IGNORE_AFTER_HOURS;
@@ -140,10 +159,11 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
   const def = { max_positions: 2, max_positions_with_expired: 3, loss_streak_trigger: 2, loss_pause_signals: 3, max_free_debt_usd: 15.0, daily_loss_limit_usd: 8.0, pause_timeout_minutes: 120, max_positions_ignore_after_hours: 2 };
   try {
     const raw = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) as any;
-    const fileLimits = readGlobalLimits();
+    const fileLimits = readGlobalLimitsFromFile();
+    const limits = fileLimits ?? readGlobalLimits();
     const cfg = {
-      max_positions: fileLimits.max_positions,
-      max_positions_with_expired: fileLimits.max_positions_with_expired,
+      max_positions: limits.max_positions,
+      max_positions_with_expired: limits.max_positions_with_expired,
       loss_streak_trigger: Number(raw.loss_streak_trigger) || def.loss_streak_trigger,
       loss_pause_signals: Number(raw.loss_pause_signals) || def.loss_pause_signals,
       max_free_debt_usd: Number(raw.max_free_debt_usd) || def.max_free_debt_usd,
@@ -155,14 +175,15 @@ function readConfig(): { max_positions: number; max_positions_with_expired: numb
         ? sanitizeIgnoreAfterHours(raw.max_positions_ignore_after_hours, def.max_positions_ignore_after_hours)
         : def.max_positions_ignore_after_hours,
     };
-    return applyEnvOverrides(cfg, def);
+    return applyEnvOverrides(cfg, def, { positionLimitsFromFile: Boolean(fileLimits) });
   } catch {
-    const fileLimits = readGlobalLimits();
+    const fileLimits = readGlobalLimitsFromFile();
+    const limits = fileLimits ?? readGlobalLimits();
     return applyEnvOverrides({
       ...def,
-      max_positions: fileLimits.max_positions,
-      max_positions_with_expired: fileLimits.max_positions_with_expired,
-    }, def);
+      max_positions: limits.max_positions,
+      max_positions_with_expired: limits.max_positions_with_expired,
+    }, def, { positionLimitsFromFile: Boolean(fileLimits) });
   }
 }
 
