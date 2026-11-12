@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
+import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
 import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -177,15 +178,7 @@ function fmt(n: number | null | undefined, decimals = 2) {
 }
 
 function fmtTime(iso: string | null) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  const day   = String(d.getDate()).padStart(2, "0");
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const year  = String(d.getFullYear()).slice(2);
-  const h     = String(d.getHours()).padStart(2, "0");
-  const m     = String(d.getMinutes()).padStart(2, "0");
-  return `${day}.${month}.${year} ${h}:${m}`;
+  return fmtKyiv(iso);
 }
 
 function heartbeatAge(ts: string | null): string {
@@ -631,7 +624,7 @@ function TradesTable({ trades }: { trades: Trade[] }) {
         <Table>
           <TableHeader>
             <TableRow className="border-zinc-800 hover:bg-transparent">
-              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Leg", "Cycle", "Legs", "Reason", "Mode", "Open", "Close"].map((h) => (
+              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Leg", "Cycle", "Legs", "Reason", "Mode", "Open (Киев)", "Close (Киев)"].map((h) => (
                 <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
               ))}
             </TableRow>
@@ -1467,7 +1460,7 @@ export default function Dashboard() {
              )}
            </h1>
             <p className="text-zinc-400 text-sm mt-0.5">
-              Last updated: {lastRefresh.toLocaleTimeString("ru-RU")}
+              Last updated: {fmtKyivTime(lastRefresh.toISOString())} (Киев)
               <span className={`ml-2 inline-block w-2 h-2 rounded-full ${apiUp ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={apiUp ? "API connected" : "API disconnected"} />
             </p>
             {notice && (

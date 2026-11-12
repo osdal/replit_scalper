@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { RefreshCw, Link2, AlertTriangle, CheckCircle2, Trash2 } from "lucide-react";
+import { fmtKyivShort } from "./lib/kyivTime";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -23,14 +24,7 @@ interface RecoveryConfig {
 }
 
 function fmtTime(iso: string | null) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  const day = String(d.getDate()).padStart(2, "0");
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${day}.${month} ${h}:${m}`;
+  return fmtKyivShort(iso);
 }
 
 export default function RecoveryTab() {

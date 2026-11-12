@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchPairs, fetchHistory, fetchLastPrice, fetchAdx, fetchBotsStatus, sendTelegramNotify, sendTelegramStart, saveGridResult, fetchGridHistory, clearGridHistory, createTestnetGridOrders, cancelTestnetGridOrders, cancelGridStops, fetchGridFills, fetchUserTrades, resizeGridOrders, closeGridPosition, resetGridAccount, stopAllBotsAndReset, fetchGridResetStatus, upsertGridTp, placeGridStop, fetchOpenAlgo, fetchAlgoStatus, fetchServerGrids, importServerGrids, patchGrid, deleteAllGrids, fetchGridEngineConfig, updateGridEngineConfig, fetchTrades } from "./hooks/useApi";
 import type { GridEngineConfig, Trade } from "./hooks/useApi";
 import { timeframePassesGridGate, getTimeframeAdx } from "./lib/gridGate";
+import { fmtKyiv } from "./lib/kyivTime";
 import { Button } from "./components/ui/button";
 import * as lightweightCharts from "lightweight-charts";
 
@@ -3848,7 +3849,7 @@ export default function Dashboard() {
                   last heartbeat:{" "}
                   <span className="font-mono">
                     {botsStatus[selectedPair]?.last_heartbeat
-                      ? new Date(botsStatus[selectedPair].last_heartbeat).toLocaleString()
+                      ? fmtKyiv(botsStatus[selectedPair].last_heartbeat)
                       : "—"}
                   </span>
                 </div>
@@ -4287,7 +4288,7 @@ export default function Dashboard() {
                                 );
                               })()}
                             </td>
-                            <td className="pr-3">{h.finished_at ? new Date(h.finished_at).toLocaleString() : "—"}</td>
+                            <td className="pr-3">{h.finished_at ? fmtKyiv(h.finished_at) : "—"}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -4348,7 +4349,7 @@ export default function Dashboard() {
                         <table className="min-w-full text-xs">
                           <thead>
                             <tr className="text-left text-zinc-500">
-                              <th className="pr-3">time</th>
+                              <th className="pr-3">time (Киев)</th>
                               <th className="pr-3">dir</th>
                               <th className="pr-3">entry</th>
                               <th className="pr-3">exit</th>
@@ -4377,9 +4378,9 @@ export default function Dashboard() {
                               return (
                                 <tr key={t.id ?? i} className="border-t">
                                   <td className="pr-3 whitespace-nowrap">
-                                    <div>{t.entry_time ? new Date(t.entry_time).toLocaleString() : "—"}</div>
+                                    <div>{t.entry_time ? fmtKyiv(t.entry_time) : "—"}</div>
                                     {!open && t.exit_time && (
-                                      <div className="text-zinc-400">{new Date(t.exit_time).toLocaleString()}</div>
+                                      <div className="text-zinc-400">{fmtKyiv(t.exit_time)}</div>
                                     )}
                                   </td>
                                   <td className={`pr-3 font-mono ${dir === "LONG" ? "text-green-600" : "text-red-600"}`}>
