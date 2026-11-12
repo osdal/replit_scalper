@@ -1,5 +1,6 @@
 import { useEffect, useState, Component, ReactNode } from "react";
 import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
+import { Button } from "./components/ui/button";
 
 // Error boundary to catch render errors in LivePanel
 class LivePanelErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
@@ -115,6 +116,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const sorted = [...bots].sort((a, b) => a.symbol.localeCompare(b.symbol));
 
   return (
+    <LivePanelErrorBoundary>
     <div className="space-y-4">
       <div className="rounded-md border-2 border-red-600 bg-red-950/40 p-3 text-red-300">
         <div className="font-semibold">LIVE — реальные деньги</div>
@@ -401,5 +403,6 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
         </table>
       </div>
     </div>
+    </LivePanelErrorBoundary>
   );
 }
