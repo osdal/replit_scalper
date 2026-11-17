@@ -1006,25 +1006,38 @@ export default function Dashboard() {
   };
 
   const handleToggle = async (bot: Bot) => {
-    if (toggling) return;
+    if (toggling) {
+      setNotice(`Дождитесь завершения действия по ${toggling}`);
+      return;
+    }
+    const starting = !bot.is_running;
     setToggling(bot.symbol);
+    setNotice(null);
     try {
       // API отвечает 200 даже когда не смог: {success:false, message:...}
       // (например, бот уже не найден по PID). Без проверки Stop выглядел бы
       // как «ничего не произошло» — показываем причину.
-      const res = bot.is_running ? await stopBot(bot.symbol) : await startBot(bot.symbol);
+      const res = starting ? await startBot(bot.symbol) : await stopBot(bot.symbol);
       if (res && res.success === false) {
         setNotice(`${bot.symbol}: ${res.message ?? "действие не выполнено"}`);
       } else {
-        setNotice(null);
+        // Оптимистично переключаем карточку: спиннер не должен ждать полного
+        // refresh (4 запроса), иначе на медленном канале он «крутится вечно»
+        // при том, что бот уже запущен/остановлен.
+        setBots(prev => prev.map(b => b.symbol === bot.symbol
+          ? (starting
+              ? { ...b, is_running: true, stop_requested: false, stop_reason: null }
+              : { ...b, stop_requested: true })
+          : b));
       }
-      await new Promise(r => setTimeout(r, 1000));
-      await load();
     } catch (e) {
       setNotice(`${bot.symbol}: ${String(e)}`);
     } finally {
       setToggling(null);
     }
+    // Полные данные (heartbeat, позиция, ошибки бота) подтягиваем в фоне.
+    await new Promise(r => setTimeout(r, 700));
+    void load();
   };
 
   const handleKill = async (bot: Bot) => {

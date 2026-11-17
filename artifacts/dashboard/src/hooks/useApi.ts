@@ -8,13 +8,36 @@ const ENV_API = import.meta.env.VITE_API_URL as string | undefined;
 // делает дашборд независимым от того, на каком порту он открыт.
 let API = ENV_API || "/api";
 
-async function apiFetch(url: string, options?: RequestInit) {
-  const r = await fetch(url, options);
-  if (!r.ok) {
-    const text = await r.text().catch(() => "Unknown error");
-    throw new Error(`API ${r.status}: ${text}`);
+// Таймаут на запрос. Без него «полуживое» соединение (оборванный SSH-туннель,
+// потерянный пакет) оставляло fetch висеть минутами: кнопка Start/Stop
+// показывала бесконечный спиннер, а панель LIVE — старые параметры, хотя запрос
+// давно никуда не шёл. По таймауту получаем внятную ошибку и освобождаем UI.
+const DEFAULT_TIMEOUT_MS = 15000;
+// Старт/стоп бота — на сервере это spawn Python-процесса (проверка зависимостей
+// кэшируется, но первый запуск может занять пару секунд), поэтому запас больше.
+export const ACTION_TIMEOUT_MS = 30000;
+
+type FetchOptions = RequestInit & { timeoutMs?: number };
+
+async function apiFetch(url: string, options: FetchOptions = {}) {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = options;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...init, signal: ctrl.signal });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "Unknown error");
+      throw new Error(`API ${r.status}: ${text}`);
+    }
+    return await r.json();
+  } catch (e) {
+    if ((e as { name?: string } | null)?.name === "AbortError") {
+      throw new Error(`API не ответил за ${Math.round(timeoutMs / 1000)} с (таймаут)`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return r.json();
 }
 
 export async function fetchBots() {
@@ -37,16 +60,16 @@ export async function fetchStats() {
 }
 
 export async function startBot(symbol: string) {
-  return apiFetch(`${API}/bots/${symbol}/start`, { method: "POST" });
+  return apiFetch(`${API}/bots/${symbol}/start`, { method: "POST", timeoutMs: ACTION_TIMEOUT_MS });
 }
 
 export async function stopBot(symbol: string) {
-  return apiFetch(`${API}/bots/${symbol}/stop`, { method: "POST" });
+  return apiFetch(`${API}/bots/${symbol}/stop`, { method: "POST", timeoutMs: ACTION_TIMEOUT_MS });
 }
 
 // Жёсткое убийство процесса (экстренная остановка). Позиции на бирже остаются.
 export async function killBot(symbol: string) {
-  return apiFetch(`${API}/bots/${symbol}/kill`, { method: "POST" });
+  return apiFetch(`${API}/bots/${symbol}/kill`, { method: "POST", timeoutMs: ACTION_TIMEOUT_MS });
 }
 
 export async function deleteBot(symbol: string) {

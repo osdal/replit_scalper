@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, Component, ReactNode } from "react";
 import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
+import { fmtKyivTime } from "./lib/kyivTime";
 import { Button } from "./components/ui/button";
 
 // Error boundary to catch render errors in LivePanel
@@ -59,9 +60,14 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
   const [applyingGlobalLimits, setApplyingGlobalLimits] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Пользователь начал править инпуты: фоновый опрос (раз в 15с) не должен
-  // затирать введённое значение. Сбрасывается после успешного Apply.
-  const editedRef = useRef(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusSyncedAt, setStatusSyncedAt] = useState<Date | null>(null);
+  // Признак «пользователь изменил поле относительно серверного значения» — по
+  // каждому полю отдельно. Раньше был один общий editedRef, который включался
+  // при любом вводе и снимался только успешным Apply: после одной правки (даже
+  // без сохранения) фоновый опрос переставал обновлять ВСЕ три поля, и в LIVE
+  // казалось, что параметры «не обновляются».
+  const dirtyRef = useRef({ maxPos: false, maxPosWithExpired: false, lossPct: false });
 
   const loadLoss = async () => {
     try { setLoss(await fetchDailyLoss()); } catch { /* ignore */ }
@@ -73,17 +79,36 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
     try { setRelay(await fetchRelayStats()); } catch { /* ignore */ }
   };
   const loadTradingStatus = async () => {
-    try { 
+    try {
       const status = await fetchTradingStatus();
       setTradingStatus(status);
-      // Prefill inputs with current values, но не затираем то, что сейчас правит
-      // пользователь (иначе значение «прыгает» обратно на серверное).
-      if (!editedRef.current) {
-        setGlobalMaxPos(String(status.max_positions ?? 3));
+      // Обновляем только те поля, которые пользователь не тронул (или вернул
+      // к серверному значению), чтобы не затирать незасохранённый ввод.
+      if (!dirtyRef.current.maxPos) setGlobalMaxPos(String(status.max_positions ?? 3));
+      if (!dirtyRef.current.maxPosWithExpired) {
         setGlobalMaxPosWithExpired(String(status.max_positions_with_expired ?? 10));
+      }
+      if (!dirtyRef.current.lossPct) {
         setGlobalPositionLossPct(String(status.max_position_loss_pct ?? 5));
       }
-    } catch { /* ignore */ }
+      setStatusError(null);
+      setStatusSyncedAt(new Date());
+    } catch (e) {
+      // Раньше ошибка глушилась, и «параметры не обновляются» выглядело как
+      // залипший UI без причины. Теперь она видна рядом с Apply.
+      setStatusError(String(e));
+    }
+  };
+
+  /** Помечает поле «грязным», только пока в нём число, отличное от серверного. */
+  const markDirty = (
+    field: keyof typeof dirtyRef.current,
+    value: string,
+    serverValue: number | undefined,
+  ) => {
+    const clean = value.trim();
+    dirtyRef.current[field] = clean !== "" && clean !== String(serverValue ?? "");
+    setSavedMsg(null);
   };
   useEffect(() => {
     loadLoss();
@@ -125,7 +150,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
       setGlobalMaxPos(String(saved.max_positions));
       setGlobalMaxPosWithExpired(String(saved.max_positions_with_expired));
       setGlobalPositionLossPct(String(saved.max_position_loss_pct));
-      editedRef.current = false;
+      dirtyRef.current = { maxPos: false, maxPosWithExpired: false, lossPct: false };
       setSavedMsg(
         `Сохранено: ${saved.max_positions} / ${saved.max_positions_with_expired} / ` +
         `убыток позиции ${saved.max_position_loss_pct}%`,
@@ -187,7 +212,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               min="0"
               max="50"
               value={globalMaxPos}
-              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalMaxPos(e.target.value); }}
+              onChange={e => { markDirty("maxPos", e.target.value, tradingStatus?.max_positions); setGlobalMaxPos(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
               className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
               title="Новое значение"
@@ -202,7 +227,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               min="0"
               max="50"
               value={globalMaxPosWithExpired}
-              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalMaxPosWithExpired(e.target.value); }}
+              onChange={e => { markDirty("maxPosWithExpired", e.target.value, tradingStatus?.max_positions_with_expired); setGlobalMaxPosWithExpired(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
               className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
               title="Новое значение"
@@ -217,7 +242,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               min="0"
               max="100"
               value={globalPositionLossPct}
-              onChange={e => { editedRef.current = true; setSavedMsg(null); setGlobalPositionLossPct(e.target.value); }}
+              onChange={e => { markDirty("lossPct", e.target.value, tradingStatus?.max_position_loss_pct); setGlobalPositionLossPct(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
               className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
               title="Убыток всей позиции (сумма всех ног цикла) в % от депозита: при достижении — принудительное закрытие. 0 = выкл."
@@ -234,8 +259,16 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
           >
             {applyingGlobalLimits ? "Working..." : "Apply"}
           </Button>
-          <span className="text-zinc-500">(пишет оба значения сразу)</span>
+          <span className="text-zinc-500">(пишет все три значения сразу)</span>
           {savedMsg && <span className="text-xs text-green-400">{savedMsg}</span>}
+          {statusError && (
+            <span className="text-xs text-amber-400" title={statusError}>
+              параметры с сервера не обновились: {statusError}
+            </span>
+          )}
+          {!statusError && statusSyncedAt && (
+            <span className="text-xs text-zinc-500">синхр. {fmtKyivTime(statusSyncedAt.toISOString())}</span>
+          )}
           {error && <span className="text-xs text-red-400">{error}</span>}
         </div>
       </div>

@@ -528,7 +528,14 @@ router.post("/:symbol/start", async (req, res) => {
     const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
+    // Логируем длительность: «Start крутится долго» иначе не диагностируется —
+    // в логе видно, сколько реально занял spawn (ps-скан, проверка зависимостей).
+    const t0 = Date.now();
     const result = await startBotProcess(symbol);
+    console.log(
+      `[start] ${symbol} ok=${result.ok} ${Date.now() - t0}ms ` +
+      `${result.error ?? result.message ?? ""}`.trim(),
+    );
     if (!result.ok) {
       if (result.error) return res.status(500).json({ error: result.error });
       return res.json({ success: false, message: result.message });
