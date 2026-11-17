@@ -59,6 +59,16 @@ class DbReporter:
             return
         await self._patch({"current_price": price, "is_running": True})
 
+    async def report_alive(self) -> None:
+        """Отметка живости без цены (долгий warm-up, ожидание снятия бана).
+
+        `report_heartbeat(0)` ничего не пишет (защита от цены 0), поэтому во
+        время старта, пока не получены свечи, `last_heartbeat` в дашборде
+        оставался старым — бот выглядел мёртвым, хотя процесс живой и
+        ретраил запросы. Любой PATCH в API обновляет `last_heartbeat`.
+        """
+        await self._patch({"is_running": True})
+
     async def report_llm_status(self, llm_status_dict: Optional[dict]) -> None:
         """Передаёт состояние LLM-фильтра (провайдеры, ошибки, лимиты) в БД/дашборд."""
         if llm_status_dict is None:

@@ -2226,13 +2226,41 @@ async def _run_live_or_paper(
             break
         except Exception as e:
             _warm_attempt += 1
+            # Пока идёт warm-up, основной цикл и graceful-stop watcher ещё не
+            # запущены: бот не отмечается живым и не видит stop_requested.
+            # При бане Binance (-1003 / 418 / 429) этот цикл крутится часами,
+            # поэтому: (1) отмечаем живость для дашборда, (2) уважаем Stop.
+            try:
+                await reporter.report_alive()
+            except Exception:
+                pass
+            try:
+                _state = await reporter.get_bot()
+            except Exception:
+                _state = None
+            if _state and _state.get("stop_requested"):
+                log.info("[STOP] graceful stop requested during warm-up — exiting")
+                try:
+                    await reporter.report_stop_reason("graceful_stop")
+                except Exception:
+                    pass
+                shutdown_event.set()
+                break
             # Экспоненциальный бэкофф с джиттером: 5s, 10s, 20s, 40s, 60s (max)
             _base = min(5 * (2 ** (_warm_attempt - 1)), 60)
             _delay = _base + random.uniform(0, _base * 0.3)
-            log.warning(
-                f"[STARTUP] warm-up klines failed (attempt {_warm_attempt}): {e}; "
-                f"retry in {_delay:.1f}s"
-            )
+            # Бан длится часами: не заливаем лог одной строкой в минуту —
+            # пишем первые 3 попытки и далее каждую 12-ю (~раз в 10 минут).
+            if _warm_attempt <= 3 or _warm_attempt % 12 == 0:
+                log.warning(
+                    f"[STARTUP] warm-up klines failed (attempt {_warm_attempt}): {e}; "
+                    f"retry in {_delay:.1f}s"
+                )
+            else:
+                log.debug(
+                    f"[STARTUP] warm-up klines failed (attempt {_warm_attempt}): {e}; "
+                    f"retry in {_delay:.1f}s"
+                )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=_delay)
             except asyncio.TimeoutError:
