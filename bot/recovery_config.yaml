@@ -1,7 +1,7 @@
 # Общий конфиг режима компенсации убытков (recovery mode)
 # Применяется ко всем ботам одновременно через API сервер
 
-recovery_enabled: true
+recovery_enabled: false   # 18.11.2026: выключено — догон убытка через TP=долг×1.5 убыточен при 75x
 recovery_bonus_pct: 50
 recovery_max_pct: 50
 
