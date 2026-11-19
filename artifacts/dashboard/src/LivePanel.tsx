@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, Component, ReactNode } from "react";
+import { useEffect, useRef, useState, Component, ReactNode, type Dispatch, type SetStateAction } from "react";
 import { armBot, disarmBot, closeAllLive, fetchDailyLoss, fetchDrawdown, fetchRelayStats, setRelayOnly, updateConfig, fetchTradingStatus, updateGlobalLimits } from "./hooks/useApi";
 import { fmtKyivTime } from "./lib/kyivTime";
 import { Button } from "./components/ui/button";
@@ -169,10 +169,25 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const run = async (key: string, fn: () => Promise<unknown>) => {
+  const run = async (key: string, fn: () => Promise<unknown>, afterSuccess?: () => void) => {
     setBusy(key); setError(null);
-    try { await fn(); onChanged(); } catch (e) { setError(String(e)); } finally { setBusy(null); }
+    try { await fn(); afterSuccess?.(); onChanged(); } catch (e) { setError(String(e)); } finally { setBusy(null); }
   };
+
+  /**
+   * Убирает локальный черновик поля, чтобы после успешного сохранения (в т.ч.
+   * массового изменения из верхней панели) ввод показывал серверное значение,
+   * а не устаревшую локальную копию.
+   */
+  const clearDraft = (
+    setter: Dispatch<SetStateAction<Record<string, string>>>,
+    symbol: string,
+  ) => setter((prev) => {
+    if (!(symbol in prev)) return prev;
+    const next = { ...prev };
+    delete next[symbol];
+    return next;
+  });
 
   const applyGlobalLimits = async () => {
     const maxPos = Number(globalMaxPos);
@@ -223,7 +238,9 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
         <div className="text-xs mt-1">
           Боты по умолчанию не армированы: сначала Start, затем Arm. Объём: маржа в USD,
           позиция = маржа × плечо; либо маржа = % от СВОБОДНОГО депозита (availableBalance)
-          — по умолчанию 1%. Приоритет: явный margin_usd важнее процента. Дневной лимит:{" "}
+          — по умолчанию 1%. Приоритет: явный margin_usd важнее процента. Массово для всех —
+          поле «Маржа, % · всем» в шапке страницы (здесь остаётся персональная настройка
+          каждого бота). Дневной лимит:{" "}
           {loss ? `${loss.net.toFixed(2)} / -${loss.limit}` : "—"}
           {loss?.baseline ? ` (база дня $${loss.baseline.toFixed(2)}${loss.day ? `, ${loss.day}` : ""})` : ""}
           {loss?.remaining_usd !== undefined ? `, осталось $${loss.remaining_usd.toFixed(2)}` : ""}
@@ -415,7 +432,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                   label="Маржа, $"
                   value={sizeVal}
                   onChange={(v) => setSizes((s) => ({ ...s, [b.symbol]: v }))}
-                  onSet={() => void run(`size-${b.symbol}`, () => updateConfig(b.symbol, { position_size_usd: Number(sizeVal) || 0 }))}
+                  onSet={() => void run(`size-${b.symbol}`, () => updateConfig(b.symbol, { position_size_usd: Number(sizeVal) || 0 }), () => clearDraft(setSizes, b.symbol))}
                   disabled={busy !== null}
                   title="Маржа в USD на одну новую позицию. Позиция = маржа × плечо. 0 = использовать % от свободного депозита."
                 />
@@ -424,7 +441,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                   suffix="%"
                   value={pctVal}
                   onChange={(v) => setPcts((s) => ({ ...s, [b.symbol]: v }))}
-                  onSet={() => void run(`pct-${b.symbol}`, () => updateConfig(b.symbol, { position_size_pct: Number(pctVal) || 0 }))}
+                  onSet={() => void run(`pct-${b.symbol}`, () => updateConfig(b.symbol, { position_size_pct: Number(pctVal) || 0 }), () => clearDraft(setPcts, b.symbol))}
                   disabled={busy !== null}
                   title="Маржа как % от свободного депозита. Явная маржа в USD важнее процента."
                 />
@@ -528,6 +545,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       onClick={() =>
                         void run(`size-${b.symbol}`, () =>
                           updateConfig(b.symbol, { position_size_usd: Number(sizeVal) || 0 }),
+                          () => clearDraft(setSizes, b.symbol),
                         )
                       }
                     >
@@ -547,6 +565,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       onClick={() =>
                         void run(`pct-${b.symbol}`, () =>
                           updateConfig(b.symbol, { position_size_pct: Number(pctVal) || 0 }),
+                          () => clearDraft(setPcts, b.symbol),
                         )
                       }
                     >

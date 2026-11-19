@@ -16,7 +16,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2, AlertTriangle, Zap,
-  Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2, Wallet, Coins,
+  Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2, Wallet, Coins, Layers,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -125,6 +125,7 @@ interface AccountSnapshot {
   wallet: number;
   upnl: number;
   margin: number;
+  open_trades: number;
 }
 
 interface BacktestParams {
@@ -481,12 +482,13 @@ function StatsRow({ stats, account }: { stats: Stats[]; account: AccountSnapshot
   const totalWins = stats.reduce((s, x) => s + x.wins, 0);
 
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4 xl:grid-cols-7">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4 xl:grid-cols-8">
       {[
         { icon: <DollarSign className="w-4 h-4" />, label: "Total PnL", value: `${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 2)} USDT`, color: totalPnl >= 0 ? "text-green-400" : "text-red-400" },
         { icon: <Wallet className="w-4 h-4" />, label: "Баланс (биржа)", value: account.wallet > 0 ? `$${fmt(account.wallet, 2)}` : "—", color: "text-white" },
         { icon: <Coins className="w-4 h-4" />, label: "Маржа всего", value: account.margin > 0 ? `$${fmt(account.margin, 3)}` : "—", color: "text-white" },
         { icon: <TrendingUp className="w-4 h-4" />, label: "Открытый PnL", value: `${account.upnl >= 0 ? "+" : ""}${fmt(account.upnl, 3)} USDT`, color: account.upnl >= 0 ? "text-green-400" : "text-red-400" },
+        { icon: <Layers className="w-4 h-4" />, label: "Открытые сделки", value: String(account.open_trades), color: "text-white" },
         { icon: <BarChart2 className="w-4 h-4" />, label: "Total Trades", value: String(totalTrades), color: "text-white" },
         { icon: <TrendingUp className="w-4 h-4" />, label: "Win Rate", value: totalTrades ? `${((totalWins / totalTrades) * 100).toFixed(1)}%` : "—", color: "text-white" },
         { icon: <Activity className="w-4 h-4" />, label: "Symbols", value: String(stats.length), color: "text-white" },
@@ -873,7 +875,7 @@ export default function Dashboard() {
   // поэтому проверка по нему никогда бы не нашла отклонённую сделку.
   const [allTradesRaw, setAllTradesRaw] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
-  const [account, setAccount] = useState<AccountSnapshot>({ wallet: 0, upnl: 0, margin: 0 });
+  const [account, setAccount] = useState<AccountSnapshot>({ wallet: 0, upnl: 0, margin: 0, open_trades: 0 });
   const [reverseCounts, setReverseCounts] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
@@ -996,6 +998,12 @@ export default function Dashboard() {
       if (rev.status === "fulfilled") {
         const rows = Array.isArray(rev.value?.trades) ? rev.value.trades : [];
         setReverseCounts(countReverses(rows));
+        // Глобальный список (без фильтра по монете) — отсюда берём количество
+        // открытых сделок, чтобы карточка не зависела от выбранного символа.
+        setAccount(prev => ({
+          ...prev,
+          open_trades: rows.filter((tr: Trade) => tr.is_open).length,
+        }));
       }
       setLastRefresh(new Date());
     } catch {
@@ -1015,12 +1023,13 @@ export default function Dashboard() {
   const [syncing, setSyncing] = useState(false);
   const [apiUp, setApiUp] = useState(true);
 
-  // Массовое задание размера позиции (только testnet): в live размер задаётся
-  // каждому боту отдельно в LivePanel, чтобы нельзя было случайно изменить
-  // объём сразу на всех ботах с реальными деньгами.
+  // Массовое задание маржи (position_size_pct) доступно и в testnet, и в live;
+  // персональная настройка каждого бота остаётся во вкладке LIVE.
+  // Перезапуск после применения по умолчанию включён только в testnet: в live
+  // это отдельное осознанное действие (иначе Apply дёргал бы все процессы).
   const [sizePctAll, setSizePctAll] = useState("");
   const [applyingSize, setApplyingSize] = useState(false);
-  const [restartAfterApply, setRestartAfterApply] = useState(true);
+  const [restartAfterApply, setRestartAfterApply] = useState(!IS_LIVE);
   const [restarting, setRestarting] = useState(false);
 
   // Position limits (testnet only): apply to all bots
@@ -1203,13 +1212,18 @@ export default function Dashboard() {
   };
 
   /**
-   * Задать размер позиции (position_size_pct) сразу ВСЕМ ботам окружения.
-   * Только для testnet: в live размер меняется по одному боту (LivePanel),
-   * чтобы одним кликом не изменить объём сразу на реальных деньгах.
+   * Задать маржу (position_size_pct) сразу ВСЕМ ботам окружения — и testnet,
+   * и live. Маржа = % от СВОБОДНОГО депозита (availableBalance), позиция =
+   * маржа × плечо.
    *
-   * Важно: боты читают конфиг при старте, поэтому уже запущенные боты новый
-   * размер подхватят только после перезапуска. Поэтому рядом с Apply есть
-   * переключатель «перезапустить после применения».
+   * position_size_usd явно сбрасываем в 0: в боте он имеет приоритет над
+   * процентом, поэтому без сброса массовое значение не применилось бы к
+   * ботам с персональной USD-маржой.
+   *
+   * Важно: боты перечитывают config_*.yaml на ходу (hot reload: watcher раз в
+   * 5 с и перед каждым входом), поэтому запущенные процессы подхватывают новое
+   * значение без рестарта. Галочка «перезапустить сейчас» нужна только для
+   * ботов, запущенных со старым кодом, или если требуется структурное поле.
    */
   const handleApplySizeToAll = async () => {
     const raw = sizePctAll.trim().replace(",", ".");
@@ -1225,14 +1239,18 @@ export default function Dashboard() {
     }
     const doRestart = restartAfterApply;
     if (!confirm(
-      `Задать размер позиции ${pct}% депозита сразу ${targets.length} ботам?\n\n` +
-      "Маржа = депозит × " + pct + "%, позиция = маржа × плечо.\n\n" +
-      "Изменение запишется в БД и в config_*.yaml. Уже открытые позиции и их " +
-      "reverse-цепочки продолжат дорабатываться на прежнем размере — новый " +
-      "применится только к следующим входам." +
+      `Задать маржу ${pct}% от свободного депозита сразу ${targets.length} ботам?\n\n` +
+      "Маржа = availableBalance × " + pct + "%, позиция = маржа × плечо.\n" +
+      "Персональная маржа в USD у этих ботов будет сброшена в 0 (иначе она " +
+      "имеет приоритет над процентом).\n\n" +
+      "Изменение запишется в БД и в config_*.yaml и сразу отобразится у всех " +
+      "ботов во вкладке LIVE. Запущенные боты подхватят его автоматически " +
+      "(hot reload: watcher раз в 5 с или перед следующим входом). Уже открытые " +
+      "позиции и их reverse-цепочки продолжат дорабатываться на прежнем " +
+      "размере — новый применится только к следующим входам." +
       (doRestart
-        ? `\n\nЗапущенные боты будут перезапущены, чтобы подхватить новое значение; остановленные останутся остановленными (${targets.length} всего, перезапустятся только работающие).`
-        : "\n\nБоты НЕ будут перезапущены: значение подхватится при следующем старте.")
+        ? `\n\nДополнительно будут перезапущены запущенные боты (${targets.length} всего, перезапустятся только работающие); остановленные останутся остановленными.`
+        : "\n\nРестарт не требуется: значение подхватится на ходу.")
     )) return;
 
     setApplyingSize(true);
@@ -1245,7 +1263,9 @@ export default function Dashboard() {
       const chunk = targets.slice(i, i + CONCURRENCY);
       await Promise.all(chunk.map(async (symbol) => {
         try {
-          await updateConfig(symbol, { position_size_pct: pct });
+          // position_size_usd: 0 — снимаем персональную USD-маржу, иначе она
+          // перебивает процент в order_manager.
+          await updateConfig(symbol, { position_size_pct: pct, position_size_usd: 0 });
         } catch {
           failed.push(symbol);
         }
@@ -1256,8 +1276,8 @@ export default function Dashboard() {
     let restartInfo = "";
     if (doRestart) {
       // restartAllBots сам перезапускает только запущенных, поэтому
-      // «размер применён всем, перезапущены те, кто работал» — иначе Apply
-      // в testnet поднял бы и намеренно остановленных ботов.
+      // «маржа применена всем, перезапущены те, кто работал» — иначе Apply
+      // поднял бы и намеренно остановленных ботов.
       const { started, failed: failedStart } = await restartAllBots();
       restartInfo = ` Перезапущено: ${started}.`;
       failed.push(...failedStart);
@@ -1268,7 +1288,9 @@ export default function Dashboard() {
     setNotice(
       (failed.length
         ? `Готово с ошибками: обновлено ${targets.length - failed.length} из ${targets.length}. Проблемные: ${failed.join(", ")}.`
-        : `Готово: размер позиции ${pct}% задан всем ${targets.length} ботам.`) + restartInfo
+        : `Готово: маржа ${pct}% от свободного депозита задана всем ${targets.length} ботам.`) +
+      (doRestart ? "" : " Боты подхватят значение на ходу (≤5 с).") +
+      restartInfo
     );
     await load();
   };
@@ -1552,45 +1574,52 @@ export default function Dashboard() {
             <RefreshCw className={`w-4 h-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
             {restarting ? 'Restarting...' : 'Restart bots'}
           </Button>
-          {!IS_LIVE && (
-            <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
-              <label className="text-xs text-zinc-400 whitespace-nowrap" title="Маржа = % от депозита, позиция = маржа × плечо. Применяется только к НОВЫМ позициям: уже открытая позиция и её reverse-цепочка доторговываются на прежнем размере. Значение подхватят только перезапущенные боты.">
-                Позиция, % · всем ботам
-              </label>
+          <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
+            <label
+              className="text-xs text-zinc-400 whitespace-nowrap"
+              title={
+                "Маржа = % от СВОБОДНОГО депозита (availableBalance), позиция = маржа × плечо. " +
+                "Задаёт значение сразу всем ботам и сбрасывает их персональную маржу в USD. " +
+                "Применяется только к НОВЫМ позициям: уже открытая позиция и её reverse-цепочка " +
+                "доторговываются на прежнем размере. Запущенные боты подхватывают значение " +
+                "автоматически (hot reload, ≤5 с); рестарт нужен только для старого кода."
+              }
+            >
+              {IS_LIVE ? "Маржа, % · всем" : "Позиция, % · всем ботам"}
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              placeholder={String(displaySizePct)}
+              value={sizePctAll || String(displaySizePct)}
+              onChange={e => setSizePctAll(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void handleApplySizeToAll(); }}
+              className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleApplySizeToAll}
+              disabled={applyingSize}
+              className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+            >
+              {applyingSize ? "Working..." : "Apply"}
+            </Button>
+            <label
+              className="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap cursor-pointer"
+              title="Обычно не требуется: боты перечитывают config_*.yaml на ходу. Нужно только для ботов, запущенных со старым кодом, или для структурных полей (плечо, таймфрейм)."
+            >
               <input
-                type="number"
-                step="0.1"
-                min="0"
-                placeholder={String(displaySizePct)}
-                value={sizePctAll || String(displaySizePct)}
-                onChange={e => setSizePctAll(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") void handleApplySizeToAll(); }}
-                className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleApplySizeToAll}
+                type="checkbox"
+                checked={restartAfterApply}
+                onChange={e => setRestartAfterApply(e.target.checked)}
                 disabled={applyingSize}
-                className="border-zinc-700 text-zinc-200 hover:bg-zinc-800"
-              >
-                {applyingSize ? "Working..." : "Apply"}
-              </Button>
-              <label
-                className="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap cursor-pointer"
-                title="После применения перезапустить ботов, чтобы они подхватили новое значение. Открытые позиции сохранятся: боты восстановят их из state-файлов."
-              >
-                <input
-                  type="checkbox"
-                  checked={restartAfterApply}
-                  onChange={e => setRestartAfterApply(e.target.checked)}
-                  disabled={applyingSize}
-                  className="accent-zinc-400"
-                />
-                перезапустить
-              </label>
-            </div>
-          )}
+                className="accent-zinc-400"
+              />
+              перезапустить сейчас
+            </label>
+          </div>
           {!IS_LIVE && (
             <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
               <label className="text-xs text-zinc-400 whitespace-nowrap" title="Время протухания позиции в минутах. Позиция старше этого времени не занимает слот max_positions. 0 = выкл. Применится к новым позициям.">
