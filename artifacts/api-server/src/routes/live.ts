@@ -175,6 +175,8 @@ router.get("/daily-loss", async (_req, res) => {
       realized: snap.realized,
       unrealized: snap.unrealized,
       baseline: snap.baseline,
+      baseline_stored: snap.baseline_stored,
+      transfers_usd: snap.transfers_usd,
       baseline_source: snap.baseline_source,
       remaining_usd: snap.remaining_usd,
       delta: snap.total,

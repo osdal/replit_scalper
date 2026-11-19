@@ -17,7 +17,7 @@ from binance.enums import (
     TIME_IN_FORCE_GTC,
 )
 
-from config import Config, reverse_w_pct_for_step
+from config import Config, reload_config_if_changed, reverse_w_pct_for_step
 from rate_limit import is_ban_error, reset_ban_state, wait_for_ban
 from strategy import Signal
 
@@ -229,10 +229,14 @@ def _extract_notional_cap(data: object, leverage: int) -> Optional[float]:
 
 
 class OrderManager:
-    def __init__(self, cfg: Config, logger: logging.Logger, client: Optional[AsyncClient] = None):
+    def __init__(self, cfg: Config, logger: logging.Logger, client: Optional[AsyncClient] = None,
+                 config_path: Optional[str] = None):
         self.cfg = cfg
         self.log = logger
         self.client = client
+        # Путь к YAML: перед каждым входом перечитываем файл, чтобы правка
+        # размера из дашборда применялась без рестарта процесса.
+        self.config_path = config_path
         self._step_size: Optional[float] = None
         self._price_precision: Optional[int] = None
         self._tick_size: Optional[float] = None
@@ -2025,6 +2029,13 @@ class OrderManager:
         """
         if mode is None:
             mode = self.cfg.mode
+        # Перечитываем YAML перед каждым входом: дашборд пишет правки в файл,
+        # бот применяет их без рестарта (размер, лимиты, уровни новых позиций).
+        if self.config_path:
+            try:
+                reload_config_if_changed(self.cfg, self.config_path, self.log)
+            except Exception as e:
+                self.log.warning(f"[CONFIG] hot reload before entry failed: {e}")
         balance = await self.get_balance(mode)
         is_recovery = recovery_target is not None
 

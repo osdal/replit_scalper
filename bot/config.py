@@ -175,6 +175,134 @@ def update_yaml_config(symbol: str, params: dict, bot_dir: str = ".") -> None:
 
 
 # --------------------------------------------------------------------------- #
+#  Горячее перечитывание конфига (без рестарта бота).
+#
+#  Дашборд пишет правки в config_<symbol>.yaml (PUT /bots/:symbol/config →
+#  updateYamlConfig). Раньше бот читал файл один раз при старте, поэтому
+#  изменение размера позиции/лимитов начинало действовать только после
+#  рестарта процесса. Теперь open_position() и фоновый watcher вызывают
+#  reload_config_if_changed(): при изменении mtime/размера файла значения
+#  применяются к живому объекту Config (тот же объект держат OrderManager и
+#  PositionTracker).
+#
+#  Перечитываются только runtime-safe поля: сайзинг, потолки, уровни новых
+#  позиций, риск-лимиты, reverse-параметры. Структурные поля (timeframe,
+#  leverage, индикаторные периоды, режим) требуют рестарта — по ним пишем
+#  предупреждение, но НЕ применяем: менять их на ходу нельзя без перестройки
+#  потоков данных и настройки плеча на бирже.
+# --------------------------------------------------------------------------- #
+
+HOT_RELOAD_FIELDS = frozenset({
+    # Сайзинг и потолки (то, ради чего чаще всего лезут в дашборд).
+    "position_size_pct", "position_size_usd", "margin_pct", "risk_pct",
+    "fixed_qty", "fixed_notional_usd", "fixed_risk_usd",
+    "max_position_notional_usd", "max_position_pct_equity",
+    # Уровни и фильтры входа: применяются к НОВЫМ позициям, открытую не трогают.
+    "sl_pct", "tp1_pct", "tp2_pct", "tp1_close_pct", "use_fixed_tp_sl",
+    "preset_sl_pct", "preset_tp_pct",
+    "atr_tp_multiplier", "atr_tp_multiplier_long", "atr_tp_multiplier_short",
+    "atr_tp2_multiplier",
+    "min_consensus", "consensus_flat", "consensus_weak", "consensus_trend",
+    "trend_block_short", "block_hours_utc", "excluded_presets", "enabled_presets",
+    "adx_threshold", "time_profit_close_hours", "max_open_per_cycle",
+    "signal_cooldown_min", "rsi_low", "rsi_high", "volume_multiplier", "entry_on",
+    # Лимиты управления позициями и дневной стоп.
+    "expired_after_minutes", "max_positions", "max_positions_with_expired",
+    "slot_release_minutes", "position_loss_pct", "total_loss_pct",
+    # Reverse-цепочка и комиссии.
+    "reverse_chain_max", "reverse_breakeven_pct", "reverse_sl_pct",
+    "reverse_profit_pct", "reverse_fee_buffer_pct", "reverse_cum_loss_pct",
+    "reverse_cum_ref_deposit_usd", "taker_fee_pct", "maker_fee_pct",
+    "exchange_sl_backstop_enabled", "exchange_sl_backstop_pct",
+    # LLM-фильтр (влияет только на новые сигналы).
+    "llm_enabled", "llm_mock", "llm_confidence_threshold", "llm_calls_per_min",
+    "llm_per_symbol_cooldown_min", "llm_backoff_sec", "llm_short_backoff_sec",
+    "llm_provider_retry_delay_sec", "llm_model", "llm_fallback_models",
+})
+
+# Поля, которые нельзя менять на ходу (нужен рестарт процесса).
+RESTART_REQUIRED_FIELDS = frozenset({
+    "symbol", "timeframe", "leverage", "mode", "auto_mode", "trade_mode",
+    "paper_balance", "log_file", "backtest_start", "backtest_end",
+    "ema_fast", "ema_slow", "volume_ma_period", "adx_period", "rsi_period",
+    "macd_fast", "macd_slow", "macd_signal", "bb_period", "bb_std",
+    "htf_enabled", "htf_timeframe", "htf_ema_fast", "htf_ema_slow",
+    "htf2_enabled", "htf2_timeframe", "htf2_ema_fast", "htf2_ema_slow",
+    "commission_pct", "llm_api_key", "gemini_api_key", "gemini_model",
+    "groq_api_key", "groq_model",
+})
+
+# (mtime_ns, size) последней успешно применённой версии файла — по абсолютному пути.
+_HOT_RELOAD_STATE: dict = {}
+
+
+def reload_config_if_changed(cfg: Config, path: str, logger=None, force: bool = False) -> bool:
+    """Перечитывает YAML и применяет runtime-safe поля, если файл изменился.
+
+    Возвращает True, если хотя бы одно поле было обновлено. Ошибки чтения/парсинга
+    не роняют бота: старые значения остаются, попытка повторится при следующем
+    вызове (mtime запоминается только после успешного применения).
+
+    ``force=True`` игнорирует кэш mtime — используется в тестах.
+    """
+    if not path:
+        return False
+    try:
+        abspath = os.path.abspath(path)
+        st = os.stat(abspath)
+    except OSError:
+        return False
+
+    sig = (st.st_mtime_ns, st.st_size)
+    if not force and _HOT_RELOAD_STATE.get(abspath) == sig:
+        return False
+
+    try:
+        fresh = load_config(abspath)
+    except Exception as e:  # неполный/битый YAML (например, в момент записи)
+        if logger is not None:
+            logger.warning(f"[CONFIG] hot reload skipped — cannot parse {path}: {e}")
+        return False
+
+    if fresh.symbol != cfg.symbol:
+        if logger is not None:
+            logger.warning(
+                f"[CONFIG] hot reload skipped — {path} is for {fresh.symbol}, "
+                f"this process is {cfg.symbol}"
+            )
+        _HOT_RELOAD_STATE[abspath] = sig
+        return False
+
+    applied = []
+    needs_restart = []
+    for f in dataclasses.fields(Config):
+        name = f.name
+        old = getattr(cfg, name, None)
+        new = getattr(fresh, name, None)
+        if old == new:
+            continue
+        if name in HOT_RELOAD_FIELDS:
+            setattr(cfg, name, new)
+            applied.append(f"{name}={old}→{new}")
+        elif name in RESTART_REQUIRED_FIELDS:
+            needs_restart.append(f"{name}={old}→{new}")
+
+    # Запоминаем версию только после успешного разбора: если файл дописывался,
+    # повторная попытка случится на следующем вызове.
+    _HOT_RELOAD_STATE[abspath] = sig
+
+    if logger is not None:
+        if applied:
+            logger.info("[CONFIG] hot reload applied | " + ", ".join(applied))
+        if needs_restart:
+            logger.warning(
+                "[CONFIG] changed but requires restart (not applied) | "
+                + ", ".join(needs_restart)
+            )
+    return bool(applied)
+
+
+# --------------------------------------------------------------------------- #
 #  Reverse-chain helpers: ступенчатая цель и виртуальный SL по шагу цепочки.
 # --------------------------------------------------------------------------- #
 def _reverse_step_doubling() -> bool:

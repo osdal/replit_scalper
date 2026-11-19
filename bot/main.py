@@ -17,7 +17,7 @@ from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
 
 
-from config import load_config
+from config import load_config, reload_config_if_changed
 from logger import get_logger, get_events_logger
 from market_data import (
     PRICE_WS_MAX_AGE_SEC,
@@ -2121,7 +2121,8 @@ async def main():
             await run_backtest(cfg, client, log)
             return
 
-        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events, Notifier())
+        await _run_live_or_paper(cfg, client, log, reporter, recovery, shutdown_event, events, Notifier(),
+                                 config_path=config_path)
 
     finally:
         _release_lock(cfg.symbol)
@@ -2138,10 +2139,30 @@ async def _run_live_or_paper(
     shutdown_event: asyncio.Event,
     events: logging.Logger,
     notifier: Notifier,
+    config_path: str = "",
 ):
-    order_mgr = OrderManager(cfg, log, client=client)
+    order_mgr = OrderManager(cfg, log, client=client, config_path=config_path or None)
     tracker   = PositionTracker(cfg, log, reporter=reporter, order_mgr=order_mgr, notifier=notifier)
     handler   = SignalHandler(cfg, log)
+
+    # Горячее перечитывание конфига: дашборд пишет правки в config_<symbol>.yaml,
+    # бот применяет их без рестарта. open_position() перечитывает файл перед
+    # каждым входом (гарантия для сайзинга), а этот watcher — чтобы лимиты
+    # управления позицией (expired_after_minutes, position_loss_pct и т.п.)
+    # обновлялись и без нового входа.
+    _config_task = None
+    if config_path:
+        async def _config_hot_reload_watcher():
+            while not shutdown_event.is_set():
+                await asyncio.sleep(5)
+                if shutdown_event.is_set():
+                    break
+                try:
+                    reload_config_if_changed(cfg, config_path, log)
+                except Exception as e:
+                    log.warning(f"[CONFIG] hot reload watcher failed: {e}")
+
+        _config_task = asyncio.create_task(_config_hot_reload_watcher())
 
     # Плечо зажимается по максимуму символа сразу на старте (и логируется там
     # же), чтобы первое же открытие позиции не упало с -4028. _set_leverage

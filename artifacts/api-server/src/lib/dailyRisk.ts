@@ -125,6 +125,73 @@ export async function resetBaselineTo(balance: number, source: BaselineSource = 
   return state;
 }
 
+/**
+ * Чистый ввод/вывод средств на фьючерсный счёт с момента фиксации базы.
+ *
+ * Депозит/вывод — не прибыль и не убыток, поэтому в `net` он не попадает.
+ * Но капитал дня он меняет: дневной лимит (% от базы) обязан считаться от
+ * базы С учётом переводов. Иначе депозит $32 при базе $9.3 оставлял лимит
+ * $0.93 — 2.2% от реального счёта вместо 10%.
+ *
+ * Кэш: /api/trading/check вызывается по каждому сигналу, а /fapi/v1/income
+ * расходует вес. 60с — компромисс: депозит подхватится в пределах минуты.
+ */
+const TRANSFER_TYPES = ["TRANSFER", "INTERNAL_TRANSFER"] as const;
+const TRANSFER_CACHE_TTL_MS = 60_000;
+const TRANSFER_ERROR_TTL_MS = 5_000;
+let transferCache: { day: string; since: string; value: number; ok: boolean; ts: number } | null = null;
+
+export async function transfersNetSince(
+  sinceIso: string,
+  now: Date = new Date(),
+): Promise<{ value: number; ok: boolean }> {
+  const day = dayKey(now);
+  const nowMs = Date.now();
+  if (
+    transferCache
+    && transferCache.day === day
+    && transferCache.since === sinceIso
+    && nowMs - transferCache.ts < (transferCache.ok ? TRANSFER_CACHE_TTL_MS : TRANSFER_ERROR_TTL_MS)
+  ) {
+    return { value: transferCache.value, ok: transferCache.ok };
+  }
+
+  const dayStart = Date.parse(dayStartUtcIso(now));
+  const parsed = Date.parse(sinceIso);
+  const startMs = Number.isFinite(parsed) ? Math.max(parsed, dayStart) : dayStart;
+
+  let sum = 0;
+  let anyOk = false;
+  for (const type of TRANSFER_TYPES) {
+    try {
+      const raw = await binanceRequest("GET", "/fapi/v1/income", {
+        incomeType: type,
+        startTime: startMs,
+        limit: 1000,
+      });
+      const list: Array<Record<string, unknown>> = Array.isArray(raw)
+        ? raw
+        : raw
+          ? [raw as Record<string, unknown>]
+          : [];
+      for (const it of list) {
+        const t = Number(it?.time ?? 0) || 0;
+        if (t > 0 && t < startMs) continue;
+        sum += Number(it?.income ?? 0) || 0;
+      }
+      anyOk = true;
+    } catch (e) {
+      // Один тип не должен обнулять другой: TRANSFER — основной канал
+      // депозитов, INTERNAL_TRANSFER может быть недоступен на аккаунте.
+      console.error(`[dailyRisk] transfers ${type} fetch failed:`, String(e));
+    }
+  }
+
+  const value = anyOk ? sum : 0;
+  transferCache = { day, since: sinceIso, value, ok: anyOk, ts: nowMs };
+  return { value, ok: anyOk };
+}
+
 /** Реализованный net закрытых сегодня сделок (pnl в БД уже net of fees). */
 export async function todayRealizedNet(now: Date = new Date()): Promise<number> {
   const start = dayStartUtcIso(now);
@@ -240,7 +307,12 @@ export type DailyRiskSnapshot = {
   day: string;
   mode: DailyLimitMode;
   pct: number;
+  /** База дня С учётом переводов (депозитов/выводов): от неё считается лимит. */
   baseline: number;
+  /** База без переводов — как записана в data/daily_baseline_<env>.json. */
+  baseline_stored: number;
+  /** Чистые переводы с момента фиксации базы (депозит +, вывод −). */
+  transfers_usd: number;
   baseline_source: BaselineSource;
   limit_usd: number;
   realized: number;
@@ -271,6 +343,10 @@ export async function dailyRiskSnapshot(opts?: {
     ? await resolveTotalLossPct(opts?.pct)
     : 0;
   const baseline = await ensureBaseline();
+  const transfers = await transfersNetSince(baseline.ts, opts?.now);
+  // Депозит/вывод меняет капитал дня, но не является прибылью: net по-прежнему
+  // считается только по реализованному/плавающему PnL.
+  const effectiveBaseline = Number((baseline.balance + transfers.value).toFixed(4));
   const configuredUsd = Number(opts?.configuredUsd ?? process.env.DAILY_LOSS_LIMIT_USD ?? 0);
 
   const realized = await todayRealizedNet(opts?.now);
@@ -278,14 +354,16 @@ export async function dailyRiskSnapshot(opts?: {
   const total = realized + un.value;
 
   const limitUsd = mode === "pct"
-    ? (baseline.balance * pct) / 100
+    ? (effectiveBaseline * pct) / 100
     : (Number.isFinite(configuredUsd) && configuredUsd > 0 ? configuredUsd : 0);
 
   return {
     day: baseline.day,
     mode,
     pct,
-    baseline: baseline.balance,
+    baseline: effectiveBaseline,
+    baseline_stored: baseline.balance,
+    transfers_usd: Number(transfers.value.toFixed(4)),
     baseline_source: baseline.source,
     limit_usd: Number(limitUsd.toFixed(2)),
     realized: Number(realized.toFixed(2)),

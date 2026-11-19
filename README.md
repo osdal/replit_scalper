@@ -1951,8 +1951,11 @@ python3 -m unittest discover -s tests -t . -v     # 12 тестов
   **Europe/Kyiv** (не UTC).
 - База — `data/daily_baseline_<env>.json`: фиксируется один раз в начале дня как `wallet − realized`.
 - Лимит — `база × total_loss_pct / 100` (live: 10 %); при `net <= -лимит` — stop + flatten.
+- **Переводы средств** (`TRANSFER` / `INTERNAL_TRANSFER` из `/fapi/v1/income`) с момента фиксации базы
+  добавляются к базе (`transfers_usd`): депозит увеличивает капитал дня и лимит, но **не** считается
+  прибылью в `net`. Кэш 60 с. Подробнее — §19.13.
 - `data/global_limits_<env>.json` (правится из дашборда, применяется без рестарта):
-  `max_positions: 3`, `max_positions_with_expired: 6`, `max_position_loss_pct: 20`.
+  `max_positions: 5`, `max_positions_with_expired: 10`, `max_position_loss_pct: 20`.
 - Убыток позиции ограничен **одним** глобальным `max_position_loss_pct`; per-bot `position_loss_pct`
   и env `LIVE_MAX_DRAWDOWN_PCT` не используются, `checkMaxDrawdown()` в `live.ts` — no-op.
 - «Протухшие» цепочки: `EXPIRED_HARD_CLOSE_HOURS=0` (по возрасту не закрываются) и закрытие только когда
@@ -1990,5 +1993,60 @@ docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py --hours 48
 cd /opt/trading-bot && python3 -m unittest discover -s tests -t . -v
 ```
 Ожидаемо: `wallet` одинаковый во всех трёх эндпоинтах (spread 0), `mismatched=0`, тесты `OK`.
+
+### 19.12 Горячее перечитывание конфига (без рестарта бота)
+
+**Проблема.** Дашборд пишет правки в `bot/configs/live/config_<symbol>.yaml`
+(`PUT /api/bots/:symbol/config` → `updateYamlConfig`), но бот читал YAML **один раз при старте**
+(`bot/main.py` → `load_config`). Изменение `position_size_pct` в UI не действовало, пока процесс
+не перезапустят. Реальный кейс 19.11.2026: конфиги переписаны на `0.3` в 08:22, а боты, запущенные
+в 07:28–07:31, продолжали считать старые `0.8%`.
+
+**Решение.** `bot/config.py` → `reload_config_if_changed(cfg, path, logger)`:
+- сравнивает `(st_mtime_ns, st_size)` файла; при изменении перечитывает YAML через `load_config()`;
+- применяет **только runtime-safe поля** (`HOT_RELOAD_FIELDS`): сайзинг, потолки нотионала,
+  `sl_pct`/`tp*` (для новых позиций), лимиты `max_positions`/`expired_after_minutes`/
+  `position_loss_pct`/`total_loss_pct`, reverse-параметры, комиссии, LLM-настройки;
+- структурные поля (`timeframe`, `leverage`, `mode`, периоды EMA/RSI/MACD/BB, HTF, `paper_balance`)
+  **не применяет** и пишет `[CONFIG] changed but requires restart` — их смена на ходу сломала бы
+  потоки данных и плечо на бирже;
+- битый/недописанный YAML не роняет бота: старые значения остаются, mtime запоминается только после
+  успешного применения, поэтому попытка повторится;
+- в лог: `[CONFIG] hot reload applied | position_size_pct=0.8→0.3, ...`.
+
+**Где вызывается:**
+- `OrderManager.open_position()` — перед **каждым входом** (гарантия для сайзинга);
+- фоновый watcher в `_run_live_or_paper()` раз в 5 с — чтобы риск-лимиты обновлялись и без нового входа.
+
+**Ограничения:**
+- код действует на процессе, запущенном **с этой версией**; уже работающие боты подхватят его
+  только после своего рестарта (сам механизм — уже без рестартов);
+- `leverage` из дашборда по-прежнему требует рестарта (плечо выставляется на бирже при старте);
+- открытая позиция размер не меняет — сайзинг фиксируется при входе.
+
+Тесты: `cd bot && python3 -m unittest discover -s tests -p 'test_config_hot_reload.py' -v` (6 тестов).
+
+### 19.13 Депозит и дневная база
+
+**Проблема.** База дня фиксируется один раз (`wallet − realized`) и хранится в
+`data/daily_baseline_<env>.json`. Если после этого пополнить счёт, база остаётся старой:
+19.11 при базе `9.3024` депозит `+32.25915` поднял кошелёк до `41.65`, а дневной лимит остался
+`9.3024 × 10% = $0.93` — фактически 2.2 % от счёта вместо 10 %. Депозит при этом **не** попадал
+в `net` (net считается по PnL), поэтому «прибыли» не появлялось — но и риск-бюджет не рос.
+
+**Решение.** `lib/dailyRisk.ts`:
+- `transfersNetSince(since, now)` читает `/fapi/v1/income` по `TRANSFER` и `INTERNAL_TRANSFER`
+  от `max(baseline.ts, начало дня по Киеву)`; сумма — `transfers_usd`;
+- эффективная база = `baseline.balance + transfers_usd`; от неё считается лимит;
+- `net` по-прежнему = `realized + unrealized` (депозит/вывод не прибыль и не убыток);
+- кэш 60 с (успех) / 5 с (ошибка), чтобы `/api/trading/check` не дёргал биржу на каждый сигнал;
+- в `/api/live/daily-loss` добавлены поля `baseline_stored` (как в файле) и `transfers_usd`.
+
+Пример 19.11.2026 после депозита: база `9.3024 + 32.2591 = 41.5615`, лимит `$4.16` (10 %),
+`net ≈ 0`, `remaining ≈ $4.16`. Депозит подхватывается в пределах минуты после зачисления.
+
+Важно: база и лимит — про **капитал дня**; размер новой позиции считается отдельно от
+`availableBalance` (§3.1, §19.12), поэтому депозит увеличивает и его.
+
 
 
