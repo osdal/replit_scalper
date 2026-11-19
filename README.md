@@ -2309,5 +2309,43 @@ sqlite3 data/bot_live.db "SELECT name FROM sqlite_master WHERE type='index' AND 
 ps -eo args= | grep -c 'bot/main.py'                                                    # 21 после запуска
 ```
 
+### 22.9 Фактическое применение (19.11.2026, коммит `cf4ceb6`)
+
+Миграция применена на живой БД при перезапуске `replit_scalper-api-live`:
+
+```
+Created client system@local (id=1)
+Migrated bots → instances (id/bot_key/client_id), 47 columns
+Done
+```
+
+До рестарта сохранены снимок и бэкап:
+`/tmp/opencode/pre_restart_snapshot.txt`, `/tmp/opencode/bot_live_pre_restart.db`.
+
+**Результат рестарта**
+
+| Проверка | Результат |
+|---|---|
+| Боты | 21 процесс, `is_running=21`, `[start] ok=true` у всех 21 |
+| Позиции восстановлено | 9 из 10: `Restored saved levels` → `TP limit already present` → `Backstop algo already live` |
+| ZECUSDT | TP сработал во время простоя: `#53070` закрыт сверкой с биржей, `pnl=0.1265`, `exit_reason=TP1`, state удалён |
+| Открытых сделок | 9; у всех есть state-файл, orphan-файлов нет |
+| Heartbeat / stop_reason | свежий у всех 21 / пуст |
+| Комиссия по `#53070` | `credit +0.1265`, `commission −0.0126` (10 %), баланс и HWM `0.7928` |
+| Дубли | `credit`/`commission` — по одной на сделку; `rejected` с кредитом — 0 |
+| `trades.bot_id` | заполнен у всех 12 479 сделок, битых ссылок нет |
+| `bots.symbol ↔ trades.symbol` | несовпадений 0 |
+| Платформенные таблицы | `clients=1`, `client_accounts=1`, ключи/журнал/аудит пусты |
+| API | `/api/healthz` → ok; ошибок в логах нет |
+
+**Проверка торговых инвариантов после рестарта**
+
+- Лимит убытка позиции — 20 % депозита: `data/global_limits_live.json` → `max_position_loss_pct: 20`. Per-bot `position_loss_pct` не используется (`checkMaxDrawdown()` — no-op), поэтому значения 5 % в 4 конфигах не снижают порог.
+- `EXPIRED_HARD_CLOSE_HOURS` не задан (0): принудительного закрытия протухших позиций в минус нет; закрытие только при `net ≥ комиссия выхода + $0.02`.
+- Дневной лимит — отдельный бюджет 10 % от базы (§19.7), граница Europe/Kyiv; на момент проверки `tripped=false`, `remaining_usd=4.49`. Не путать с лимитом убытка позиции.
+- Плечо 75 и `position_size_pct=0.3` сохранились у всех 40 ботов.
+
+**Известное ограничение:** при 21 боте встречается `[RATE_LIMIT] demand 70–80s` (общий лимит Binance, `positionRisk` = 5 вес на бота). При 40 ботах (5 клиентов × 8) нужен общий ограничитель запросов.
+
 ---
 
