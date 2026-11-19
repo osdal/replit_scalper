@@ -45,6 +45,11 @@ DEFAULT_DRIFT_SEC = 180
 # Допуск fallback-привязки одиночной ноги по entry/exit (закрытие «зависло»,
 # exit_time записан в момент SL, а филл случился позже).
 FALLBACK_DRIFT_MS = 15 * 60 * 1000
+# Допуск на «нулевую» позицию: сумма qty из userTrades не бинарно точна
+# (-3.84 + 3.84 = 6.7e-16). Без нормализации такая позиция считалась
+# переворотом и порождала фантомную ногу на стыке циклов (#48714 ATOMUSDT:
+# len(cycle)=3 при chain_depth=2 -> skip).
+QTY_EPS = 1e-9
 # Насколько раньше entry_time мог фактически начаться цикл (entry_time — время
 # сигнала/первого филла; бывает на несколько минут раньше фактического входа).
 FIRST_ENTRY_LOOKBACK_MIN = 60
@@ -124,6 +129,8 @@ def _round_trips(fills: list) -> list:
         cur["commission"] -= commission
         cur["realized"] += realized
         new_pos = pos + signed
+        if abs(new_pos) <= QTY_EPS:
+            new_pos = 0.0
 
         flipped = (pos > 0 > new_pos) or (pos < 0 < new_pos)
         if flipped:
@@ -134,7 +141,7 @@ def _round_trips(fills: list) -> list:
             continue
 
         pos = new_pos
-        if abs(pos) < 1e-12:
+        if abs(pos) <= QTY_EPS:
             pos = 0.0
             cur["end"] = ts
             trips.append(cur)
@@ -165,7 +172,7 @@ def _align_flat(fills: list) -> list:
             continue
         out.append(f)
         pos += qty if f.get("side") == "BUY" else -qty
-        if abs(pos) < 1e-12:
+        if abs(pos) <= QTY_EPS:
             pos = 0.0
     return out
 
