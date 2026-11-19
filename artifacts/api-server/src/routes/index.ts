@@ -18,6 +18,7 @@ import gridsRouter        from "./grids";
 import gridEngineRouter   from "./grid-engine";
 import liveRouter          from "./live";
 import signalsRouter       from "./signals";
+import internalAccountRouter from "./internal-account";
 
 const router = Router();
 
@@ -41,5 +42,6 @@ router.use("/grids",        gridsRouter);
 router.use("/grid-engine",  gridEngineRouter);
 router.use("/live",          liveRouter);
 router.use("/signals",       signalsRouter);
+router.use("/internal-account", internalAccountRouter);
 
 export default router;

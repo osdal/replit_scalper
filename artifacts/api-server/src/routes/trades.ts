@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { and, eq, desc, sql, isNull } from "drizzle-orm";
+import { botsTable } from "@workspace/db/schema";
+import { creditTradeProfit } from "../lib/internalAccount";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -206,10 +208,46 @@ router.patch("/:id", async (req, res) => {
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: "No valid fields to update" });
     }
+    // Строка ДО обновления: кредит начисляем только на переходе open → closed.
+    // Повторные PATCH уже закрытой сделки (refinalize после residual flat,
+    // ручной ретрай) не должны начислять прибыль ещё раз.
+    const [prev] = await db.select().from(tradesTable).where(eq(tradesTable.id, id)).limit(1);
+    if (!prev) {
+      return res.status(404).json({ error: "Trade not found" });
+    }
+    const wasOpen = Boolean(Number((prev as any).is_open));
+
     const result = await db.update(tradesTable).set(updates).where(eq(tradesTable.id, id)).returning();
     if (result.length === 0) {
       return res.status(404).json({ error: "Trade not found" });
     }
+
+    // Авто-начисление комиссии на внутренний счёт при ЗАКРЫТИИ сделки с прибылью.
+    // Условия: строка была открыта, стала closed, есть реализованный pnl > 0.
+    // rejected-сделки не кредитуем даже при положительном pnl.
+    const updated = result[0] as any;
+    const nowClosed = updated.status === "closed" && Number(updated.is_open) === 0;
+    const pnl = Number(updated.pnl ?? 0);
+    if (wasOpen && nowClosed && pnl > 0 && updated.symbol) {
+      try {
+        const [bot] = await db
+          .select({ user_id: botsTable.user_id })
+          .from(botsTable)
+          .where(eq(botsTable.symbol, updated.symbol.toUpperCase()))
+          .limit(1);
+        const ownerId = bot?.user_id ?? null;
+        await creditTradeProfit({
+          tradeId: Number(updated.id),
+          pnlUsd: pnl,
+          symbol: updated.symbol,
+          userId: ownerId ? Number(ownerId) : undefined,
+        });
+      } catch (e) {
+        // Начисление комиссии не должно ломать обновление сделки.
+        console.error(`[internal-account] credit failed for trade #${updated.id}:`, String(e));
+      }
+    }
+
     res.json(result[0]);
   } catch (e) {
     res.status(500).json({ error: String(e) });

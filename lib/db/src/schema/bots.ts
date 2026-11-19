@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 
 export const botsTable = sqliteTable("bots", {
   symbol:             text("symbol").primaryKey(),
+  user_id:            integer("user_id"), // владелец бота (для внутреннего счёта при продаже)
   mode:               text("mode").notNull(),
   timeframe:          text("timeframe").notNull(),
   leverage:           integer("leverage").notNull(),

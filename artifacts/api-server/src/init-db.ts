@@ -17,7 +17,12 @@ config({ path: path.resolve(__dirname, "../../../.env"), override: false });
 // получив DATABASE_PATH до вызова config() выше, открыл бы НЕ ТУ БД —
 // для live это означало бы миграцию и правки карточек в testnet-базе.
 const { db } = await import("@workspace/db");
-const { botsTable } = await import("@workspace/db/schema");
+const {
+  botsTable,
+  usersTable,
+  userInternalAccountsTable,
+  internalTransactionsTable,
+} = await import("@workspace/db/schema");
 const { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } =
   await import("@workspace/db");
 const { sanitizeMaxPositions } = await import("./lib/slotReservations");
@@ -149,12 +154,79 @@ const botExtraCols: Array<[string, string]> = [
   ["reverse_chain_max", "INTEGER NOT NULL DEFAULT 10"],
   ["max_position_notional_usd", "REAL NOT NULL DEFAULT 0"],
   ["max_position_pct_equity", "REAL NOT NULL DEFAULT 0"],
+  ["user_id", "INTEGER"],
 ];
 for (const [col, ddl] of botExtraCols) {
   if (!botColNames.includes(col)) {
     await db.run(sql`ALTER TABLE bots ADD COLUMN ${sql.raw(col)} ${sql.raw(ddl)}`);
     console.log(`  Added column bots.${col}`);
   }
+}
+
+// Внутренние счета пользователей (комиссия 10% с прибыли при продаже ботов).
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'buyer',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS user_internal_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    balance_usd REAL NOT NULL DEFAULT 0,
+    high_water_mark_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS internal_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    balance_after_usd REAL NOT NULL,
+    related_trade_id INTEGER,
+    created_at TEXT NOT NULL
+  )
+`);
+// Один credit на сделку: защита от повторного начисления при ретраях PATCH
+// (refinalize, ручной повтор). Частичный индекс, чтобы не мешать commission
+// и другим типам транзакций по той же сделке.
+await db.run(sql`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_internal_credit_once
+  ON internal_transactions(related_trade_id)
+  WHERE type = 'credit'
+`);
+
+// Дефолтный пользователь для ботов, у которых пока нет владельца.
+const [defaultUser] = await db
+  .select()
+  .from(usersTable)
+  .where(sql`email = 'system@local'`)
+  .limit(1);
+let defaultUserId: number;
+if (!defaultUser) {
+  const [inserted] = await db
+    .insert(usersTable)
+    .values({ email: "system@local", password_hash: "", role: "owner" })
+    .returning();
+  defaultUserId = Number(inserted.id);
+  await db
+    .insert(userInternalAccountsTable)
+    .values({ user_id: defaultUserId, balance_usd: 0, high_water_mark_usd: 0 });
+  console.log(`  Created default user system@local (id=${defaultUserId})`);
+} else {
+  defaultUserId = Number(defaultUser.id);
+  await db
+    .insert(userInternalAccountsTable)
+    .values({ user_id: defaultUserId, balance_usd: 0, high_water_mark_usd: 0 })
+    .catch(() => { /* счёт уже есть */ });
 }
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (
@@ -280,6 +352,8 @@ for (const file of configs) {
         ? { position_loss_pct: Number(raw.position_loss_pct) } : {}),
       ...(raw.total_loss_pct !== undefined
         ? { total_loss_pct: Number(raw.total_loss_pct) } : {}),
+      // Владельца, назначенного вручную (продажа бота покупателю), не затираем.
+      user_id:          existing.user_id ?? defaultUserId,
       updated_at:       new Date().toISOString(),
     }).where(eq(botsTable.symbol, symbol));
     console.log(`  ${symbol} updated from ${file}`);
@@ -318,6 +392,7 @@ for (const file of configs) {
       max_positions_with_expired: 0,
       armed: BOT_ENV !== "live",
       relay_only: BOT_ENV === "live",
+      user_id: defaultUserId,
       updated_at: new Date().toISOString(),
   });
   console.log(`  Added ${symbol} from ${file}`);
