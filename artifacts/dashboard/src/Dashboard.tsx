@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -16,7 +16,7 @@ import {
 } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2, AlertTriangle, Zap,
-  Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2,
+  Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2, Wallet, Coins,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -117,6 +117,14 @@ interface Stats {
   total_pnl: number;
   avg_win: number;
   avg_loss: number;
+}
+
+// Сводка по счёту для верхних карточек: баланс/открытый PnL приходят с биржи
+// через /api/live/drawdown, маржа считается по открытым позициям ботов.
+interface AccountSnapshot {
+  wallet: number;
+  upnl: number;
+  margin: number;
 }
 
 interface BacktestParams {
@@ -259,6 +267,10 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
 
   const pos = bot.position;
   const isLong = pos?.direction === "LONG";
+  const markPrice = bot.current_price ?? pos?.entry_price ?? null;
+  const notional =
+    pos && markPrice != null ? pos.remaining_qty * markPrice : null;
+  const margin = notional != null && bot.leverage ? notional / bot.leverage : null;
   const unrealizedPnl = pos && bot.current_price
     ? isLong
       ? (bot.current_price - pos.entry_price) * pos.remaining_qty
@@ -267,7 +279,7 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
 
   return (
     <Card className="border border-zinc-800 bg-zinc-900 text-white">
-      <CardHeader className="pb-2 flex flex-wrap items-center justify-between gap-2">
+      <CardHeader className="flex flex-col gap-2 space-y-0 p-4 pb-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:p-6 sm:pb-2">
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-lg font-bold">{bot.symbol}</CardTitle>
           <Badge variant={bot.mode === "live" ? "destructive" : "secondary"} className="text-xs">
@@ -295,7 +307,7 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
             </Badge>
           )}
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 self-start sm:self-auto shrink-0">
         <Button
           size="sm"
           variant={bot.is_running ? "destructive" : "default"}
@@ -335,7 +347,7 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
         </div>
       </CardHeader>
 
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-3 p-4 pt-0 sm:p-6 sm:pt-0">
         <div className="flex justify-between text-sm">
           <span className="text-zinc-400">Price</span>
 <span className="font-mono font-semibold">
@@ -382,6 +394,14 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
               <span className="font-mono text-right">${fmt(pos.entry_price, 4)}</span>
               <span className="text-zinc-400">Qty</span>
               <span className="font-mono text-right">{pos.remaining_qty}</span>
+              <span className="text-zinc-400" title="Текущая стоимость остатка позиции: количество × текущая цена">Размер, $</span>
+              <span className="font-mono text-right">
+                {notional != null ? `$${fmt(notional, 2)}` : "—"}
+              </span>
+              <span className="text-zinc-400" title={`Маржа = стоимость позиции / плечо (${bot.leverage}x)`}>Маржа, $</span>
+              <span className="font-mono text-right">
+                {margin != null ? `$${fmt(margin, 3)}` : "—"}
+              </span>
               <span className="text-zinc-400">SL</span>
               <span className="font-mono text-right text-red-400">${fmt(pos.sl_price, 4)}</span>
               <span className="text-zinc-400">TP1</span>
@@ -455,25 +475,28 @@ function BotCard({ bot, onToggle, onKill, onSaveConfig, isToggling, onDelete, tr
 
 // ── Stats Row ────────────────────────────────────────────────────────────────
 
-function StatsRow({ stats }: { stats: Stats[] }) {
+function StatsRow({ stats, account }: { stats: Stats[]; account: AccountSnapshot }) {
   const totalPnl = stats.reduce((s, x) => s + x.total_pnl, 0);
   const totalTrades = stats.reduce((s, x) => s + x.total, 0);
   const totalWins = stats.reduce((s, x) => s + x.wins, 0);
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4 xl:grid-cols-7">
       {[
         { icon: <DollarSign className="w-4 h-4" />, label: "Total PnL", value: `${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 2)} USDT`, color: totalPnl >= 0 ? "text-green-400" : "text-red-400" },
+        { icon: <Wallet className="w-4 h-4" />, label: "Баланс (биржа)", value: account.wallet > 0 ? `$${fmt(account.wallet, 2)}` : "—", color: "text-white" },
+        { icon: <Coins className="w-4 h-4" />, label: "Маржа всего", value: account.margin > 0 ? `$${fmt(account.margin, 3)}` : "—", color: "text-white" },
+        { icon: <TrendingUp className="w-4 h-4" />, label: "Открытый PnL", value: `${account.upnl >= 0 ? "+" : ""}${fmt(account.upnl, 3)} USDT`, color: account.upnl >= 0 ? "text-green-400" : "text-red-400" },
         { icon: <BarChart2 className="w-4 h-4" />, label: "Total Trades", value: String(totalTrades), color: "text-white" },
         { icon: <TrendingUp className="w-4 h-4" />, label: "Win Rate", value: totalTrades ? `${((totalWins / totalTrades) * 100).toFixed(1)}%` : "—", color: "text-white" },
         { icon: <Activity className="w-4 h-4" />, label: "Symbols", value: String(stats.length), color: "text-white" },
       ].map(({ icon, label, value, color }) => (
         <Card key={label} className="border border-zinc-800 bg-zinc-900">
           <CardContent className="pt-4 pb-3">
-            <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-              {icon}{label}
+            <div className="flex items-center gap-1.5 text-xs text-zinc-400 mb-1">
+              {icon}<span className="truncate">{label}</span>
             </div>
-            <div className={`text-2xl font-bold font-mono ${color}`}>{value}</div>
+            <div className={`font-mono text-lg font-bold sm:text-2xl ${color}`}>{value}</div>
           </CardContent>
         </Card>
       ))}
@@ -621,21 +644,26 @@ function TradesTable({ trades }: { trades: Trade[] }) {
         <span>SL {slCount}</span>
       </div>
       <div className="overflow-auto rounded-lg border border-zinc-800">
-        <Table>
+        <Table className="min-w-[1130px]">
           <TableHeader>
             <TableRow className="border-zinc-800 hover:bg-transparent">
-              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Gross", "Fees", "Net", "Leg", "Cycle", "Legs", "Reason", "Mode", "Open (Киев)", "Close (Киев)"].map((h) => (
-                <TableHead key={h} className="text-zinc-400 text-xs">{h}</TableHead>
+              {["Symbol", "Dir", "Entry", "Exit", "Qty", "Size $", "Gross", "Fees", "Net", "Leg", "Cycle", "Legs", "Reason", "Mode", "Open (Киев)", "Close (Киев)"].map((h) => (
+                <TableHead key={h} className="text-zinc-400 text-xs" title={h === "Size $" ? "Стоимость позиции: количество × цена входа" : undefined}>{h}</TableHead>
               ))}
             </TableRow>
           </TableHeader>
           <TableBody>
             {trades.length === 0 && (
-              <TableRow><TableCell colSpan={15} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
+              <TableRow><TableCell colSpan={16} className="text-center text-zinc-500 py-8">No trades</TableCell></TableRow>
             )}
             {trades.map((t) => {
               const gross = grossPnl(t);
               const grossBe = gross != null && Math.abs(gross) <= 0.005;
+              // Одиночная нога = весь цикл: если бот не записал leg/cycle,
+              // показываем net сделки, а не прочерк (иначе закрытая по TP1/SL
+              // строка выглядит как «незакрытая»).
+              const legPnl = t.leg_pnl ?? ((t.chain_depth ?? 1) <= 1 ? t.pnl : null);
+              const cyclePnl = t.cycle_pnl ?? t.pnl;
               return (
               <TableRow key={t.id} className="border-zinc-800 hover:bg-zinc-800/50">
                 <TableCell className="font-semibold text-sm">{t.symbol}</TableCell>
@@ -647,6 +675,9 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                 <TableCell className="font-mono text-sm">${fmt(t.entry_price, 4)}</TableCell>
                 <TableCell className="font-mono text-sm">{t.exit_price ? `$${fmt(t.exit_price, 4)}` : "—"}</TableCell>
                 <TableCell className="font-mono text-sm">{t.qty}</TableCell>
+                <TableCell className="font-mono text-sm text-zinc-300" title="количество × цена входа">
+                  {t.qty != null && t.entry_price != null ? `$${fmt(t.qty * t.entry_price, 2)}` : "—"}
+                </TableCell>
                 <TableCell className={`font-mono text-sm font-semibold ${gross == null ? "" : grossBe ? "text-zinc-400" : gross >= 0 ? "text-green-400" : "text-red-400"}`}>
                   {gross == null ? "—" : (
                     <>
@@ -670,11 +701,11 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                     </>
                   )}
                 </TableCell>
-                <TableCell className={`font-mono text-sm ${t.leg_pnl == null ? "text-zinc-600" : t.leg_pnl >= 0 ? "text-green-400" : "text-red-400"}`} title="PnL последней ноги цикла">
-                  {t.leg_pnl == null ? "—" : `${t.leg_pnl >= 0 ? "+" : ""}${fmt(t.leg_pnl, 4)}`}
+                <TableCell className={`font-mono text-sm ${legPnl == null ? "text-zinc-600" : legPnl >= 0 ? "text-green-400" : "text-red-400"}`} title="PnL последней ноги цикла">
+                  {legPnl == null ? "—" : `${legPnl >= 0 ? "+" : ""}${fmt(legPnl, 4)}`}
                 </TableCell>
-                <TableCell className={`font-mono text-sm ${t.cycle_pnl == null ? "text-zinc-600" : t.cycle_pnl >= 0 ? "text-green-400" : "text-red-400"}`} title="Итог цикла (все ноги, net)">
-                  {t.cycle_pnl == null ? "—" : `${t.cycle_pnl >= 0 ? "+" : ""}${fmt(t.cycle_pnl, 4)}`}
+                <TableCell className={`font-mono text-sm ${cyclePnl == null ? "text-zinc-600" : cyclePnl >= 0 ? "text-green-400" : "text-red-400"}`} title="Итог цикла (все ноги, net)">
+                  {cyclePnl == null ? "—" : `${cyclePnl >= 0 ? "+" : ""}${fmt(cyclePnl, 4)}`}
                 </TableCell>
                 <TableCell className="text-zinc-400 text-xs" title="Число ног в цикле">
                   {t.chain_depth == null ? "—" : t.chain_depth}
@@ -765,7 +796,7 @@ function countReverses(rows: Trade[]): Record<string, number[]> {
 function StatsTable({ stats, reversals }: { stats: Stats[]; reversals: Record<string, number[]> }) {
   return (
     <div className="overflow-auto rounded-lg border border-zinc-800">
-      <Table>
+      <Table className="min-w-[900px]">
         <TableHeader>
           <TableRow className="border-zinc-800 hover:bg-transparent">
             {["Symbol", "Trades", "Wins", "Losses", "Win Rate", "Total PnL", "Avg Win", "Avg Loss",
@@ -842,6 +873,7 @@ export default function Dashboard() {
   // поэтому проверка по нему никогда бы не нашла отклонённую сделку.
   const [allTradesRaw, setAllTradesRaw] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
+  const [account, setAccount] = useState<AccountSnapshot>({ wallet: 0, upnl: 0, margin: 0 });
   const [reverseCounts, setReverseCounts] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
@@ -907,18 +939,43 @@ export default function Dashboard() {
       const tradeSymbol = selectedSymbol === "all" ? undefined : selectedSymbol;
       // Запросы независимы: падение ЛЮБОГО из трёх раньше оставляло setBots
       // невызванным — дашборд показывал ноль карточек при живом API.
-      const [b, t, s, rev] = await Promise.allSettled([
+      const [b, t, s, rev, dd] = await Promise.allSettled([
         fetchBots(),
         fetchTrades(tradeSymbol, 1000),
         fetchStats(),
         // Отдельный запрос БЕЗ фильтра по монете: счётчики реверсов нужны по
         // всем символам сразу, а trades выше отфильтрован выбранным символом.
         fetchTrades(undefined, 1000),
+        // Баланс и плавающий PnL с биржи (для верхних карточек).
+        fetchDrawdown(),
       ]);
-      if (b.status === "fulfilled" && Array.isArray(b.value)) setBots(b.value);
+      if (b.status === "fulfilled" && Array.isArray(b.value)) {
+        setBots(b.value);
+        // Маржа = сумма notionals открытых позиций / плечо соответствующего бота.
+        // API не отдаёт totalInitialMargin, а менять его код нельзя (рестарт
+        // контейнера убьёт ботов) — считаем по тем же данным, что и карточки.
+        const margin = b.value.reduce((sum, bot) => {
+          const p = bot.position;
+          const lev = Number(bot.leverage) || 0;
+          if (!p || lev <= 0) return sum;
+          const qty = Math.abs(Number(p.remaining_qty) || 0);
+          const px = Number(p.entry_price) || 0;
+          return sum + (qty * px) / lev;
+        }, 0);
+        setAccount(prev => ({ ...prev, margin }));
+      }
       else if (b.status === "rejected") {
         console.error("[dashboard] не удалось загрузить /bots", b.reason);
         setBots([]);
+      }
+      if (dd.status === "fulfilled") {
+        setAccount(prev => ({
+          ...prev,
+          wallet: Number(dd.value?.wallet) || 0,
+          upnl: Number(dd.value?.upnl) || 0,
+        }));
+      } else {
+        console.error("[dashboard] не удалось загрузить /live/drawdown", dd.reason);
       }
       if (t.status === "fulfilled") {
         const allTrades = Array.isArray(t.value?.trades) ? t.value.trades : [];
@@ -1461,15 +1518,15 @@ export default function Dashboard() {
 
   return (
     <div className={IS_LIVE
-      ? "min-h-screen bg-red-950 text-red-50 p-4 md:p-6"
-      : "min-h-screen bg-zinc-950 text-white p-4 md:p-6"}>
+      ? "min-h-screen overflow-x-hidden bg-red-950 text-red-50 p-3 sm:p-4 md:p-6"
+      : "min-h-screen overflow-x-hidden bg-zinc-950 text-white p-3 sm:p-4 md:p-6"}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
 <div>
-           <h1 className="text-2xl font-bold">
+           <h1 className="text-xl font-bold sm:text-2xl">
              Trading Bot Dashboard
              {IS_LIVE && (
-               <span className="ml-2 rounded bg-red-600 px-2 py-0.5 align-middle text-sm">LIVE REAL MONEY</span>
+               <span className="mt-1 block w-fit rounded bg-red-600 px-2 py-0.5 text-sm sm:mt-0 sm:ml-2 sm:inline-block sm:align-middle">LIVE REAL MONEY</span>
              )}
            </h1>
             <p className="text-zinc-400 text-sm mt-0.5">
@@ -1483,7 +1540,7 @@ export default function Dashboard() {
             )}
 
          </div>
-        <div className="flex flex-wrap gap-2 items-start">
+        <div className="flex w-full flex-wrap items-center gap-2 md:w-auto md:justify-end">
           <Button
             variant="outline"
             size="sm"
@@ -1496,7 +1553,7 @@ export default function Dashboard() {
             {restarting ? 'Restarting...' : 'Restart bots'}
           </Button>
           {!IS_LIVE && (
-            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+            <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
               <label className="text-xs text-zinc-400 whitespace-nowrap" title="Маржа = % от депозита, позиция = маржа × плечо. Применяется только к НОВЫМ позициям: уже открытая позиция и её reverse-цепочка доторговываются на прежнем размере. Значение подхватят только перезапущенные боты.">
                 Позиция, % · всем ботам
               </label>
@@ -1535,7 +1592,7 @@ export default function Dashboard() {
             </div>
           )}
           {!IS_LIVE && (
-            <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+            <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
               <label className="text-xs text-zinc-400 whitespace-nowrap" title="Время протухания позиции в минутах. Позиция старше этого времени не занимает слот max_positions. 0 = выкл. Применится к новым позициям.">
                 Протухание, мин · всем
               </label>
@@ -1561,7 +1618,7 @@ export default function Dashboard() {
               </Button>
             </div>
           )}
-          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+          <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
             <label className="text-xs text-zinc-400 whitespace-nowrap" title="Через сколько минут позиция перестаёт занимать слот max_positions. 0 = никогда. Позиция при этом НЕ закрывается: живёт до TP / минимального плюса / лимита убытка позиции.">
               Слот, мин · всем
             </label>
@@ -1594,7 +1651,7 @@ export default function Dashboard() {
               {applyingLimits ? "Working..." : "Apply"}
             </Button>
           </div>
-          <div className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+          <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 sm:w-auto">
             <label className="text-xs text-zinc-400 whitespace-nowrap" title="Дневной стоп: net за день (прибыль минус убыток) ≤ -N% баланса на начало дня по Киеву → боты останавливаются до следующего дня.">
               Дневной убыток, % · всем
             </label>
@@ -1672,7 +1729,7 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="space-y-6">
-          <StatsRow stats={stats} />
+          <StatsRow stats={stats} account={account} />
 
           <div>
             <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
@@ -1685,7 +1742,7 @@ export default function Dashboard() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-4">
                 {bots.map((bot) => (
                    <BotCard key={bot.symbol} bot={bot} onToggle={() => handleToggle(bot)} onKill={() => handleKill(bot)} onSaveConfig={handleSaveConfig} isToggling={toggling === bot.symbol} onDelete={handleDeleteBot} trades={allTradesRaw} />
                 ))}
@@ -1700,27 +1757,27 @@ export default function Dashboard() {
                 <span className="ml-2 text-xs">окружение live, API :5001 — интерфейс намеренно красный, чтобы не путать с тестнетом</span>
               </div>
             )}
-            <TabsList className="bg-zinc-900 border border-zinc-800">
-              <TabsTrigger value="chart" className="data-[state=active]:bg-zinc-700">
+            <TabsList className="no-scrollbar flex h-9 w-full items-center justify-start gap-1 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-900 p-1">
+              <TabsTrigger value="chart" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <TrendingUp className="w-4 h-4 mr-1.5" />PnL Chart
               </TabsTrigger>
-              <TabsTrigger value="trades" className="data-[state=active]:bg-zinc-700">
+              <TabsTrigger value="trades" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <BarChart2 className="w-4 h-4 mr-1.5" />Trades
               </TabsTrigger>
-              <TabsTrigger value="stats" className="data-[state=active]:bg-zinc-700">
+              <TabsTrigger value="stats" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <Settings className="w-4 h-4 mr-1.5" />Stats
               </TabsTrigger>
-              <TabsTrigger value="backtest" className="data-[state=active]:bg-zinc-700">
+              <TabsTrigger value="backtest" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <History className="w-4 h-4 mr-1.5" />Backtest
               </TabsTrigger>
-              <TabsTrigger value="optimizer" className="data-[state=active]:bg-zinc-700">
+              <TabsTrigger value="optimizer" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <TrendingDown className="w-4 h-4 mr-1.5" />Optimizer
               </TabsTrigger>
-              <TabsTrigger value="recovery" className="data-[state=active]:bg-zinc-700">
+              <TabsTrigger value="recovery" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
                 <Link2 className="w-4 h-4 mr-1.5" />Recovery
               </TabsTrigger>
               {IS_LIVE && (
-                <TabsTrigger value="live" className="data-[state=active]:bg-red-800">
+                <TabsTrigger value="live" className="shrink-0 px-2 text-xs data-[state=active]:bg-red-800 sm:px-3 sm:text-sm">
                   <AlertTriangle className="w-4 h-4 mr-1.5" />LIVE
                 </TabsTrigger>
               )}
@@ -1738,11 +1795,11 @@ export default function Dashboard() {
             </TabsContent>
 
             <TabsContent value="trades" className="mt-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <select
                   value={selectedSymbol}
                   onChange={e => setSelectedSymbol(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-500 sm:w-auto"
                 >
                   <option value="all">All symbols</option>
                   {symbols.map(s => (
@@ -1753,7 +1810,7 @@ export default function Dashboard() {
                   variant="outline"
                   size="sm"
                   onClick={handleExportCSV}
-                  className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  className="w-full justify-center border-zinc-700 text-zinc-300 hover:bg-zinc-800 sm:w-auto"
                 >
                   <Download className="w-4 h-4 mr-2" />
                   Export CSV
@@ -1934,7 +1991,7 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    <div className="mt-4 flex items-center gap-4">
+                    <div className="mt-4 flex flex-wrap items-center gap-3">
                       <Button
                         onClick={handleRunBacktest}
                         disabled={btRunning}

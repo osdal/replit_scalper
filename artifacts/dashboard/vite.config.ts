@@ -27,6 +27,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 5173,
+      // Доступ через внешний домен (Caddy → 127.0.0.1:517x). Без этого Vite
+      // отвечает 403 "Blocked request" на любой Host, кроме localhost.
+      allowedHosts: [".duckdns.org", ".sslip.io"],
       proxy: {
         "/api": {
           target: apiTarget,

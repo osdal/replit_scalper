@@ -1,1 +1,28 @@
 @import "tailwindcss";
+
+/* ── Мобильная вёрстка ──────────────────────────────────────────────────────
+   iOS/Android: не даём браузеру самовольно увеличивать шрифт и убираем
+   «прыжок» ширины из-за горизонтальных скроллов. */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Вкладки и широкие таблицы прокручиваются пальцем, но полоса прокрутки
+   не занимает место на узком экране. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* iOS Safari автоматически зумит страницу, если у поля шрифт меньше 16px.
+   На телефоне это ломало ввод в узких полях; на десктопе размеры прежние. */
+@media (max-width: 640px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}

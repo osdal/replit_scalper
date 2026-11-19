@@ -215,7 +215,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
             <div>
               <label className="text-zinc-400 text-xs mb-1 block">Symbol</label>
               <select
@@ -319,7 +319,7 @@ export default function OptimizerTab({ jobId, job, setJobId, setJob, onApplyToBa
           </CardHeader>
           <CardContent>
             <div className="overflow-auto">
-              <table className="w-full text-sm">
+              <table className="min-w-[1000px] text-sm">
                 <thead>
                   <tr className="text-zinc-400 text-xs border-b border-zinc-800">
                     {["","Rank","Score","Trades","WR%","PnL","DD%","EMA F","EMA S","SL%","TP1%","TP2%","Vol×","TP1cl%","HTF F","HTF S"].map(h => (

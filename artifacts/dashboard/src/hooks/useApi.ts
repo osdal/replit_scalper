@@ -171,7 +171,19 @@ export async function fetchDailyLoss(): Promise<{
   return apiFetch(`${API}/live/daily-loss`);
 }
 
-export async function fetchDrawdown(): Promise<{ bot_env: string; equity: number; reference: number; peak: number; fixed_deposit: number; drawdown_pct: number; threshold_pct: number; enabled: boolean }> {
+export async function fetchDrawdown(): Promise<{
+  bot_env: string;
+  wallet: number;
+  upnl: number;
+  equity: number;
+  reference: number;
+  threshold_pct: number;
+  default_threshold_pct: number;
+  enabled: boolean;
+  drawdown_pct: number;
+  worst_symbol: string | null;
+  positions: Array<{ symbol: string; upnl: number; loss_pct: number; threshold_pct: number }>;
+}> {
   return apiFetch(`${API}/live/drawdown`);
 }
 

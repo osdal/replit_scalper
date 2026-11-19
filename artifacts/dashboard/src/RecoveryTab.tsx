@@ -131,7 +131,7 @@ export default function RecoveryTab() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center justify-between mb-4">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="text-sm text-zinc-400 mb-1">
                 Когда сделка закрывается в убыток, следующий свободный сигнал
@@ -170,7 +170,7 @@ export default function RecoveryTab() {
               />
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-3">
             <Button onClick={saveConfig} disabled={saving} size="sm">
               {saving ? "Saving..." : "Save Config"}
             </Button>
@@ -182,7 +182,7 @@ export default function RecoveryTab() {
       </Card>
 
       {/* Summary */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
         <Card className="border border-zinc-800 bg-zinc-900">
           <CardContent className="pt-4 pb-3">
             <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
@@ -225,7 +225,7 @@ export default function RecoveryTab() {
         </CardHeader>
         <CardContent>
           <div className="overflow-auto">
-            <table className="w-full text-sm">
+            <table className="min-w-[880px] text-sm">
               <thead>
                 <tr className="text-zinc-400 text-xs border-b border-zinc-800">
                   {["", "ID", "Status", "Debt", "Locked By", "Created", "Updated", "Closed"].map(h => (

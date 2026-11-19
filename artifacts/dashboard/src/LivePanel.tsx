@@ -43,6 +43,55 @@ type AnyBot = {
   total_loss_pct?: number;
 };
 
+/**
+ * Поле «число + set» для карточного вида на телефоне.
+ * inputMode="decimal" открывает на iOS цифровую клавиатуру с точкой.
+ */
+function NumField({
+  label,
+  value,
+  onChange,
+  onSet,
+  disabled,
+  title,
+  suffix,
+  inputMode = "decimal",
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  onSet: () => void;
+  disabled: boolean;
+  title?: string;
+  suffix?: string;
+  inputMode?: "numeric" | "decimal";
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1" title={title}>
+      <span className="text-[11px] leading-tight text-zinc-500">{label}</span>
+      <div className="flex items-center gap-1">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSet();
+          }}
+          inputMode={inputMode}
+          className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
+        />
+        {suffix && <span className="text-xs text-zinc-500">{suffix}</span>}
+        <button
+          onClick={onSet}
+          disabled={disabled}
+          className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-50"
+        >
+          set
+        </button>
+      </div>
+    </label>
+  );
+}
+
 export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChanged: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [sizes, setSizes] = useState<Record<string, string>>({});
@@ -203,7 +252,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
       <div className="rounded-md border border-zinc-800 bg-zinc-900 p-3 text-xs">
         <div className="font-semibold text-zinc-300">Глобальные лимиты позиций (все боты)</div>
         <div className="flex flex-wrap gap-4 mt-2 text-zinc-400">
-          <div className="flex items-center gap-1.5">
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto">
             <span className="text-zinc-500">Max поз.: </span>
             <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions ?? "—"}</span>
             <input
@@ -214,11 +263,11 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               value={globalMaxPos}
               onChange={e => { markDirty("maxPos", e.target.value, tradingStatus?.max_positions); setGlobalMaxPos(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
-              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-1 font-mono text-xs sm:py-0.5"
               title="Новое значение"
             />
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto">
             <span className="text-zinc-500">Max поз. + протух.: </span>
             <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_positions_with_expired ?? "—"}</span>
             <input
@@ -229,11 +278,11 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               value={globalMaxPosWithExpired}
               onChange={e => { markDirty("maxPosWithExpired", e.target.value, tradingStatus?.max_positions_with_expired); setGlobalMaxPosWithExpired(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
-              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-1 font-mono text-xs sm:py-0.5"
               title="Новое значение"
             />
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto">
             <span className="text-zinc-500">Max убыток по позиции, %: </span>
             <span className="font-mono font-semibold text-zinc-100">{tradingStatus?.max_position_loss_pct ?? "—"}</span>
             <input
@@ -244,12 +293,12 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               value={globalPositionLossPct}
               onChange={e => { markDirty("lossPct", e.target.value, tradingStatus?.max_position_loss_pct); setGlobalPositionLossPct(e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter") void applyGlobalLimits(); }}
-              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-xs"
+              className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-1 font-mono text-xs sm:py-0.5"
               title="Убыток всей позиции (сумма всех ног цикла) в % от депозита: при достижении — принудительное закрытие. 0 = выкл."
             />
           </div>
         </div>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button
             size="sm"
             variant="outline"
@@ -273,9 +322,9 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
-          className="rounded-md bg-red-700 px-3 py-1.5 text-sm text-white hover:bg-red-600 disabled:opacity-50"
+          className="w-full rounded-md bg-red-700 px-3 py-2 text-sm text-white hover:bg-red-600 disabled:opacity-50 sm:w-auto sm:py-1.5"
           disabled={busy !== null}
           onClick={() => {
             if (confirm("Закрыть ВСЕ позиции по рынку и остановить всех live-ботов?")) {
@@ -288,11 +337,135 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
         {error && <span className="text-xs text-red-400">{error}</span>}
       </div>
 
-      <div className="overflow-x-auto rounded-md border border-zinc-800">
-        <table className="min-w-full text-xs">
+      {/* Телефон/планшет: по карточке на бота, без горизонтальной прокрутки */}
+      <div className="space-y-3 lg:hidden">
+        {sorted.map((b) => {
+          const armed = Boolean(Number(b.armed ?? 0));
+          const relayOnly = Boolean(Number(b.relay_only ?? 0));
+          const sizeVal = sizes[b.symbol] ?? String(b.position_size_usd ?? 0);
+          const pctVal = pcts[b.symbol] ?? String(b.position_size_pct ?? 1);
+          const expVal = expiredMins[b.symbol] ?? String(b.expired_after_minutes ?? 120);
+          const slotVal = slotRelease[b.symbol] ?? String(b.slot_release_minutes ?? 360);
+          const tlpVal = totalLossPct[b.symbol] ?? String(b.total_loss_pct ?? 10);
+          return (
+            <div key={b.symbol} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-mono text-base font-semibold text-zinc-100">{b.symbol}</span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[11px] ${
+                      b.is_running ? "bg-green-900/50 text-green-300" : "bg-zinc-800 text-zinc-400"
+                    }`}
+                  >
+                    {b.is_running ? "RUNNING" : "STOPPED"}
+                  </span>
+                  {armed && (
+                    <span className="rounded bg-red-900/60 px-1.5 py-0.5 font-mono text-[11px] text-red-300">
+                      ARMED
+                    </span>
+                  )}
+                </div>
+                {armed ? (
+                  <button
+                    className="shrink-0 rounded border border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy !== null}
+                    onClick={() => void run(`disarm-${b.symbol}`, () => disarmBot(b.symbol))}
+                  >
+                    Disarm
+                  </button>
+                ) : (
+                  <button
+                    className="shrink-0 rounded border border-red-600 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/40 disabled:opacity-50"
+                    disabled={busy !== null}
+                    onClick={() => void run(`arm-${b.symbol}`, () => armBot(b.symbol))}
+                  >
+                    Arm
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  className={`rounded border px-2 py-1 text-xs ${
+                    relayOnly
+                      ? "border-red-600 text-red-300 hover:bg-red-900/40"
+                      : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"
+                  }`}
+                  disabled={busy !== null}
+                  onClick={() => void run(`relay-${b.symbol}`, () => setRelayOnly(b.symbol, !relayOnly))}
+                  title="relay-only: бот торгует только сигналы, переданные из testnet"
+                >
+                  {relayOnly ? "relay-only" : "own"}
+                </button>
+                <select
+                  value={b.trade_mode ?? "manual"}
+                  onChange={(e) =>
+                    void run(`mode-${b.symbol}`, () => updateConfig(b.symbol, { trade_mode: e.target.value }))
+                  }
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
+                  title="manual — входы только вручную/по relay, auto — по сигналам стратегии"
+                >
+                  <option value="manual">manual</option>
+                  <option value="auto">auto</option>
+                </select>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <NumField
+                  label="Маржа, $"
+                  value={sizeVal}
+                  onChange={(v) => setSizes((s) => ({ ...s, [b.symbol]: v }))}
+                  onSet={() => void run(`size-${b.symbol}`, () => updateConfig(b.symbol, { position_size_usd: Number(sizeVal) || 0 }))}
+                  disabled={busy !== null}
+                  title="Маржа в USD на одну новую позицию. Позиция = маржа × плечо. 0 = использовать % от свободного депозита."
+                />
+                <NumField
+                  label="Маржа от своб. депозита, %"
+                  suffix="%"
+                  value={pctVal}
+                  onChange={(v) => setPcts((s) => ({ ...s, [b.symbol]: v }))}
+                  onSet={() => void run(`pct-${b.symbol}`, () => updateConfig(b.symbol, { position_size_pct: Number(pctVal) || 0 }))}
+                  disabled={busy !== null}
+                  title="Маржа как % от свободного депозита. Явная маржа в USD важнее процента."
+                />
+                <NumField
+                  label="Протухание, мин"
+                  inputMode="numeric"
+                  value={expVal}
+                  onChange={(v) => setExpiredMins((s) => ({ ...s, [b.symbol]: v }))}
+                  onSet={() => void run(`exp-${b.symbol}`, () => updateConfig(b.symbol, { expired_after_minutes: Number(expVal) || 0 }))}
+                  disabled={busy !== null}
+                  title="Позиция старше N минут считается протухшей (перестаёт занимать слот max_positions). 0 = выкл."
+                />
+                <NumField
+                  label="Слот, мин"
+                  inputMode="numeric"
+                  value={slotVal}
+                  onChange={(v) => setSlotRelease((s) => ({ ...s, [b.symbol]: v }))}
+                  onSet={() => void run(`slot-${b.symbol}`, () => updateConfig(b.symbol, { slot_release_minutes: Number(slotVal) || 0 }))}
+                  disabled={busy !== null}
+                  title="Через сколько минут позиция перестаёт занимать слот max_positions. 0 = никогда. Позиция при этом НЕ закрывается."
+                />
+                <NumField
+                  label="Дневной убыток, %"
+                  suffix="%"
+                  value={tlpVal}
+                  onChange={(v) => setTotalLossPct((s) => ({ ...s, [b.symbol]: v }))}
+                  onSet={() => void run(`tlp-${b.symbol}`, () => updateConfig(b.symbol, { total_loss_pct: Number(tlpVal) || 0 }))}
+                  disabled={busy !== null}
+                  title="Дневной стоп: net за день ≤ -N% баланса на начало дня (Киев) → боты останавливаются. 0 = выкл."
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="hidden overflow-x-auto rounded-md border border-zinc-800 lg:block">
+        <table className="min-w-[1100px] text-xs">
           <thead>
             <tr className="text-left text-zinc-500">
-              <th className="pr-3 pl-2">symbol</th>
+              <th className="sticky left-0 z-10 bg-red-950 pr-3 pl-2">symbol</th>
               <th className="pr-3">running</th>
               <th className="pr-3">armed</th>
               <th className="pr-3">relay-only</th>
@@ -312,7 +485,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
               const pctVal = pcts[b.symbol] ?? String(b.position_size_pct ?? 1);
               return (
                 <tr key={b.symbol} className="border-t border-zinc-800">
-                  <td className="pr-3 pl-2 font-mono">{b.symbol}</td>
+                  <td className="sticky left-0 z-10 bg-red-950 pr-3 pl-2 font-mono">{b.symbol}</td>
                   <td className="pr-3">{b.is_running ? "yes" : "—"}</td>
                   <td className={`pr-3 font-mono ${armed ? "text-red-400" : "text-zinc-500"}`}>
                     {armed ? "ARMED" : "—"}
@@ -322,7 +495,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       const ro = Boolean(Number(b.relay_only ?? 0));
                       return (
                         <button
-                          className={`rounded border px-2 py-0.5 ${ro ? "border-red-600 text-red-300 hover:bg-red-900/40" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}
+                          className={`rounded border px-2 py-1 sm:py-0.5 ${ro ? "border-red-600 text-red-300 hover:bg-red-900/40" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}
                           disabled={busy !== null}
                           onClick={() => void run(`relay-${b.symbol}`, () => setRelayOnly(b.symbol, !ro))}
                         >
@@ -337,7 +510,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       onChange={(e) =>
                         void run(`mode-${b.symbol}`, () => updateConfig(b.symbol, { trade_mode: e.target.value }))
                       }
-                      className="rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5"
+                      className="rounded border border-zinc-700 bg-zinc-900 px-1 py-1 sm:py-0.5"
                     >
                       <option value="manual">manual</option>
                       <option value="auto">auto</option>
@@ -347,10 +520,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                     <input
                       value={sizeVal}
                       onChange={(e) => setSizes((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-24 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                      className="w-24 rounded border border-zinc-700 bg-zinc-900 px-1 py-1 font-mono sm:py-0.5"
                     />
                     <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-1 hover:bg-zinc-800 sm:py-0.5 disabled:opacity-50"
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`size-${b.symbol}`, () =>
@@ -365,11 +538,11 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                     <input
                       value={pctVal}
                       onChange={(e) => setPcts((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-1 font-mono sm:py-0.5"
                     />
                     <span className="ml-0.5 text-zinc-500">%</span>
                     <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-1 hover:bg-zinc-800 sm:py-0.5 disabled:opacity-50"
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`pct-${b.symbol}`, () =>
@@ -384,10 +557,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                     <input
                       value={expiredMins[b.symbol] ?? String(b.expired_after_minutes ?? 120)}
                       onChange={(e) => setExpiredMins((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-1 font-mono sm:py-0.5"
                     />
                     <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-1 hover:bg-zinc-800 sm:py-0.5 disabled:opacity-50"
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`exp-${b.symbol}`, () =>
@@ -402,10 +575,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                     <input
                       value={slotRelease[b.symbol] ?? String(b.slot_release_minutes ?? 360)}
                       onChange={(e) => setSlotRelease((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                      className="w-16 rounded border border-zinc-700 bg-zinc-900 px-1 py-1 font-mono sm:py-0.5"
                     />
                     <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-1 hover:bg-zinc-800 sm:py-0.5 disabled:opacity-50"
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`slot-${b.symbol}`, () =>
@@ -420,10 +593,10 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                     <input
                       value={totalLossPct[b.symbol] ?? String(b.total_loss_pct ?? 10)}
                       onChange={(e) => setTotalLossPct((s) => ({ ...s, [b.symbol]: e.target.value }))}
-                      className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 font-mono"
+                      className="w-14 rounded border border-zinc-700 bg-zinc-900 px-1 py-1 font-mono sm:py-0.5"
                     />
                     <button
-                      className="ml-1 rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                      className="ml-1 rounded border border-zinc-700 px-1.5 py-1 hover:bg-zinc-800 sm:py-0.5 disabled:opacity-50"
                       disabled={busy !== null}
                       onClick={() =>
                         void run(`tlp-${b.symbol}`, () =>
@@ -437,7 +610,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                   <td className="pr-3">
                     {armed ? (
                       <button
-                        className="rounded border border-zinc-700 px-2 py-0.5 hover:bg-zinc-800 disabled:opacity-50"
+                        className="rounded border border-zinc-700 px-2 py-1 sm:py-0.5 hover:bg-zinc-800 disabled:opacity-50"
                         disabled={busy !== null}
                         onClick={() => void run(`disarm-${b.symbol}`, () => disarmBot(b.symbol))}
                       >
@@ -445,7 +618,7 @@ export default function LivePanel({ bots, onChanged }: { bots: AnyBot[]; onChang
                       </button>
                     ) : (
                       <button
-                        className="rounded border border-red-600 px-2 py-0.5 text-red-300 hover:bg-red-900/40 disabled:opacity-50"
+                        className="rounded border border-red-600 px-2 py-1 sm:py-0.5 text-red-300 hover:bg-red-900/40 disabled:opacity-50"
                         disabled={busy !== null}
                         onClick={() => void run(`arm-${b.symbol}`, () => armBot(b.symbol))}
                       >
