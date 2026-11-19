@@ -1,4 +1,5 @@
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,6 +56,42 @@ export function statePath(symbol: string): string {
 /** Префикс lock-файлов текущего окружения. */
 export function lockPrefix(): string {
   return `bot.lock.${BOT_ENV}.`;
+}
+
+/**
+ * Стабильный ключ инстанса бота. В БД это bots.bot_key; если его нет
+ * (старые записи) — lower(symbol). Для клиента №1 совпадает с lower(symbol),
+ * поэтому имена state/lock-файлов не меняются.
+ */
+export function botKeyOf(symbol: string, botKey?: string | null): string {
+  return String(botKey || symbol).trim().toLowerCase();
+}
+
+/**
+ * Конфиг инстанса. Приоритет — per-client файл
+ * `configs/<env>/clients/<clientId>/<bot_key>.yaml`; если его нет (клиент №1),
+ * используется прежний `config_<stem>.yaml`.
+ */
+export function configPathForBot(bot: {
+  symbol: string;
+  bot_key?: string | null;
+  client_id?: number | null;
+}): string {
+  if (bot.client_id != null && bot.bot_key) {
+    const perClient = path.join(
+      BOT_CONFIG_DIR,
+      "clients",
+      String(bot.client_id),
+      `${bot.bot_key}.yaml`,
+    );
+    if (fs.existsSync(perClient)) return perClient;
+  }
+  return configPath(bot.symbol);
+}
+
+/** State-файл инстанса. Python пишет его по BOT_KEY, поэтому имя должно совпадать. */
+export function statePathForBot(symbol: string, botKey?: string | null): string {
+  return path.join(BOT_DIR, `state_${BOT_ENV}_${botKeyOf(symbol, botKey)}.json`);
 }
 
 /**

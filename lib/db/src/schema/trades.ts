@@ -4,6 +4,9 @@ import { z } from "zod/v4";
 
 export const tradesTable = sqliteTable("trades", {
   id:           integer("id").primaryKey({ autoIncrement: true }),
+  // Инстанс бота, к которому относится сделка. Атрибуция комиссии и статистики
+  // идёт по bot_id → bots.client_id, а не по символу (символ больше не уникален).
+  bot_id:       integer("bot_id"),
   symbol:       text("symbol").notNull(),
   direction:    text("direction").notNull(),
   entry_price:  real("entry_price").notNull(),

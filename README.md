@@ -2222,3 +2222,92 @@ API-сервер, боты и контейнер `replit_scalper-api-live` жи�
 
 ---
 
+## 22. Мульти-клиентская платформа: фундамент (этап 1)
+
+### 22.1 Зачем
+
+До этапа 1 система была **однотенантной по символу**: `bots.symbol` был PRIMARY KEY, в `trades` не было владельца, комиссия искалась по символу. Два клиента не могли торговать BTC, а прибыль могла уйти чужому клиенту. Этап 1 закладывает фундамент, не меняя торговую логику.
+
+### 22.2 Что изменилось в схеме
+
+| Объект | Было | Стало |
+|---|---|---|
+| `bots` | `symbol` PRIMARY KEY | `id` PK (AUTOINCREMENT), `bot_key` UNIQUE, `client_id`; `UNIQUE(client_id, symbol)` |
+| `trades` | только `symbol` | добавлен `bot_id` (атрибуция сделки инстансу) |
+| `clients` | — | клиенты: `email`, `role`, `status`, `fee_pct`, `gift_usd`, `telegram_chat_id`, `auto_resume` |
+| `client_api_keys` | — | зашифрованные ключи биржи, маска, права, статус проверки |
+| `client_accounts` | — | `balance_usd` (предоплата), `cum_pnl_usd`, `hwm_pnl_usd` |
+| `ledger` | — | журнал: `gift`/`topup`/`fee`/`adjustment`/`refund`, `idempotency_key` UNIQUE |
+| `audit_log` | — | кто и что менял: ключи, баланс, боты |
+
+`bot_key` — стабильное имя инстанса. Для клиента №1 (`system@local`) `bot_key = lower(symbol)`, например `btcusdt`. Поэтому старые URL, lock- и state-файлы продолжают работать без переименований. У второго клиента будет `c2_btcusdt`, и два процесса смогут торговать один символ.
+
+### 22.3 Миграция
+
+Выполняется автоматически в `init-db` при старте контейнера и **идемпотентна**:
+
+1. Создаются платформенные таблицы (`CREATE TABLE IF NOT EXISTS`).
+2. Создаётся клиент №1 `system@local` (role `owner`) и его счёт.
+3. Если в `bots` нет колонки `id` — таблица перестраивается: `symbol PK` → `id/bot_key/client_id`, данные копируются, `bot_key = lower(symbol)`, `client_id = 1`. Перестройка идёт в транзакции (`BEGIN IMMEDIATE`/`COMMIT`), при ошибке — `ROLLBACK`.
+4. `trades.bot_id` заполняется по символу для всех существующих строк (однократно, затем `WHERE bot_id IS NULL` не находит ничего).
+5. Новые сделки (`POST /api/trades`) получают `bot_id` по символу; позже бот будет присылать `bot_id` напрямую.
+
+Проверено на копии живой БД (11 950 сделок, 40 ботов): количество строк, `is_running`, `user_id`, `position_size_pct`, сумма PnL и число открытых сделок совпали; повторный запуск не изменил ни одной строки.
+
+### 22.4 Этап 2: атрибуция по `bot_id`
+
+- `PUT /api/trades/:id` при переходе `open → closed` ищет владельца по `trades.bot_id → bots.id`, а не по символу. Символ больше не уникален: при двух клиентах на BTCUSDT выборка по символу могла отдать чужого клиента.
+- Fallback на символ остаётся только для старых строк без `bot_id`.
+- Комиссия по-прежнему начисляется один раз на `trade_id` и только на переходе `open → closed` (`rejected` не кредитуются).
+- `POST /api/trades` проставляет `bot_id` по символу (пока бот не присылает его сам).
+
+Проверено на копии живой БД: вставка сделки TAOUSDT получила `bot_id=32`, владелец определился как `user_id=1, client_id=1, bot_key=taousdt`; тестовая строка удалена.
+
+### 22.5 Этап 3: `bot_key` в путях, процессах и ключах
+
+| Что | Как |
+|---|---|
+| state-файл | Python: `state_<env>_<BOT_KEY>.json`; API: `statePathForBot(symbol, bot_key)` — то же имя |
+| lock-файл | `bot.lock.<env>.<BOT_KEY>` |
+| конфиг | `configs/<env>/clients/<client_id>/<bot_key>.yaml`; если файла нет — легаси `config_<stem>.yaml` |
+| PID-поиск | процессы индексируются по `bot_key`, парсятся и легаси `config_x.yaml`, и `clients/<id>/x.yaml` |
+| ключи | `client_api_keys` расшифровываются AES-256-GCM; `BINANCE_API_KEY/SECRET` подставляются только в env процесса бота |
+| логи | `logs/<env>/api_<bot_key>.log`, `api_<bot_key>_stdout.log` |
+
+Защита от чужого конфига: для `client_id ≠ 1` запуск без per-client конфига запрещён (`per-client config ... not found`). Клиент №1 работает на прежних `config_<stem>.yaml`.
+
+Проверено:
+
+- `position_tracker._state_file` и `main._lock_file` без `BOT_KEY` дают прежние имена (`state_live_taousdt.json`, `bot.lock.live.taousdt`), с `BOT_KEY=c2_taousdt` — `state_live_c2_taousdt.json`;
+- AES-256-GCM roundtrip и обнаружение подмены IV;
+- PID-скан нашёл все 21 живых процесса, ключи совпали с `bots.bot_key`;
+- `botPaths.configPath/statePath` для клиента №1 дают прежние пути.
+
+Важно: старый `statePath(symbol)` строил `state_live_tao.json` (stem), тогда как Python всегда писал `state_live_taousdt.json`. Поэтому panic-очистка (`stopAllBots`) «промахивалась» и state выживал. Это поведение намеренно не менялось: паник-кнопка не должна стирать уровни открытых позиций. В kill-роуте теперь используется правильный `statePathForBot`, но файл только логируется и не удаляется.
+
+### 22.6 Совместимость
+
+- Торговый код, стратегия, reverse-цепочки и лимиты не менялись.
+- Для клиента №1 API по-прежнему принимает символ (`/api/bots/BTCUSDT/start`), имена state/lock/логов не изменились.
+- `user_internal_accounts`/`internal_transactions` (модель «баланс = накопленная прибыль») пока остаются; переход на модель предоплаты (`client_accounts`/`ledger`) — этап 4.
+- `botProcesses` и `desiredRunning` в API всё ещё ключуются символом. Для двух клиентов на одном символе нужен переход на `bot_key` в реестре процессов — делать при добавлении клиента №2, вместе с роутами `/bots/:bot_key`.
+
+### 22.7 Что дальше
+
+- **Этап 4:** `ledger` + списание 10 % с баланса, `gift_usd` в дашборде, HWM по `cum_pnl`.
+- **Этап 5:** soft-stop при `balance_usd ≤ 0` (`reason=balance_depleted`), доторговка цикла.
+- **Этап 6:** админка клиентов и кабинет.
+- **Перед клиентом №2:** реестр процессов и роуты по `bot_key`; иначе одинаковый символ у двух клиентов столкнётся в `botProcesses`.
+
+### 22.8 Проверка после применения
+
+```bash
+sqlite3 data/bot_live.db "SELECT COUNT(*) FROM bots;"                                  # 40
+sqlite3 data/bot_live.db "SELECT COUNT(*), SUM(bot_id IS NULL) FROM trades;"            # 0 NULL
+sqlite3 data/bot_live.db "SELECT id,email,role FROM clients;"                           # system@local|owner
+sqlite3 data/bot_live.db "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='bots';"
+ps -eo args= | grep -c 'bot/main.py'                                                    # 21 после запуска
+```
+
+---
+

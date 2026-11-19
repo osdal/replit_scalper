@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, botsTable } from "@workspace/db";
+import { db, botsTable, clientsTable } from "@workspace/db";
 import { eq, getTableColumns } from "drizzle-orm";
 import { spawn, exec, execFile, execSync, type ChildProcess } from "child_process";
 import { promisify } from "util";
@@ -12,10 +12,14 @@ import {
   BOT_CONFIG_DIR,
   BOT_LOG_DIR,
   BOT_ENV,
+  botKeyOf,
   configPath,
+  configPathForBot,
   statePath,
+  statePathForBot,
   lockPrefix,
 } from "../botPaths";
+import { loadClientCredentials } from "../lib/keystore";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -83,28 +87,38 @@ async function getAllBotPidsCached(ttlMs = 3000): Promise<Map<string, number> | 
   return map;
 }
 
-// Найти PID процесса бота по имени конфига (Windows + Linux)
-async function findBotPid(symbol: string): Promise<number | null> {
+// Найти PID процесса бота по bot_key (для клиента №1 = lower(symbol)).
+async function findBotPid(symbol: string, botKey?: string | null): Promise<number | null> {
   const m = await getAllBotPidsCached();
   if (m === null) return null;
-  return m.get(symbol.toUpperCase()) ?? null;
+  return m.get(botKeyOf(symbol, botKey)) ?? null;
 }
 
 /**
- * Возвращает Map<symbol, pid> для всех запущенных ботов текущего окружения.
+ * Возвращает Map<bot_key, pid> для всех запущенных ботов текущего окружения.
  * `null` означает, что список процессов получить НЕ удалось (в отличие от
  * пустой map = «ботов нет»). Это важно для reconcile: при сбое опроса мы не
  * должны ложно помечать живых ботов остановленными.
+ *
+ * Ключ — bot_key, а не symbol: у двух клиентов может быть один символ.
+ * Легаси-конфиг `config_tao.yaml` даёт bot_key `taousdt` (как в БД у
+ * клиента №1); per-client конфиг `clients/2/c2_taousdt.yaml` — `c2_taousdt`.
  */
 export async function tryFindAllBotPids(): Promise<Map<string, number> | null> {
-  const pidBySymbol = new Map<string, number>();
+  const pidByKey = new Map<string, number>();
   const consider = (cmd: string, pid: number) => {
     if (!cmd.includes("main.py")) return;
     if (!cmd.includes(BOT_CONFIG_DIR)) return;
-    const m = cmd.match(/config_([a-z0-9]+)\.yaml/);
-    if (!m) return;
     if (!Number.isFinite(pid) || pid <= 0) return;
-    pidBySymbol.set(m[1].toUpperCase() + "USDT", pid);
+    const perClient = cmd.match(/clients[\/\\]\d+[\/\\]([a-z0-9_]+)\.yaml/);
+    const legacy = cmd.match(/config_([a-z0-9]+)\.yaml/);
+    const key = perClient
+      ? perClient[1].toLowerCase()
+      : legacy
+        ? legacy[1].toLowerCase() + "usdt"
+        : null;
+    if (!key) return;
+    pidByKey.set(key, pid);
   };
   try {
     if (process.platform === "win32") {
@@ -133,7 +147,7 @@ export async function tryFindAllBotPids(): Promise<Map<string, number> | null> {
         consider(trimmed, pid);
       }
     }
-    return pidBySymbol;
+    return pidByKey;
   } catch {
     return null;
   }
@@ -171,7 +185,7 @@ export async function reconcileBotRunningStates(): Promise<string[]> {
         }
         continue;
       }
-      if (alive.has(bot.symbol)) continue;
+      if (alive.has(botKeyOf(bot.symbol, bot.bot_key))) continue;
       await db.update(botsTable)
         .set({
           is_running: false,
@@ -213,9 +227,10 @@ export async function restartDesiredBots(): Promise<string[]> {
   const maxAttempts = Number(process.env.AUTO_RESTART_MAX_ATTEMPTS ?? 5);
   for (const symbol of Array.from(desiredRunning)) {
     try {
-      if (alive.has(symbol)) continue;
       const [bot] = await db.select().from(botsTable).where(eq(botsTable.symbol, symbol));
       if (!bot) { desiredRunning.delete(symbol); continue; }
+      // Проверяем по bot_key: одинаковый символ у разных клиентов — разные процессы.
+      if (alive.has(botKeyOf(symbol, bot.bot_key))) continue;
       if (!bot.armed || bot.stop_requested) continue;
       const hist = (autoRestartHistory.get(symbol) ?? []).filter(t => now - t < windowMs);
       if (hist.length && now - hist[hist.length - 1] < cooldown) {
@@ -389,7 +404,28 @@ export async function startBotProcess(symbol: string): Promise<StartBotResult> {
   if (existingProc) {
     botProcesses.delete(symbol);
   }
-  const existingPid = await findBotPid(symbol);
+  // Владелец и ключ инстанса. bot_key задаёт имена state/lock-файлов и
+  // per-client конфиг; client_id — чьи ключи подставлять в окружение.
+  const [botRow] = await db
+    .select()
+    .from(botsTable)
+    .where(eq(botsTable.symbol, symbol))
+    .limit(1);
+  const botKey = botKeyOf(symbol, botRow?.bot_key);
+  const clientId = Number(botRow?.client_id ?? 1);
+  const cfgPath = botRow ? configPathForBot(botRow) : configPath(symbol);
+
+  // Для клиента №1 допустим легаси-конфиг config_<stem>.yaml. Для остальных
+  // требование жёсткое: если per-client конфига нет, бот не должен молча
+  // торговать по чужому конфигу (другой клиент, другой размер/плечо).
+  if (clientId !== 1 && cfgPath === configPath(symbol)) {
+    return {
+      ok: false,
+      error: `Client #${clientId}: per-client config clients/${clientId}/${botKey}.yaml not found`,
+    };
+  }
+
+  const existingPid = await findBotPid(symbol, botRow?.bot_key);
   if (existingPid) {
     // Процесс уже жив, но API по какой-то причине считает бота остановленным.
     // Не отказываем во «Start»: синхронизируем БД и считаем запуск успешным,
@@ -442,8 +478,14 @@ export async function startBotProcess(symbol: string): Promise<StartBotResult> {
   }
   const pythonCmd = cachedPythonCmd;
 
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    BOT_KEY: botKey,
+    BOT_CLIENT_ID: String(clientId),
+  };
+
   const botTag = `[BOT ${symbol}]`;
-  const debugLogPath = path.join(BOT_LOG_DIR, `api_${symbol.toLowerCase()}.log`);
+  const debugLogPath = path.join(BOT_LOG_DIR, `api_${botKey}.log`);
   const debugWrite = (msg: string) => {
     console.log(msg);
     try {
@@ -451,22 +493,31 @@ export async function startBotProcess(symbol: string): Promise<StartBotResult> {
     } catch { /* ignore */ }
   };
 
+  // Ключи клиента шифруются в client_api_keys. Если их нет (клиент №1 или
+  // мастер-ключ не задан) — процесс наследует BINANCE_API_KEY/SECRET из env.
+  const creds = await loadClientCredentials(clientId);
+  if (creds) {
+    childEnv.BINANCE_API_KEY = creds.apiKey;
+    childEnv.BINANCE_API_SECRET = creds.apiSecret;
+    debugWrite(`${botTag} using client #${clientId} API key (${creds.mask})`);
+  }
+
   // stdio ребёнка направляем в файл: если api-server умрёт, закрытый pipe
   // не сломает отвязанный процесс (нет EPIPE/BrokenPipe).
   fs.mkdirSync(BOT_LOG_DIR, { recursive: true });
   const outFd = fs.openSync(
-    path.join(BOT_LOG_DIR, `api_${symbol.toLowerCase()}_stdout.log`),
+    path.join(BOT_LOG_DIR, `api_${botKey}_stdout.log`),
     "a",
   );
 
   let proc: ChildProcess;
   try {
-    proc = spawn(pythonCmd, ["main.py", configPath(symbol)], {
+    proc = spawn(pythonCmd, ["main.py", cfgPath], {
       cwd: BOT_DIR,
       detached: true,
       stdio: ["ignore", outFd, outFd],
       windowsHide: true,
-      env: process.env,
+      env: childEnv,
     });
   } catch (err) {
     try { fs.closeSync(outFd); } catch { /* ignore */ }
@@ -630,7 +681,7 @@ router.post("/:symbol/stop", async (req, res) => {
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
     const proc = botProcesses.get(symbol);
-    const pid = proc && !proc.killed ? proc.pid : await findBotPid(symbol);
+    const pid = proc && !proc.killed ? proc.pid : await findBotPid(symbol, bot.bot_key);
     desiredRunning.delete(symbol);
     if (!pid) {
       await db.update(botsTable)
@@ -654,6 +705,11 @@ router.post("/:symbol/stop", async (req, res) => {
 router.post("/:symbol/kill", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
+    const [botKeyRow] = await db
+      .select({ bot_key: botsTable.bot_key })
+      .from(botsTable)
+      .where(eq(botsTable.symbol, symbol))
+      .limit(1);
 
     const proc = botProcesses.get(symbol);
     if (proc) {
@@ -675,7 +731,7 @@ router.post("/:symbol/kill", async (req, res) => {
       botProcesses.delete(symbol);
     }
 
-    const pid = await findBotPid(symbol);
+    const pid = await findBotPid(symbol, botKeyRow?.bot_key);
     if (pid) {
       await killPid(pid);
     }
@@ -685,8 +741,8 @@ router.post("/:symbol/kill", async (req, res) => {
     }
 
     // State file is intentionally kept: a later Start restores the saved SL/TP
-    // from state_<symbol>.json instead of recalculating from config.
-    const stateFile = statePath(symbol);
+    // from state_<env>_<bot_key>.json instead of recalculating from config.
+    const stateFile = statePathForBot(symbol, botKeyRow?.bot_key);
     if (fs.existsSync(stateFile)) {
       console.log(`[KILL] Keeping state file for restore: ${stateFile}`);
     }
@@ -763,7 +819,18 @@ export async function reloadConfigsFromYaml(): Promise<void> {
     if (existing) {
       await db.update(botsTable).set(values).where(eq(botsTable.symbol, symbol));
     } else {
-      await db.insert(botsTable).values({ symbol, is_running: false, position: null, armed: BOT_ENV !== "live", relay_only: BOT_ENV === "live", ...values });
+      // Инстанс бота: bot_key = lower(symbol) для клиента №1. Позже для
+      // мульти-клиента ключ будет включать client_id (c2_btcusdt).
+      const [owner] = await db
+        .select({ id: clientsTable.id })
+        .from(clientsTable)
+        .where(eq(clientsTable.email, "system@local"))
+        .limit(1);
+      await db.insert(botsTable).values({
+        bot_key: symbol.toLowerCase(),
+        client_id: Number(owner?.id ?? 1),
+        symbol, is_running: false, position: null, armed: BOT_ENV !== "live", relay_only: BOT_ENV === "live", ...values,
+      });
     }
   }
 }

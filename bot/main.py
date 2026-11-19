@@ -631,7 +631,10 @@ async def _simulate_rejected_outcome(current_price, reporter, recovery, log):
 
 
 def _lock_file(symbol: str) -> str:
-    name = LOCK_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", symbol.lower())
+    # BOT_KEY — стабильный ключ инстанса (см. position_tracker._bot_key).
+    # Для клиента №1 = lower(symbol), имя lock-файла не меняется.
+    key = (os.getenv("BOT_KEY") or symbol).strip().lower() or symbol.lower()
+    name = LOCK_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", key)
     return os.path.join(os.path.dirname(__file__) or ".", name)
 def _process_is_bot(pid: int, symbol: str) -> bool:
     """Return True only if PID is a live Python process running this bot's main.py."""

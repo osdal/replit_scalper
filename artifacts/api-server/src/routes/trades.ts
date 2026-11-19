@@ -230,11 +230,15 @@ router.patch("/:id", async (req, res) => {
     const pnl = Number(updated.pnl ?? 0);
     if (wasOpen && nowClosed && pnl > 0 && updated.symbol) {
       try {
-        const [bot] = await db
-          .select({ user_id: botsTable.user_id })
-          .from(botsTable)
-          .where(eq(botsTable.symbol, updated.symbol.toUpperCase()))
-          .limit(1);
+        // Владелец — по bot_id: символ больше не уникален, при двух клиентах
+        // на BTCUSDT выборка по символу могла бы отдать чужого клиента.
+        // Fallback на символ остаётся только для старых сделок без bot_id.
+        const ownerCols = { user_id: botsTable.user_id, client_id: botsTable.client_id };
+        const [bot] = updated.bot_id != null
+          ? await db.select(ownerCols).from(botsTable)
+              .where(eq(botsTable.id, Number(updated.bot_id))).limit(1)
+          : await db.select(ownerCols).from(botsTable)
+              .where(eq(botsTable.symbol, updated.symbol.toUpperCase())).limit(1);
         const ownerId = bot?.user_id ?? null;
         await creditTradeProfit({
           tradeId: Number(updated.id),
@@ -323,7 +327,19 @@ router.get("/export", async (_req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    const [trade] = await db.insert(tradesTable).values(req.body).returning();
+    const body: any = { ...req.body };
+    // Атрибуция сделки инстансу бота: по bot_id считается комиссия и статистика
+    // клиента. Символ больше не уникален, поэтому бот позже будет присылать
+    // bot_id напрямую; пока — fallback по символу (клиент №1).
+    if (body.bot_id == null && body.symbol) {
+      const [bot] = await db
+        .select({ id: botsTable.id })
+        .from(botsTable)
+        .where(eq(botsTable.symbol, String(body.symbol).toUpperCase()))
+        .limit(1);
+      if (bot) body.bot_id = Number(bot.id);
+    }
+    const [trade] = await db.insert(tradesTable).values(body).returning();
     res.status(201).json(trade);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

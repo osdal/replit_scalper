@@ -22,6 +22,8 @@ const {
   usersTable,
   userInternalAccountsTable,
   internalTransactionsTable,
+  clientsTable,
+  clientAccountsTable,
 } = await import("@workspace/db/schema");
 const { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } =
   await import("@workspace/db");
@@ -49,7 +51,10 @@ const ENV_MAX_POSITIONS = sanitizeMaxPositions(process.env.MAX_POSITIONS, 1);
 
 // Создаём таблицы
 await db.run(sql`CREATE TABLE IF NOT EXISTS bots (
-  symbol TEXT PRIMARY KEY, mode TEXT NOT NULL, timeframe TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_key TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL, mode TEXT NOT NULL, timeframe TEXT NOT NULL,
   leverage INTEGER NOT NULL, risk_pct REAL NOT NULL, sl_pct REAL NOT NULL,
   tp1_pct REAL NOT NULL, tp1_close_pct REAL NOT NULL, tp2_pct REAL NOT NULL,
   ema_fast INTEGER NOT NULL, ema_slow INTEGER NOT NULL,
@@ -110,6 +115,7 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
 const { rows: tradeCols } = await db.run(sql`PRAGMA table_info(trades)`);
 const tradeColNames: string[] = (tradeCols as any[]).map((r: any) => String(r.name));
 const tradeExtraCols: Array<[string, string]> = [
+  ["bot_id", "INTEGER"],
   ["status", "TEXT NOT NULL DEFAULT 'open'"],
   ["reject_reason", "TEXT"],
   ["rsi", "REAL"],
@@ -162,6 +168,164 @@ for (const [col, ddl] of botExtraCols) {
     console.log(`  Added column bots.${col}`);
   }
 }
+
+// ── Платформа: клиенты, ключи, счета, журнал, аудит ────────────────────
+// balance_usd — предоплата обслуживания (подарок/пополнения − комиссии),
+// а не накопленная прибыль. При балансе ≤ 0 новые входы блокируются.
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'client',
+    status TEXT NOT NULL DEFAULT 'active',
+    fee_pct REAL NOT NULL DEFAULT 10,
+    gift_usd REAL NOT NULL DEFAULT 0,
+    telegram_chat_id TEXT,
+    auto_resume INTEGER NOT NULL DEFAULT 1,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS client_api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'binance',
+    label TEXT,
+    api_key_mask TEXT NOT NULL,
+    api_key_enc TEXT NOT NULL,
+    api_secret_enc TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    key_version INTEGER NOT NULL DEFAULT 1,
+    can_trade INTEGER,
+    can_withdraw INTEGER,
+    ip_whitelisted INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    last_checked_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_client_api_keys_client ON client_api_keys(client_id)`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS client_accounts (
+    client_id INTEGER PRIMARY KEY,
+    balance_usd REAL NOT NULL DEFAULT 0,
+    cum_pnl_usd REAL NOT NULL DEFAULT 0,
+    hwm_pnl_usd REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    balance_after_usd REAL NOT NULL,
+    cum_pnl_after_usd REAL,
+    related_bot_id INTEGER,
+    related_trade_id INTEGER,
+    reason TEXT,
+    actor TEXT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ledger_client ON ledger(client_id, created_at)`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ledger_trade ON ledger(related_trade_id)`);
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    payload TEXT,
+    ip TEXT,
+    created_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)`);
+
+// Клиент №1 — владелец текущих ботов (system@local). Остальные появятся
+// через регистрацию; боты к ним привязываются по client_id.
+let client1Id: number;
+{
+  const [row] = await db
+    .select()
+    .from(clientsTable)
+    .where(eq(clientsTable.email, "system@local"))
+    .limit(1);
+  if (row) {
+    client1Id = Number(row.id);
+  } else {
+    const [inserted] = await db
+      .insert(clientsTable)
+      .values({ email: "system@local", password_hash: "", role: "owner", status: "active", fee_pct: 10 })
+      .returning();
+    client1Id = Number(inserted.id);
+    console.log(`  Created client system@local (id=${client1Id})`);
+  }
+  await db
+    .insert(clientAccountsTable)
+    .values({ client_id: client1Id })
+    .catch(() => { /* счёт уже есть */ });
+}
+
+// Миграция bots: symbol PRIMARY KEY → id + bot_key + client_id.
+// Два клиента не могли торговать один символ: строка была одна. Теперь
+// инстанс бота имеет стабильный bot_key (UNIQUE), а пара (client_id, symbol)
+// уникальна. Для клиента №1 bot_key = lower(symbol) — старые URL, lock- и
+// state-файлы продолжают работать без переименований.
+const { rows: botColsNow } = await db.run(sql`PRAGMA table_info(bots)`);
+const botColsNowNames: string[] = (botColsNow as any[]).map((r: any) => String(r.name));
+if (!botColsNowNames.includes("id")) {
+  const cols = botColsNow as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+  const defs = cols.map((c) => {
+    // symbol был PK — в новой таблице это обычная NOT NULL колонка,
+    // уникальность даёт составной индекс (client_id, symbol).
+    const notNull = c.name === "symbol" ? 1 : Number(c.notnull);
+    return `${c.name} ${c.type || "TEXT"}${notNull ? " NOT NULL" : ""}${c.dflt_value != null ? ` DEFAULT ${c.dflt_value}` : ""}`;
+  });
+  const copyCols = cols
+    .map((c) => c.name)
+    .filter((n) => !["id", "bot_key", "client_id"].includes(n));
+  const list = copyCols.join(", ");
+  await db.run(sql`DROP TABLE IF EXISTS bots_migrate_tmp`);
+  await db.run(sql`BEGIN IMMEDIATE`);
+  try {
+    await db.run(sql.raw(`CREATE TABLE bots_migrate_tmp (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_key TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  ${defs.join(",\n  ")}
+)`));
+    await db.run(sql.raw(
+      `INSERT INTO bots_migrate_tmp (bot_key, client_id, ${list})
+       SELECT lower(symbol), ${client1Id}, ${list} FROM bots`
+    ));
+    await db.run(sql`DROP TABLE bots`);
+    await db.run(sql`ALTER TABLE bots_migrate_tmp RENAME TO bots`);
+    await db.run(sql`COMMIT`);
+    console.log(`  Migrated bots → instances (id/bot_key/client_id), ${cols.length} columns`);
+  } catch (e) {
+    await db.run(sql`ROLLBACK`).catch(() => { /* транзакция уже закрыта */ });
+    throw e;
+  }
+}
+await db.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_bots_client_symbol ON bots(client_id, symbol)`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_bots_client ON bots(client_id)`);
+
+// Атрибуция существующих сделок: bot_id по символу (клиент №1).
+await db.run(sql`
+  UPDATE trades SET bot_id = (SELECT b.id FROM bots b WHERE b.symbol = trades.symbol)
+  WHERE bot_id IS NULL
+`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_trades_bot_id ON trades(bot_id)`);
 
 // Внутренние счета пользователей (комиссия 10% с прибыли при продаже ботов).
 await db.run(sql`
@@ -361,6 +525,8 @@ for (const file of configs) {
   }
 
   await db.insert(botsTable).values({
+    bot_key: symbol.toLowerCase(),
+    client_id: client1Id,
     symbol, mode: (raw.mode as string) || "live",
     timeframe: raw.timeframe as string, leverage: raw.leverage as number,
     risk_pct: raw.risk_pct as number, sl_pct: raw.sl_pct as number,

@@ -23,13 +23,23 @@ STATE_FILE_TEMPLATE = "state_{env}_{symbol}.json"
 _LEGACY_STATE_FILE_TEMPLATE = "state_{symbol}.json"
 
 
+def _bot_key(symbol: str) -> str:
+    """Стабильный ключ инстанса (BOT_KEY прокидывает API при запуске).
+
+    Для клиента №1 совпадает с lower(symbol), поэтому существующие state-файлы
+    продолжают находиться без миграции. У второго клиента на том же символе
+    будет свой ключ (например, c2_btcusdt) и свой файл состояния.
+    """
+    return (os.getenv("BOT_KEY") or symbol).strip().lower() or symbol.lower()
+
+
 def _state_file(symbol: str) -> str:
-    name = STATE_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", symbol.lower())
+    name = STATE_FILE_TEMPLATE.replace("{env}", BOT_ENV).replace("{symbol}", _bot_key(symbol))
     return os.path.join(os.path.dirname(os.path.abspath(__file__)) or ".", name)
 
 
 def _legacy_state_file(symbol: str) -> str:
-    name = _LEGACY_STATE_FILE_TEMPLATE.replace("{symbol}", symbol.lower())
+    name = _LEGACY_STATE_FILE_TEMPLATE.replace("{symbol}", _bot_key(symbol))
     return os.path.join(os.path.dirname(os.path.abspath(__file__)) or ".", name)
 
 
