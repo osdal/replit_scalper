@@ -73,7 +73,58 @@ export async function getWalletBalanceUsd(opts?: { fresh?: boolean }): Promise<n
   }
 }
 
+/**
+ * Единый снимок счёта USDT-M Futures: wallet + unrealized + equity.
+ *
+ * Один источник для `/api/live/drawdown`, `/api/trading/status` и
+ * `/api/live/daily-loss`: дашборд больше не показывает два разных «баланса».
+ * Дневной лимит при этом по-прежнему считается от базы на начало дня
+ * (`dailyRiskSnapshot.baseline`), а не от текущего кошелька.
+ *
+ * Кэш короткий (5 с), чтобы частый polling дашборда не весил по лимитам
+ * Binance, но числа на экране оставались актуальными.
+ */
+export type LiveAccount = { wallet: number; upnl: number; equity: number };
+
+const ACCOUNT_TTL_MS = 5_000;
+let acctCache: { value: LiveAccount; ts: number } | null = null;
+
+export async function getLiveAccount(opts?: { fresh?: boolean }): Promise<LiveAccount> {
+  const now = Date.now();
+  if (!opts?.fresh && acctCache && now - acctCache.ts < ACCOUNT_TTL_MS) {
+    return acctCache.value;
+  }
+
+  try {
+    await syncBinanceTime();
+  } catch { /* ниже повторим запрос и вернём ошибку из него */ }
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const raw = await binanceRequest("GET", "/fapi/v2/account", {});
+      const wallet = Number(raw?.totalWalletBalance ?? 0) || 0;
+      const upnl = Number(raw?.totalUnrealizedProfit ?? 0) || 0;
+      const equity = Number(raw?.totalMarginBalance ?? wallet + upnl) || 0;
+      const value = { wallet, upnl, equity };
+      if (wallet > 0) acctCache = { value, ts: Date.now() };
+      return value;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+
+  // Fail-safe: последний успешный снимок, иначе баланс из env (не 0 —
+  // иначе процентные лимиты молча отключились бы).
+  console.error("[balance] live account fetch failed:", String(lastErr));
+  if (acctCache) return acctCache.value;
+  const wallet = cache.value > 0 ? cache.value : fallbackDepositUsd();
+  return { wallet, upnl: 0, equity: wallet };
+}
+
 /** Сбросить кэш (тесты/ручной сброс после крупных операций). */
 export function resetWalletBalanceCache(): void {
   cache = { value: 0, ts: 0 };
+  acctCache = null;
 }

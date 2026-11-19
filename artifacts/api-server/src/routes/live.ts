@@ -6,7 +6,7 @@ import { db, botsTable } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { BOT_DIR, BOT_ENV } from "../botPaths";
 import { binanceRequest, syncBinanceTime } from "../grid-orders-lib";
-import { getWalletBalanceUsd } from "../lib/account-balance";
+import { getLiveAccount, getWalletBalanceUsd } from "../lib/account-balance";
 import {
   dailyRiskSnapshot,
   dayKey,
@@ -149,13 +149,28 @@ router.get("/daily-loss", async (_req, res) => {
     const snap = await dailyRiskSnapshot({
       configuredUsd: Number(process.env.LIVE_DAILY_LOSS_LIMIT_USD || "0"),
     });
+    // wallet_balance_usd — ТЕКУЩИЙ баланс (тот же, что в /drawdown и
+    // /trading/status). База на начало дня остаётся в `baseline`, от неё
+    // считается лимит.
+    let wallet = snap.baseline;
+    let walletSource = "daily_baseline";
+    try {
+      const acct = await getLiveAccount();
+      if (acct.wallet > 0) {
+        wallet = acct.wallet;
+        walletSource = "binance:totalWalletBalance";
+      }
+    } catch (e) {
+      console.error("[live] daily-loss wallet fetch failed:", String(e));
+    }
     res.json({
       bot_env: BOT_ENV,
       day: snap.day,
       limit: snap.limit_usd,
       limit_pct: snap.pct,
       limit_source: snap.mode,
-      wallet_balance_usd: snap.baseline,
+      wallet_balance_usd: Number(wallet.toFixed(4)),
+      wallet_source: walletSource,
       net: snap.total,
       realized: snap.realized,
       unrealized: snap.unrealized,
@@ -241,20 +256,8 @@ const lastCloseBySymbol = new Map<string, number>();
 
 type LiveAccount = { wallet: number; upnl: number; equity: number };
 async function liveAccount(): Promise<LiveAccount> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const raw = await binanceRequest("GET", "/fapi/v2/account", {});
-      const wallet = Number(raw?.totalWalletBalance ?? 0) || 0;
-      const upnl = Number(raw?.totalUnrealizedProfit ?? 0) || 0;
-      const equity = Number(raw?.totalMarginBalance ?? wallet + upnl) || 0;
-      return { wallet, upnl, equity };
-    } catch (e) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-    }
-  }
-  throw lastErr ?? new Error("account fetch failed");
+  // Один источник счёта на весь API (см. lib/account-balance.getLiveAccount).
+  return getLiveAccount();
 }
 
 type LivePosition = { symbol: string; amt: number; upnl: number; lossPct: number };
@@ -356,6 +359,7 @@ router.get("/drawdown", async (_req, res) => {
     })));
     res.json({
       bot_env: BOT_ENV, wallet: acct.wallet, upnl: acct.upnl, equity: acct.equity,
+      wallet_source: "binance:totalWalletBalance",
       reference: acct.wallet,
       threshold_pct: worst ? await resolvePositionLossPct(worst.symbol) : globalThreshold,
       default_threshold_pct: globalThreshold,

@@ -19,6 +19,7 @@ import { stopAllBots } from "./bots";
 import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
 import { dailyRiskSnapshot } from "../lib/dailyRisk";
+import { getLiveAccount } from "../lib/account-balance";
 import { currentBan } from "../lib/binanceBan";
 import { BOT_DIR, BOT_ENV } from "../botPaths";
 
@@ -652,6 +653,17 @@ router.get("/status", async (_req, res) => {
     }
     const st = await slots.inspect(() => loadOccupiedSymbols(cfg.max_positions_ignore_after_hours * 60));
     const daily = await dailyRiskSnapshot({ configuredUsd: cfg.daily_loss_limit_usd });
+    // Баланс — из единого источника (lib/account-balance), тот же, что в
+    // /api/live/drawdown и /api/live/daily-loss. Раньше здесь отдавалась
+    // daily.baseline (баланс на 00:00 по Киеву), из-за чего в UI было два
+    // разных «баланса» (9.3024 vs 9.4931). База остаётся в daily_baseline_usd.
+    let liveAcct: { wallet: number; upnl: number; equity: number } | null = null;
+    try {
+      liveAcct = await getLiveAccount();
+    } catch (e) {
+      console.error("[trading/status] wallet fetch failed:", String(e));
+    }
+    const walletUsd = liveAcct && liveAcct.wallet > 0 ? liveAcct.wallet : daily.baseline;
     const daily_net = daily.total;
     const daily_loss = Math.max(0, -daily_net);
     const free_debt = await getFreeDebt();
@@ -678,7 +690,10 @@ router.get("/status", async (_req, res) => {
       daily_realized: daily.realized,
       daily_unrealized: daily.unrealized,
       daily_remaining_usd: daily.remaining_usd,
-      wallet_balance_usd: daily.baseline,
+      wallet_balance_usd: Number(walletUsd.toFixed(4)),
+      wallet_source: liveAcct && liveAcct.wallet > 0 ? "binance:totalWalletBalance" : "daily_baseline",
+      equity_usd: liveAcct ? Number(liveAcct.equity.toFixed(4)) : null,
+      upnl_usd: liveAcct ? Number(liveAcct.upnl.toFixed(4)) : null,
       daily_loss: Number(daily_loss.toFixed(2)),
       daily_net: Number(daily_net.toFixed(2)),
       binance_ban_until_ms: ban.banUntilMs > Date.now() ? ban.banUntilMs : 0,
