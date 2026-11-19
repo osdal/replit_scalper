@@ -763,7 +763,8 @@ Stop-Process -Name node -ErrorAction SilentlyContinue
    При повторном запуске в том же процессе (например, в Jupyter/IDE) вызовет `RuntimeError: asyncio.run() cannot be called from a running event loop`.
 
 5. **`bot/order_manager.py` строки 558-589 — fallback на userTrades**  
-   Парсинг `futures_account_trades` для PnL может быть неточным при сложных сценариях (частичные закрытия,Funding). Рекомендуется полагаться на `futures_income_history` там, где возможно.
+   Парсинг `futures_account_trades` для PnL может быть неточным при сложных сценариях (частичные закрытия,Funding). Рекомендуется полагаться на `futures_income_history` там, где возможно.  
+   **Обновлено 18.11.2026:** расхождения закрытых сделок теперь сверяются с биржей отдельным скриптом `bot/reconcile_pnl.py` (см. §19).
 
 6. **`bot/market_data.py` строки 145-148 — `_kline_to_series` не используется**  
    Функция определена, но нигде не вызывается — можно удалить или использовать для WebSocket-адаптера.
@@ -1094,6 +1095,9 @@ Daily-скрипт регистрируется в планировщике за
 ---
 
 ## 16. Changelog
+
+> Новейшие изменения (17–19.11.2026: сверка PnL, единый баланс, тесты, доступ с телефона,
+> deploy key) собраны в **[§19](#19-сверка-pnl-единый-баланс-и-рабочее-окружение-1719112026)**.
 
 ### 2026-10-12 (скрытие rejected, деплой-инструменты, фикс фильтра symbol)
 
@@ -1519,6 +1523,10 @@ docker-compose down
   - биржевой backstop ставится от **виртуального SL** (а не от входа), т.к. SL ступенчатый.
 
 ### 18.4 Лимиты риска (live)
+> **Актуально на 19.11.2026 — см. §19.6–19.7.** Дневной лимит считается в `lib/dailyRisk.ts` как
+> процент от базы на начало дня (граница — Europe/Kyiv), а не `$10` за UTC-сутки; порог убытка
+> позиции — один глобальный `max_position_loss_pct` из `data/global_limits_<env>.json`.
+> `LIVE_DAILY_LOSS_LIMIT_USD` и `LIVE_MAX_DRAWDOWN_PCT` для live больше не используются.
 - **Дневной лимит** `LIVE_DAILY_LOSS_LIMIT_USD=10`: net за UTC-сутки ≤ −$10 → `stopAllBots()` + `flattenAll()` («заморозка»), `artifacts/api-server/src/routes/live.ts`.
 - **Просадка** `LIVE_MAX_DRAWDOWN_PCT=5`: просадка от **максимума баланса** (high-water mark, `data/live_drawdown_peak.json`) ≥ 5 % → закрытие **одной самой убыточной** позиции (`bot/close_worst.py`, market reduceOnly), **без остановки ботов**. Проверка каждые 20 с, кулдаун 5 мин.
   - Референс: `LIVE_DEPOSIT_USD=0` → пик баланса; `>0` → фиксированный депозит.
@@ -1544,6 +1552,9 @@ docker-compose down
 - `tick_sl_tp_check` (`bot/main.py`) теперь просыпается **сразу на каждом обновлении цены** (событие `price_event`, приходит от `markPrice@1s`/kline) с полом в 1с — вместо фиксированных 5с. Виртуальный SL/TP срабатывает быстрее и меньше зависит от интервала и сетевого лага (снижает риск, что биржевой backstop сработает раньше реверса).
 
 ### 18.9 Защёлка просадки (анти-черн) и закрытие только убыточных позиций
+> **Обновлено 11.11.2026:** `checkMaxDrawdown()` в `live.ts` больше не закрывает позиции (ранний
+> `return`). Второй ограничитель убран намеренно: убыток позиции контролирует сам бот по глобальному
+> `max_position_loss_pct` (§19.6–19.7). Описание ниже — история механизма, не текущее поведение.
 - `checkMaxDrawdown` (`artifacts/api-server/src/routes/live.ts`) теперь срабатывает **однократно на «заход»**: при `dd ≥ LIVE_MAX_DRAWDOWN_PCT` закрывает худшую позицию и ставит `armed=false`; повторно **не** закрывает, пока просадка не восстановится ниже порога (`armed=true`). Состояние `{peak, armed}` хранится в `data/live_drawdown_peak.json`.
   - Зачем: без защёлки механизм закрывал «худшую» позицию **каждые 5 мин** → бот тут же открывал новую → черн и серия мелких потерь (в БД выглядели как `stale_close`).
 - `bot/close_worst.py` закрывает **только убыточные** позиции (`uPnL < 0`); прибыльные не трогает.
@@ -1596,29 +1607,29 @@ docker-compose down
   - интерпретатор python резолвится один раз и кэшируется в `cachedPythonCmd` (`hasDeps` = `execSync` с импортом `pandas`+`binance` больше не выполняется на каждый старт бота);
   - если перебор процессов не удался (`tryFindAllBotPids` вернул `null`), stale-ресет пропускается, чтобы не пометить живых ботов остановленными.
 
-### 19. Исправления 2026-10-16 (Oracle live: сделки не открывались, боты не запускались)
+### 18.17 Исправления 2026-10-16 (Oracle live: сделки не открывались, боты не запускались)
 
-#### 19.1 `bot/cum_loss_cap.py` — отсутствовал метод `reset`
+#### 18.17.1 `bot/cum_loss_cap.py` — отсутствовал метод `reset`
 - **Симптом:** Боты запускались, но при закрытии каждой свечи падали с `AttributeError: 'CumLossCap' object has no attribute 'reset'`. Торговля не шла, код exits code=1.
 - **Причина:** Метод `reset(symbol)` вызывался в `should_close` (строка 220) и `mark_chain_ended`, но не был объявлен в классе `CumLossCap`.
 - **Исправление:** Добавлен метод `reset(symbol)` в класс `CumLossCap` — сбрасывает `_ref`, `_initialized`, `_in_reverse_chain`, `_realized`, `_ts`, `_warn_ts` для указанного символа.
 
-#### 19.2 `artifacts/api-server/src/routes/trades.ts` — коррупция файла (unaired characters, сломанные строковые литералы)
+#### 18.17.2 `artifacts/api-server/src/routes/trades.ts` — коррупция файла (unaired characters, сломанные строковые литералы)
 - **Симптом:** API-сервер не стартовал: `SyntaxError: Unterminated string literal` и `Unexpected ","` при парсинге `trades.ts`.
 - **Причина:** Файл скопировался с повреждёнными символами (пропущенные кавычки `return ";` вместо `return "";`), сломанные регулярные выражения `replace(//g, '')`, сломанный тип аннотации `Map<string, { ... }>`, сломанные `replace(/\\g, '')`.
 - **Исправление:** Файл заменён на исправленную версию с репозитория хоста.
 
-#### 19.3 `artifacts/api-server/src/botPaths.ts` — `configPath()` возвращал относительный путь
+#### 18.17.3 `artifacts/api-server/src/botPaths.ts` — `configPath()` возвращал относительный путь
 - **Симптом:** Живые боты запускались процессами, но API-сервер в reconcile-цикле не находил их (`[reconcile] <symbol>: no live process — marked stopped`) и помечал остановленными.
 - **Причина:** `configPath()` возвращал относительный путь `configs/live/config_*.yaml`, а процесс запускался с абсолютным путём через `BOT_CONFIG_DIR`. Совпадение `cmd.includes(BOT_CONFIG_DIR)` не находилось.
 - **Исправление:** `configPath()` возвращает `path.join(BOT_CONFIG_DIR, configFileName(symbol))` — полный абсолютный путь, совпадающий с командой запуска процесса.
 
-#### 19.4 `docker-compose.yml` — отсутствовала переменная `BINANCE_TESTNET=false` для `api-live`
+#### 18.17.4 `docker-compose.yml` — отсутствовала переменная `BINANCE_TESTNET=false` для `api-live`
 - **Симптом:** Живые боты запускались, но сразу падали при попытке подключения к Binance.
 - **Причина:** В `docker-compose.yml` для `api-live` не было переменной `BINANCE_TESTNET`. Без неё бот не мог подключиться к live API Binance и выходил с ошибкой.
 - **Исправление:** Добавлена переменная `- BINANCE_TESTNET=false` в секцию `environment` сервиса `api-live`.
 
-#### 19.5 `botPaths.ts` — временное изменение `configPath` (отменено)
+#### 18.17.5 `botPaths.ts` — временное изменение `configPath` (отменено)
 - Во время отладки `configPath` временно возвращал относительный путь `path.join("configs", BOT_ENV, configFileName(symbol))`. Возвращено к absolue путю через `BOT_CONFIG_DIR`, так как иначе reconcile-цикл не находил процессы ботов.
 
 ### Как запустить после деплоя
@@ -1853,4 +1864,131 @@ quantity и попытки закрыть остаток, который бир�
   SYNC видит условный TP, пересчёт снимает его из algo-книги, осиротевший closePosition-стоп снимается
   перед постановкой нового, -4130 без запаса → None); весь набор
   `cd bot && python -m pytest tests -q` — **170 passed**.
+
+---
+
+## 19. Сверка PnL, единый баланс и рабочее окружение (17–19.11.2026)
+
+Раздел фиксирует то, что появилось после §18: сверка закрытых сделок с биржей, юнит-тесты,
+один источник баланса в API и настройка работы с телефона. Даты — Europe/Kyiv.
+
+### 19.1 Зачем сверять PnL с биржей
+Бот считает PnL локально (трекер + `OrderManager.get_realized_pnl()`), и при закрытии «извне»
+(SIGTERM, `close_all`, ветка «reverse не открыт», срабатывание биржевого стопа) fallback может вернуть
+`-entry_commission` — в БД вместо долларов оказывается `-$0.02`. Такие строки незаметно искажают
+статистику и дневной лимит. Источник истины — `futures_account_trades` (`userTrades`) Binance.
+
+### 19.2 Как работает `bot/reconcile_pnl.py`
+- Модель БД: одна строка `trades` = один цикл (исходная нога + реверсы), `pnl`/`cycle_pnl` — итог цикла.
+- `_align_flat()` отрезает ведущие «закрывающие» филлы прошлого цикла (`realizedPnl ≠ 0` при позиции 0).
+- `_round_trips()` собирает round-trip'ы «позиция 0 → … → 0»; флип закрывает текущий и открывает новый.
+  `|pos| <= 1e-9` считается нулём (почему — §19.4).
+- `net = Σ realizedPnl + Σ commission + funding` за цикл (комиссия в `userTrades` положительная — вычитается).
+- Строка патчится только при однозначной привязке: последний trip в ±180 с от `exit_time`,
+  `len(trips) == chain_depth`, направление совпадает. Для одиночной ноги — fallback по `entry/exit` ±15 мин
+  и цене входа ±0,5 %.
+- Запись: `UPDATE … WHERE id=? AND ROUND(pnl,4)=?` — если строку успел изменить бот, запись пропускается.
+- Обновляются `pnl`, `commission` и (если совпадал) `cycle_pnl`. Допуск на расхождение — $0.01.
+- Окно чтения филлов — от закрытия предыдущего цикла; ≥1000 филлов на символ → skip (история обрезана).
+
+### 19.3 Запуск и cron
+```bash
+# из контейнера api-live (там есть binance и .env.live)
+docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py --hours 48           # dry-run
+docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py --hours 48 --apply   # запись
+
+# один символ / свой допуск
+docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py \
+  --hours 168 --symbol ATOMUSDT --drift-sec 180
+```
+По умолчанию — **dry-run** (в БД ничего не пишет). Лог: `data/pnl_reconcile.log`.
+
+Cron пользователя `ubuntu` (каждый час):
+```
+17 * * * * /usr/bin/sudo -n docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py --hours 48 --apply --limit 20 >> /opt/trading-bot/data/cron_pnl_reconcile.log 2>&1
+```
+Вывод cron дополнительно пишется в `data/cron_pnl_reconcile.log`.
+
+### 19.4 Результат и разобранный кейс `#48714 ATOMUSDT`
+Текущий прогон: `checked=42 mismatched=0 updated=0 no_trip=0 errors=0` — расхождений нет.
+
+До фикса каждый час висела одна строка:
+`#48714 ATOMUSDT skip: привязка к round-trip'у неоднозначна (граница цикла не собрана)`.
+Причина оказалась не в данных, а в float: `-3.84 + 3.84 = 6.7e-16`. Условие переворота
+`pos < 0 < new_pos` считало это переворотом → появлялась фантомная нога `LONG 15:42:03..15:50:03`
+с `rp=0` → `len(cycle)=3` при `chain_depth=2` → skip. Фикс: нормализация `|pos| <= QTY_EPS (1e-9)`
+в `_round_trips()` и `_align_flat()`. PnL строки при этом не изменился (`net = 0.014184` совпал с БД).
+
+### 19.5 Тесты
+```bash
+cd /opt/trading-bot
+python3 -m unittest discover -s tests -t . -v     # 12 тестов
+```
+- `tests/test_reconcile_pnl.py` — `_parse_ms`, `_round_trips`, `_align_flat`: простая нога, частичное
+  закрытие, флип, регресс float-остатка (`#48714`), комиссия в не-USDT, хвост прошлого цикла.
+- Только stdlib `unittest`: pytest на сервере не установлен. Тесты запускаются **на хосте** — каталог
+  `tests/` не смонтирован в контейнер (проброшены `bot/`, `data/`, `lib/`, `logs/`,
+  `artifacts/api-server/src/`).
+- `bot/tests/` (170 тестов) по-прежнему запускаются через pytest: `cd bot && python -m pytest tests -q`.
+
+### 19.6 Один источник баланса
+`lib/account-balance.ts` → `getLiveAccount()`: `wallet`/`upnl`/`equity` из `/fapi/v2/account`,
+кэш 5 с, 3 попытки, fail-safe (последний успешный снимок, иначе `DEPOSIT_USD`).
+
+| эндпоинт | поля | источник |
+|---|---|---|
+| `GET /api/trading/status` | `wallet_balance_usd`, `equity_usd`, `upnl_usd` | `getLiveAccount()` |
+| `GET /api/live/drawdown` | `wallet`, `equity`, `reference` | `getLiveAccount()` |
+| `GET /api/live/daily-loss` | `wallet_balance_usd` | `getLiveAccount()` |
+
+Во всех трёх есть `wallet_source` (`binance:totalWalletBalance` или `daily_baseline`).
+До 19.11 `/status` отдавал `daily.baseline` (баланс на 00:00 по Киеву), из-за чего в UI было два разных
+«баланса» на одном счёте: 9.3024 и 9.4931. База дня осталась отдельным полем
+(`daily_baseline_usd` / `baseline`) и продолжает задавать дневной лимит.
+
+### 19.7 Дневной лимит и глобальные лимиты
+- Расчёт — `lib/dailyRisk.ts`: `net(день) = Σ pnl закрытых сегодня + unrealized`, граница дня —
+  **Europe/Kyiv** (не UTC).
+- База — `data/daily_baseline_<env>.json`: фиксируется один раз в начале дня как `wallet − realized`.
+- Лимит — `база × total_loss_pct / 100` (live: 10 %); при `net <= -лимит` — stop + flatten.
+- `data/global_limits_<env>.json` (правится из дашборда, применяется без рестарта):
+  `max_positions: 3`, `max_positions_with_expired: 6`, `max_position_loss_pct: 20`.
+- Убыток позиции ограничен **одним** глобальным `max_position_loss_pct`; per-bot `position_loss_pct`
+  и env `LIVE_MAX_DRAWDOWN_PCT` не используются, `checkMaxDrawdown()` в `live.ts` — no-op.
+- «Протухшие» цепочки: `EXPIRED_HARD_CLOSE_HOURS=0` (по возрасту не закрываются) и закрытие только когда
+  net ≥ комиссия выхода + `EXPIRED_CLOSE_MIN_PROFIT_USD` ($0.02).
+
+### 19.8 Работа с телефона (OpenCode на VPS)
+ПК может быть выключен: сервер OpenCode живёт на VPS.
+- бинарь `~/.opencode/bin/opencode`, сервис слушает `127.0.0.1:49374`;
+- systemd user unit `opencode.service` + `loginctl enable-linger ubuntu`;
+- наружу — через OpenTunnel (`remote=true`), адрес переживает рестарт сервиса;
+- пароль: `~/.opencode/bin/opencode service get password` (в репозиторий и README не кладём);
+- проект — `/opt/trading-bot`, сессия «Скальнер 3»;
+- проверка «я на VPS»: `hostname` → `trading-bot`, `whoami` → `ubuntu`.
+
+### 19.9 Пуш из сервера (deploy key)
+`git push` с VPS работает по SSH-ключу, привязанному к одному репозиторию:
+- remote: `git@github-replit:osdal/replit_scalper.git`;
+- `~/.ssh/config` → `Host github-replit` через `ssh.github.com:443` (работает при блокировке порта 22);
+- ключ `~/.ssh/replit_scalper_deploy` (ed25519, права `600`); публичная часть добавляется в
+  GitHub → Settings → Deploy keys с галочкой **Allow write access**;
+- один ключ = один репозиторий (GitHub не разрешает переиспользовать тот же публичный ключ);
+- отзыв — удалить deploy key в настройках репозитория.
+
+### 19.10 Локальный архив
+Старые бэкапы и черновики перенесены в `_attic/2026-11-19/` (41 файл: `_backup_api_*`, `trades.ts.*`,
+`*.bak_*`, `tmp_*`, `pre-git-*.tar.gz` и т.п.). Ничего не удалено. `_attic/` и `*.bak_*` — в `.gitignore`.
+
+### 19.11 Чек-лист после деплоя API
+```bash
+curl -s localhost:5001/api/healthz
+curl -s localhost:5001/api/trading/status  | python3 -m json.tool | head -30
+curl -s localhost:5001/api/live/drawdown
+curl -s localhost:5001/api/live/daily-loss
+docker exec replit_scalper-api-live python3 /app/bot/reconcile_pnl.py --hours 48   # dry-run
+cd /opt/trading-bot && python3 -m unittest discover -s tests -t . -v
+```
+Ожидаемо: `wallet` одинаковый во всех трёх эндпоинтах (spread 0), `mismatched=0`, тесты `OK`.
+
 
