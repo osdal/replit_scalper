@@ -6,6 +6,7 @@
 (function () {
   "use strict";
 
+  document.title = "Регистрация доступа";
   var API = "/bot-api/registration";
   var root = document.getElementById("osd-register-root");
   if (!root) return;
@@ -15,7 +16,7 @@
   var cfg = { ready: false, bot_username: "", bot_name: "", platform: "OSDAL Scalper" };
 
   // ───────────────────────── стили ─────────────────────────
-  var CSS = ""
+  var CSS = "html,body{background:#0f1115;margin:0;padding:0;min-height:100vh;}"
     + "#osd-register-root{--osd-bg:#0f1115;--osd-card:#171a21;--osd-line:#262b36;--osd-text:#e8ebf0;--osd-muted:#9aa3b2;--osd-accent:#2aabee;--osd-ok:#22c55e;--osd-err:#ef4444;"
     + "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:var(--osd-text);max-width:620px;margin:0 auto;}"
     + "#osd-register-root *{box-sizing:border-box;}"
