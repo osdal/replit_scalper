@@ -2383,6 +2383,7 @@ Done
 |---|---|
 | `/opt/trading-bot/services/registration/app.py` | HTTP-сервис (только stdlib Python), порт 5100 |
 | `/opt/trading-bot/services/registration/widget.js` | Весь UI страницы регистрации (стили + логика), отдаётся по `/bot-api/registration/widget.js` |
+| `/opt/trading-bot/services/registration/page-registration.html` | Пустой шаблон страницы WordPress (без header/footer) — копировать в тему |
 | `/opt/trading-bot/services/registration/registration.service` | Копия systemd-unit для истории |
 | `/etc/systemd/system/tradingbot-registration.service` | Живой unit (`enable`, `Restart=always`) |
 | `/opt/trading-bot/data/registration_config.json` | Токен и username бота (**не в git**, создаётся вручную) |
@@ -2496,6 +2497,13 @@ curl -s -o /dev/null -w '%{http_code}\n' https://osdal.duckdns.org/bot-api/regis
 
 После правки `widget.js` перезапуск не нужен (файл читается на каждый запрос),
 после правки `app.py` — `systemctl restart tradingbot-registration`.
+
+При пересоздании контейнера WordPress (том `wp_data` сохраняется, но тема может
+обновиться) заново положить шаблон:
+```
+docker cp services/registration/page-registration.html wp_osdal_app:/var/www/html/wp-content/themes/twentytwentyfive/templates/page-registration.html
+```
+и выставить мета `_wp_page_template = page-registration` для страницы `scalper-register`.
 
 ### 23.9. Проверено
 
