@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, registrationUsers, registrationStats, registrationSetStatus, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -905,6 +905,9 @@ export default function Dashboard() {
   const [internalTransactions, setInternalTransactions] = useState<InternalTransaction[]>([]);
   const [internalError, setInternalError] = useState<string | null>(null);
   const [internalLoading, setInternalLoading] = useState(false);
+  const [topUpAmount, setTopUpAmount] = useState("");
+  const [topUpReason, setTopUpReason] = useState("");
+  const [topUpBusy, setTopUpBusy] = useState(false);
   const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
   const [regStats, setRegStats] = useState<RegistrationStats | null>(null);
   const [regLoading, setRegLoading] = useState(false);
@@ -1081,6 +1084,27 @@ export default function Dashboard() {
       setInternalLoading(false);
     }
   }, []);
+
+  const handleTopUp = useCallback(async () => {
+    const amount = Number(String(topUpAmount).replace(",", "."));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setInternalError("Введите сумму пополнения больше нуля");
+      return;
+    }
+    try {
+      setTopUpBusy(true);
+      setInternalError(null);
+      const result = await internalTopUp(amount, topUpReason.trim() || undefined);
+      setNotice(`Счёт пополнен на ${fmt(result.amountUsd, 2)} USD`);
+      setTopUpAmount("");
+      setTopUpReason("");
+      await loadInternal();
+    } catch (e: any) {
+      setInternalError(e.message || "Не удалось пополнить счёт");
+    } finally {
+      setTopUpBusy(false);
+    }
+  }, [topUpAmount, topUpReason, loadInternal]);
 
   useEffect(() => {
     load();
@@ -2279,9 +2303,49 @@ export default function Dashboard() {
                   <CardContent className="space-y-2 text-sm text-zinc-400">
                     <p>• Это <span className="text-zinc-200">предоплата за обслуживание</span>, а не кошелёк с торговой прибылью. Прибыль остаётся на биржевом счету и сюда <span className="text-zinc-200">не зачисляется</span>.</p>
                     <p>• При закрытии <span className="text-zinc-200">прибыльной</span> сделки с баланса списывается <span className="text-zinc-200">10% от её pnl</span> — с каждой, без high-water mark. Убыточная или нулевая сделка баланс не меняет.</p>
-                    <p>• Пополнение — только вручную (сейчас владельцем, позже клиентом) через <code className="text-zinc-300">POST /api/internal-account/topup</code> с админ-токеном.</p>
+                    <p>• Пополнение — только вручную (сейчас владельцем, позже клиентом): форма ниже отправляет запрос от вашего имени, админ-токен добавляется сервером дашборда.</p>
                     <p>• <span className="text-zinc-200">Накопленный PnL</span> ниже — справочная статистика, на комиссию она не влияет. HWM больше не используется для расчёта.</p>
                     <p className="text-amber-300/90">• При балансе ≤ 0 списание уводит его в минус (долг); блокировка новых входов будет добавлена отдельно.</p>
+                  </CardContent>
+                </Card>
+
+                <Card className="border border-zinc-800 bg-zinc-900">
+                  <CardHeader>
+                    <CardTitle className="text-base text-zinc-300">Пополнить внутренний счёт</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        placeholder="Сумма, USD"
+                        value={topUpAmount}
+                        onChange={e => setTopUpAmount(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
+                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none sm:w-48"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Причина (необязательно)"
+                        value={topUpReason}
+                        onChange={e => setTopUpReason(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
+                        className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => void handleTopUp()}
+                        disabled={topUpBusy || !(Number(topUpAmount) > 0)}
+                        className="whitespace-nowrap"
+                      >
+                        {topUpBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <DollarSign className="w-4 h-4 mr-1.5" />}
+                        Пополнить
+                      </Button>
+                    </div>
+                    <p className="text-xs text-zinc-500">
+                      Админ-токен не хранится в браузере: заголовок добавляет серверная часть дашборда при проксировании запроса.
+                    </p>
                   </CardContent>
                 </Card>
 

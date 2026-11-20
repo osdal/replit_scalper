@@ -254,6 +254,22 @@ export async function internalStatement(limit = 200) {
   return apiFetch(`${API}/internal-account/statement?limit=${limit}`);
 }
 
+/** Ручное пополнение внутреннего счёта (админ-токен добавляет vite-прокси). */
+export async function internalTopUp(amountUsd: number, reason?: string): Promise<{
+  ok: boolean;
+  clientId: number;
+  amountUsd: number;
+  balanceBeforeUsd: number;
+  balanceAfterUsd: number;
+  alreadyApplied: boolean;
+}> {
+  return apiFetch(`${API}/internal-account/topup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amountUsd, reason: reason || undefined }),
+  });
+}
+
 // ── Регистрация пользователей через Telegram ────────────────────────────────
 // Отдельный сервис (127.0.0.1:5100). Через домен путь /bot-api идёт в Caddy →
 // сервис регистрации; при прямом доступе к vite работает прокси из vite.config.

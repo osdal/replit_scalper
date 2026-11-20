@@ -26,6 +26,12 @@ export default defineConfig(({ mode }) => {
   const regTarget =
     process.env.DASHBOARD_REG_TARGET || env.DASHBOARD_REG_TARGET || "http://127.0.0.1:5100";
 
+  // Админ-токен для ручного пополнения внутреннего счёта держим на стороне
+  // vite-сервера: браузер не должен видеть секрет в JS. Заголовок добавляется
+  // только на один роут прокси, остальные /api-запросы не трогаются.
+  const adminToken =
+    process.env.INTERNAL_ACCOUNT_ADMIN_TOKEN || env.INTERNAL_ACCOUNT_ADMIN_TOKEN || "";
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -41,6 +47,14 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
           secure: false,
+          configure: (proxy) => {
+            if (!adminToken) return;
+            proxy.on("proxyReq", (proxyReq, req) => {
+              if (req.url?.startsWith("/api/internal-account/topup")) {
+                proxyReq.setHeader("x-admin-token", adminToken);
+              }
+            });
+          },
         },
         "/bot-api": {
           target: regTarget,
