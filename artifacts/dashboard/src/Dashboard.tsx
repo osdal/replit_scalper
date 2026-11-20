@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -1141,6 +1141,24 @@ export default function Dashboard() {
       await loadUsers();
     } catch (e: any) {
       setRegError(e.message || "Не удалось изменить статус");
+    } finally {
+      setRegBusy(null);
+    }
+  }, [loadUsers]);
+
+  const handleRegDelete = useCallback(async (u: RegisteredUser) => {
+    const label = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.email;
+    if (!window.confirm(`Удалить пользователя ${label}? Его счёт и записи будут удалены безвозвратно.`)) {
+      return;
+    }
+    try {
+      setRegBusy(u.id);
+      setRegError(null);
+      await registrationDeleteUser(u.id);
+      setNotice(`Пользователь ${label} удалён`);
+      await loadUsers();
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось удалить пользователя");
     } finally {
       setRegBusy(null);
     }
@@ -2565,15 +2583,27 @@ export default function Dashboard() {
                               <td className="px-3 py-2 text-center text-xs text-zinc-400">{u.bots_count}</td>
                               <td className="px-3 py-2 text-xs text-zinc-400 whitespace-nowrap">{fmtTime(u.created_at)}</td>
                               <td className="px-3 py-2 text-right">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  disabled={regBusy === u.id || u.role === "owner"}
-                                  onClick={() => handleRegToggleStatus(u)}
-                                  className="text-[11px] h-7"
-                                >
-                                  {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
-                                </Button>
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={regBusy === u.id || u.role === "owner"}
+                                    onClick={() => handleRegToggleStatus(u)}
+                                    className="text-[11px] h-7"
+                                  >
+                                    {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    title="Удалить пользователя"
+                                    disabled={regBusy === u.id || u.role === "owner"}
+                                    onClick={() => handleRegDelete(u)}
+                                    className="text-[11px] h-7 border-red-800/60 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
                               </td>
                             </tr>
                           );

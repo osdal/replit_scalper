@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import time
 import traceback
@@ -307,6 +308,55 @@ def list_users(limit: int = 500) -> list:
     return [user_row_to_dict(r) for r in rows]
 
 
+def delete_user(user_id: int) -> dict:
+    """Удаляет зарегистрированного пользователя и его платформенный счёт.
+
+    Защита:
+      * владелец платформы (role='owner') не удаляется;
+      * пользователь с привязанными ботами не удаляется — сначала отвяжите ботов.
+    Удаляются legacy-таблицы пользователя и его дубль в clients/client_accounts
+    (client_id берём из notes или по email).
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, email, role, notes FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("Пользователь не найден")
+        if row["role"] == "owner":
+            raise ValueError("Нельзя удалить владельца платформы")
+
+        bots = conn.execute(
+            "SELECT COUNT(*) FROM bots WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        if bots:
+            raise ValueError(
+                f"У пользователя {bots} ботов — сначала отвяжите их, затем удаляйте"
+            )
+
+        client_id = None
+        match = re.search(r"client_id=(\d+)", row["notes"] or "")
+        if match:
+            client_id = int(match.group(1))
+        else:
+            client_row = conn.execute(
+                "SELECT id FROM clients WHERE email = ?", (row["email"],)
+            ).fetchone()
+            if client_row:
+                client_id = int(client_row["id"])
+
+        conn.execute("DELETE FROM user_internal_accounts WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM internal_transactions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if client_id:
+            conn.execute("DELETE FROM ledger WHERE client_id = ?", (client_id,))
+            conn.execute("DELETE FROM client_accounts WHERE client_id = ?", (client_id,))
+            conn.execute("DELETE FROM clients WHERE id = ?", (client_id,))
+        conn.commit()
+
+    return {"deleted": True, "user_id": user_id, "client_id": client_id}
+
+
 def stats() -> dict:
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -357,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin in ALLOWED_ORIGINS:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, x-admin-token")
 
     def _json(self, code: int, payload) -> None:
@@ -441,6 +491,23 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 return self._json(200, {"ok": True, **result})
+            return self._json(404, {"error": "not found"})
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            return self._json(500, {"error": str(exc)})
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        try:
+            parts = path.split("/")
+            if len(parts) == 4 and parts[1] == "registration" and parts[2] == "users":
+                try:
+                    res = delete_user(int(parts[3]))
+                except LookupError as exc:
+                    return self._json(404, {"error": str(exc)})
+                except ValueError as exc:
+                    return self._json(400, {"error": str(exc)})
+                return self._json(200, {"ok": True, **res})
             return self._json(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()

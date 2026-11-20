@@ -320,6 +320,16 @@ export async function registrationSetStatus(id: number, status: "active" | "bloc
   });
 }
 
+/** Удалить зарегистрированного пользователя (вместе с его счётом). */
+export async function registrationDeleteUser(id: number): Promise<{
+  ok: boolean;
+  deleted: boolean;
+  user_id: number;
+  client_id: number | null;
+}> {
+  return apiFetch(`${REG_API}/users/${id}`, { method: "DELETE" });
+}
+
 // Обновление глобальных лимитов позиций (max_position_loss_pct — убыток всей
 // позиции в % от депозита; один порог на всех ботов)
 export async function updateGlobalLimits(
