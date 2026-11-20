@@ -2277,9 +2277,11 @@ export default function Dashboard() {
                     <CardTitle className="text-base text-zinc-300">Внутренний счёт (предоплата, комиссия 10%)</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2 text-sm text-zinc-400">
-                    <p>• Торговая прибыль остаётся на биржевом счету и на внутренний счёт НЕ зачисляется.</p>
-                    <p>• При закрытии прибыльной сделки с баланса списывается 10% её прибыли. Убыточная сделка баланс не меняет.</p>
-                    <p>• Баланс пополняется вручную владельцем (позже — самим клиентом) через API с админ-токеном.</p>
+                    <p>• Это <span className="text-zinc-200">предоплата за обслуживание</span>, а не кошелёк с торговой прибылью. Прибыль остаётся на биржевом счету и сюда <span className="text-zinc-200">не зачисляется</span>.</p>
+                    <p>• При закрытии <span className="text-zinc-200">прибыльной</span> сделки с баланса списывается <span className="text-zinc-200">10% от её pnl</span> — с каждой, без high-water mark. Убыточная или нулевая сделка баланс не меняет.</p>
+                    <p>• Пополнение — только вручную (сейчас владельцем, позже клиентом) через <code className="text-zinc-300">POST /api/internal-account/topup</code> с админ-токеном.</p>
+                    <p>• <span className="text-zinc-200">Накопленный PnL</span> ниже — справочная статистика, на комиссию она не влияет. HWM больше не используется для расчёта.</p>
+                    <p className="text-amber-300/90">• При балансе ≤ 0 списание уводит его в минус (долг); блокировка новых входов будет добавлена отдельно.</p>
                   </CardContent>
                 </Card>
 
@@ -2294,6 +2296,11 @@ export default function Dashboard() {
                     </CardHeader>
                     <CardContent>
                       <div className="text-2xl font-bold text-zinc-100">{fmt(internalAccount?.balance_usd, 2)} USD</div>
+                      {typeof internalAccount?.balance_usd === "number" && internalAccount.balance_usd <= 0 && (
+                        <div className="text-xs text-amber-300 mt-1">
+                          Баланс исчерпан — пополните, чтобы покрывать комиссию
+                        </div>
+                      )}
                       <div className="text-xs text-zinc-500 mt-1">
                         Накопленный PnL клиента: {fmt(internalAccount?.cum_pnl_usd, 2)} USD
                       </div>
@@ -2301,7 +2308,7 @@ export default function Dashboard() {
                   </Card>
                   <Card className="border border-zinc-800 bg-zinc-900">
                     <CardHeader>
-                      <CardTitle className="text-base text-zinc-300">Транзакции</CardTitle>
+                      <CardTitle className="text-base text-zinc-300">Операции</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <div className="text-xs text-zinc-500">{internalTransactions.length} записей</div>
