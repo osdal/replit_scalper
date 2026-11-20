@@ -37,6 +37,8 @@ import { startGridEngine } from "./grid-engine";
 import { configPath, assertEnvMatchesExchange } from "./botPaths";
 import { checkDailyLossLimit, checkDayRollover } from "./routes/live";
 import { syncBinanceTime } from "./grid-orders-lib";
+import { cleanupStaleGateFiles } from "./lib/banFiles";
+import { GATE_DIR, GATE_PREFIX } from "./lib/binanceBan";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -44,6 +46,17 @@ const __dirname = path.dirname(__filename);
 
 loadRootEnv();
 assertEnvMatchesExchange();
+
+// Очистка мусора от завершённых процессов: gate-файлы Binance старше 24ч.
+// Живые процессы обновляют свой файл каждую секунду, поэтому старый файл —
+// мусор. Без очистки файл с ban_until_ms > 0 мог бы заблокировать весь флот
+// после рестарта (агрегация по максимуму ban_until_ms по всем <prefix>.*).
+try {
+  const removed = cleanupStaleGateFiles(GATE_DIR, GATE_PREFIX, 24);
+  if (removed) logger.info("[GATE] cleaned %d stale gate files", removed);
+} catch {
+  /* не критично: чтение gate продолжает работать без очистки */
+}
 
 // Идемпотентная миграция схемы для уже существующих БД: новая колонка сайзинга
 // (% свободного депозита). Должна выполниться ДО первого SELECT по botsTable,

@@ -49,3 +49,36 @@ export function parseBanUntilMs(text: string): number {
   const m = /banned until (\d{10,})/i.exec(text);
   return m ? Number(m[1]) : 0;
 }
+
+/**
+ * Удаляет gate-файлы <prefix>.* старше maxAgeHours.
+ *
+ * Живые процессы обновляют свой файл каждую секунду (пишут каждую итерацию
+ * цикла), поэтому файл старше 24ч — это мусор от завершённого процесса.
+ * Без очистки старый файл с ban_until_ms > 0 мог бы заблокировать весь флот
+ * после рестарта: readBanFromDir агрегирует максимум ban_until_ms по ВСЕМ
+ * <prefix>.* файлам, независимо от возраста.
+ */
+export function cleanupStaleGateFiles(dir: string, prefix: string, maxAgeHours = 24): number {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return removed;
+  }
+  const cutoff = Date.now() - maxAgeHours * 3600 * 1000;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      const st = fs.statSync(path.join(dir, name));
+      if (st.mtimeMs < cutoff) {
+        fs.unlinkSync(path.join(dir, name));
+        removed++;
+      }
+    } catch {
+      /* битый/закрытый файл — пропускаем */
+    }
+  }
+  return removed;
+}

@@ -35,6 +35,32 @@ WEIGHT_TTL_SEC = 60.0
 # таймстамп) игнорируем.
 MAX_BAN_AHEAD_MS = 24 * 3600 * 1000
 RETRY_AFTER_DEFAULT_SEC = 10.0
+
+def cleanup_stale_gate_files(path: Path | str, max_age_hours: int = 24) -> int:
+    """Удаляет gate-файлы <prefix>.* старше max_age_hours.
+
+    Живые процессы обновляют свой файл каждую секунду (WRITE_INTERVAL_SEC =
+    1.0), поэтому файл старше 24ч — это мусор от завершённого процесса. Без
+    очистки старый файл с ban_until_ms > 0 мог бы заблокировать весь флот
+    после рестарта: агрегация читает максимум ban_until_ms по ВСЕМ
+    <prefix>.* файлам, независимо от возраста.
+    """
+    path = Path(path)
+    prefix = path.name
+    directory = path.parent
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    try:
+        for fpath in glob.glob(str(directory / (prefix + "*"))):
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    removed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return removed
 # Сколько держать общую паузу, если -1003 пришёл БЕЗ 'banned until' и без
 # Retry-After (типично для testnet). Бан общий на IP: без этого окна остальные
 # боты продолжают слать запросы и продлевают бан.
@@ -159,6 +185,14 @@ class AccountGate:
         )
         jitter = max(0.0, float(os.getenv("POST_BAN_JITTER_SEC", "0") or 0))
         self._resume_jitter = self._calc_resume_jitter(jitter)
+
+        # Очистка мусора от завершённых процессов (gate-файлы старше 24ч).
+        try:
+            removed = cleanup_stale_gate_files(self.path)
+            if removed:
+                logger.info("[GATE] cleaned %d stale gate files", removed)
+        except Exception:
+            pass
 
     def _calc_resume_jitter(self, jitter_sec: float) -> float:
         """Детерминированная задержка процесса в [0, jitter_sec).
