@@ -2514,6 +2514,18 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
 - публичные ручки `config`/`widget.js` отдаются по HTTPS, админская ручка на
   `osdal.duckdns.org` → `404`, на `scalper-bot.duckdns.org` без пароля → `401`.
 
+### 23.11. Внешний вид (20.11.2026)
+
+- Страница `/scalper-register/` рендерится по пустому шаблону `page-registration`
+  (только `post-content`, без header/footer/меню/сайдбара WordPress) —
+  никаких артефактов блога.
+- Виджет (`widget.js`) задаёт **светлую тему в стиле Telegram**:
+  белая карточка на светло-голубом фоне `#eef3f8`, акцент Telegram-синий
+  `#2AABEE`, мягкая тень, скругления 16px.
+- Карточка центрируется по вертикали и горизонтали (flex, min-height 100vh).
+- `document.title` = «Регистрация доступа».
+- Стили изолированы под `#osd-register-root`, поэтому тема WordPress не ломает вёрстку.
+
 ### 23.10. Откат
 
 ```bash
