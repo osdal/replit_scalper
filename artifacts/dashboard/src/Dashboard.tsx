@@ -133,7 +133,10 @@ interface AccountSnapshot {
 interface InternalAccount {
   id: number;
   user_id: number;
+  client_id?: number;
   balance_usd: number;
+  cum_pnl_usd?: number;
+  hwm_pnl_usd?: number;
   high_water_mark_usd: number;
   created_at: string;
   updated_at: string;
@@ -144,7 +147,9 @@ interface InternalTransaction {
   type: string;
   amount_usd: number;
   balance_after_usd: number;
+  cum_pnl_after_usd?: number | null;
   related_trade_id: number | null;
+  reason?: string | null;
   created_at: string;
 }
 
@@ -2269,12 +2274,12 @@ export default function Dashboard() {
               <div className="space-y-4">
                 <Card className="border border-zinc-800 bg-zinc-900">
                   <CardHeader>
-                    <CardTitle className="text-base text-zinc-300">Внутренний счёт (комиссия платформы 10%)</CardTitle>
+                    <CardTitle className="text-base text-zinc-300">Внутренний счёт (предоплата, комиссия 10%)</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2 text-sm text-zinc-400">
-                    <p>• При закрытии сделки с прибылью на счёт зачисляется 90% прибыли, 10% уходит платформе как комиссия.</p>
-                    <p>• Убыточные сделки не списываются. Комиссия берётся только с прибыли, побившей исторический максимум баланса (HWM).</p>
-                    <p>• Баланс обновляется автоматически при закрытии сделки — отдельный вход не требуется.</p>
+                    <p>• Торговая прибыль остаётся на биржевом счету и на внутренний счёт НЕ зачисляется.</p>
+                    <p>• При закрытии прибыльной сделки с баланса списывается 10% её прибыли. Убыточная сделка баланс не меняет.</p>
+                    <p>• Баланс пополняется вручную владельцем (позже — самим клиентом) через API с админ-токеном.</p>
                   </CardContent>
                 </Card>
 
@@ -2290,7 +2295,7 @@ export default function Dashboard() {
                     <CardContent>
                       <div className="text-2xl font-bold text-zinc-100">{fmt(internalAccount?.balance_usd, 2)} USD</div>
                       <div className="text-xs text-zinc-500 mt-1">
-                        HWM: {fmt(internalAccount?.high_water_mark_usd, 2)} USD
+                        Накопленный PnL клиента: {fmt(internalAccount?.cum_pnl_usd, 2)} USD
                       </div>
                     </CardContent>
                   </Card>
@@ -2328,11 +2333,15 @@ export default function Dashboard() {
                             <td className="px-4 py-2 text-xs text-zinc-300">{fmtTime(tx.created_at)}</td>
                             <td className="px-4 py-2 text-xs">
                               <span className={`px-2 py-0.5 rounded-full text-xs ${
-                                tx.type === "credit" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500" :
-                                tx.type === "commission" ? "bg-amber-500/15 text-amber-300 border-amber-500" :
+                                tx.type === "topup" || tx.type === "gift" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500" :
+                                tx.type === "fee" ? "bg-amber-500/15 text-amber-300 border-amber-500" :
                                 "bg-zinc-800 text-zinc-400 border-zinc-700"
                               }`}>
-                                {tx.type === "credit" ? "Начисление" : tx.type === "commission" ? "Комиссия" : tx.type}
+                                {tx.type === "topup" ? "Пополнение" :
+                                 tx.type === "gift" ? "Подарок" :
+                                 tx.type === "fee" ? "Комиссия" :
+                                 tx.type === "adjustment" ? "Корректировка" :
+                                 tx.type === "refund" ? "Возврат" : tx.type}
                               </span>
                             </td>
                             <td className="px-4 py-2 text-xs text-right">

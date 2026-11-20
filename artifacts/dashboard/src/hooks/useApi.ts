@@ -220,19 +220,24 @@ export async function fetchTradingStatus(): Promise<{
 export interface InternalAccount {
   id: number;
   user_id: number;
+  client_id?: number;
   balance_usd: number;
-  high_water_mark_usd: number;
+  cum_pnl_usd?: number;
+  hwm_pnl_usd?: number;
+  high_water_mark_usd: number; // совместимость: дубль hwm_pnl_usd
   created_at: string;
   updated_at: string;
 }
 
 export interface InternalTransaction {
   id: number;
-  user_id: number;
-  type: "credit" | "commission" | "debit" | "withdrawal";
+  client_id?: number;
+  type: "gift" | "topup" | "fee" | "adjustment" | "refund" | string;
   amount_usd: number;
   balance_after_usd: number;
+  cum_pnl_after_usd?: number | null;
   related_trade_id: number | null;
+  reason?: string | null;
   created_at: string;
 }
 

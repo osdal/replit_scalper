@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { and, eq, desc, sql, isNull } from "drizzle-orm";
 import { botsTable } from "@workspace/db/schema";
-import { creditTradeProfit } from "../lib/internalAccount";
+import { chargeTradeCommission } from "../lib/clientAccount";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -220,9 +220,10 @@ router.patch("/:id", async (req, res) => {
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: "No valid fields to update" });
     }
-    // Строка ДО обновления: кредит начисляем только на переходе open → closed.
+    // Строка ДО обновления: комиссию списываем только на переходе open → closed.
     // Повторные PATCH уже закрытой сделки (refinalize после residual flat,
-    // ручной ретрай) не должны начислять прибыль ещё раз.
+    // ручной ретрай, синхронизация PnL) не должны списывать комиссию дважды:
+    // защита — уникальный idempotency_key в ledger (fee:trade:<id>).
     const [prev] = await db.select().from(tradesTable).where(eq(tradesTable.id, id)).limit(1);
     if (!prev) {
       return res.status(404).json({ error: "Trade not found" });
@@ -234,33 +235,25 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ error: "Trade not found" });
     }
 
-    // Авто-начисление комиссии на внутренний счёт при ЗАКРЫТИИ сделки с прибылью.
-    // Условия: строка была открыта, стала closed, есть реализованный pnl > 0.
-    // rejected-сделки не кредитуем даже при положительном pnl.
+    // Модель B: прибыль НЕ зачисляется на внутренний счёт. При закрытии
+    // прибыльной сделки 10% её pnl списывается с предоплаченного баланса
+    // клиента. Убыточная сделка баланс не меняет (но обновляет справочный
+    // cum_pnl). Владелец находится по bot_id внутри.clientAccount — символ
+    // больше не уникален, поэтому выборка по символу опасна при 2 клиентах.
     const updated = result[0] as any;
     const nowClosed = updated.status === "closed" && Number(updated.is_open) === 0;
-    const pnl = Number(updated.pnl ?? 0);
-    if (wasOpen && nowClosed && pnl > 0 && updated.symbol) {
+    if (wasOpen && nowClosed && updated.status !== "rejected") {
       try {
-        // Владелец — по bot_id: символ больше не уникален, при двух клиентах
-        // на BTCUSDT выборка по символу могла бы отдать чужого клиента.
-        // Fallback на символ остаётся только для старых сделок без bot_id.
-        const ownerCols = { user_id: botsTable.user_id, client_id: botsTable.client_id };
-        const [bot] = updated.bot_id != null
-          ? await db.select(ownerCols).from(botsTable)
-              .where(eq(botsTable.id, Number(updated.bot_id))).limit(1)
-          : await db.select(ownerCols).from(botsTable)
-              .where(eq(botsTable.symbol, updated.symbol.toUpperCase())).limit(1);
-        const ownerId = bot?.user_id ?? null;
-        await creditTradeProfit({
-          tradeId: Number(updated.id),
-          pnlUsd: pnl,
-          symbol: updated.symbol,
-          userId: ownerId ? Number(ownerId) : undefined,
-        });
+        const resFee = await chargeTradeCommission(Number(updated.id));
+        if (resFee?.charged) {
+          console.log(
+            `[client-account] fee trade #${updated.id}: -$${resFee.feeUsd.toFixed(4)} ` +
+            `client=${resFee.clientId} balance $${resFee.balanceBeforeUsd.toFixed(4)} → $${resFee.balanceAfterUsd.toFixed(4)}`,
+          );
+        }
       } catch (e) {
-        // Начисление комиссии не должно ломать обновление сделки.
-        console.error(`[internal-account] credit failed for trade #${updated.id}:`, String(e));
+        // Списание комиссии не должно ломать обновление сделки.
+        console.error(`[client-account] fee failed for trade #${updated.id}:`, String(e));
       }
     }
 

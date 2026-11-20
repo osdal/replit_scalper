@@ -1,4 +1,4 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and, ne } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
@@ -24,6 +24,8 @@ const {
   internalTransactionsTable,
   clientsTable,
   clientAccountsTable,
+  tradesTable,
+  ledgerTable,
 } = await import("@workspace/db/schema");
 const { GRID_HISTORY_CREATE_SQL, GRID_HISTORY_MIGRATIONS, GRID_CREATE_SQL, GRID_MIGRATIONS } =
   await import("@workspace/db");
@@ -391,6 +393,71 @@ if (!defaultUser) {
     .insert(userInternalAccountsTable)
     .values({ user_id: defaultUserId, balance_usd: 0, high_water_mark_usd: 0 })
     .catch(() => { /* счёт уже есть */ });
+}
+
+// ── Переход на модель B (предоплаченный внутренний счёт) ────────────────────
+// Модель A зачисляла на счёт 90% прибыли сделки. Новые правила:
+//   • прибыль остаётся на биржевом счету клиента и НЕ зачисляется;
+//   • при закрытии прибыльной сделки с баланса списывается 10% её pnl;
+//   • убыточная сделка баланс не меняет;
+//   • пополнение — только ручное (сейчас владельцем, позже клиентом).
+// Один раз обнуляем legacy-баланс клиента №1 и фиксируем справочный
+// cum_pnl/hwm на текущем накопленном PnL. Маркер в ledger делает миграцию
+// идемпотентной: после ручного пополнения повторный старт ничего не обнулит.
+{
+  const resetKey = `model-b-reset:client:${client1Id}`;
+  const [marker] = await db
+    .select({ id: ledgerTable.id })
+    .from(ledgerTable)
+    .where(eq(ledgerTable.idempotency_key, resetKey))
+    .limit(1);
+
+  if (!marker) {
+    const [{ cum }] = await db
+      .select({ cum: sql<number>`COALESCE(SUM(${tradesTable.pnl}), 0)` })
+      .from(tradesTable)
+      .innerJoin(botsTable, eq(botsTable.id, tradesTable.bot_id))
+      .where(and(
+        eq(botsTable.client_id, client1Id),
+        eq(tradesTable.is_open, false),
+        ne(tradesTable.status, "rejected"),
+      ));
+    const cumPnl = Math.round(Number(cum || 0) * 10000) / 10000;
+    const nowIso = new Date().toISOString();
+
+    await db
+      .update(clientAccountsTable)
+      .set({
+        balance_usd: 0,
+        cum_pnl_usd: cumPnl,
+        hwm_pnl_usd: Math.max(0, cumPnl),
+        updated_at: nowIso,
+      })
+      .where(eq(clientAccountsTable.client_id, client1Id));
+
+    await db
+      .insert(ledgerTable)
+      .values({
+        client_id: client1Id,
+        type: "adjustment",
+        amount_usd: 0,
+        balance_after_usd: 0,
+        cum_pnl_after_usd: cumPnl,
+        reason: "Переход на модель B: прибыль не зачисляется, legacy-баланс обнулён",
+        actor: "init-db",
+        idempotency_key: resetKey,
+      })
+      .catch(() => { /* гонка двух инстансов — маркер уже есть */ });
+
+    // Легаси-счёт модели A тоже обнуляем, чтобы вкладка «Пользователи»
+    // не показывала зачисленную прибыль как доступный баланс.
+    await db
+      .update(userInternalAccountsTable)
+      .set({ balance_usd: 0, high_water_mark_usd: 0, updated_at: nowIso })
+      .where(eq(userInternalAccountsTable.user_id, defaultUserId));
+
+    console.log(`  Model B: reset legacy balance (client=${client1Id}), cum_pnl=$${cumPnl.toFixed(4)}`);
+  }
 }
 
 await db.run(sql`CREATE TABLE IF NOT EXISTS recovery_chains (

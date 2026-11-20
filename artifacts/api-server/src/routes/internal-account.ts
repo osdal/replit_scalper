@@ -1,34 +1,48 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { db } from "@workspace/db";
-import { desc, eq } from "drizzle-orm";
-import {
-  userInternalAccountsTable,
-  internalTransactionsTable,
-  usersTable,
-} from "@workspace/db/schema";
-import { creditTradeProfit, getAccountStatement } from "../lib/internalAccount";
+import { clientsTable } from "@workspace/db/schema";
+import { eq } from "drizzle-orm";
+import { getClientStatement, topUpClient } from "../lib/clientAccount";
 
 const router = Router();
 
-// Дефолтный пользователь-хозяин (создаётся init-db при старте). Дашборд не
-// требует отдельной авторизации — внутренний счёт доступен сразу.
-const OWNER_USER_ID = 1;
-
-async function ensureOwnerUserId(): Promise<number> {
+// Дашборд показывает счёт владельца (system@local) без отдельного логина.
+// Биллинг ключуется по clients.id, а не по legacy users.id.
+async function ownerClientId(): Promise<number> {
   const [row] = await db
-    .select({ id: usersTable.id })
-    .from(usersTable)
-    .where(eq(usersTable.email, "system@local"))
+    .select({ id: clientsTable.id })
+    .from(clientsTable)
+    .where(eq(clientsTable.email, "system@local"))
     .limit(1);
-  return row ? Number(row.id) : OWNER_USER_ID;
+  if (!row) throw new Error("Клиент system@local не найден (init-db не применялся?)");
+  return Number(row.id);
 }
 
-// ---------- баланс + недавние транзакции ----------
+/**
+ * Ручное изменение баланса — только с админ-токеном из .env.
+ * Без заданного INTERNAL_ACCOUNT_ADMIN_TOKEN пополнение отключено:
+ * порт 5001 слушается на всех интерфейсах, и открытый money-endpoint
+ * был бы дырой в безопасности.
+ */
+function requireAdmin(req: Request, res: Response): boolean {
+  const expected = String(process.env.INTERNAL_ACCOUNT_ADMIN_TOKEN || "").trim();
+  if (!expected) {
+    res.status(503).json({
+      error: "Пополнение отключено: задайте INTERNAL_ACCOUNT_ADMIN_TOKEN в .env и перезапустите API",
+    });
+    return false;
+  }
+  if (String(req.header("x-admin-token") || "") !== expected) {
+    res.status(403).json({ error: "Неверный x-admin-token" });
+    return false;
+  }
+  return true;
+}
+
+// ---------- баланс + недавние операции ----------
 router.get("/me", async (_req, res) => {
   try {
-    const userId = await ensureOwnerUserId();
-    const stmt = await getAccountStatement(userId);
-    return res.json(stmt);
+    return res.json(await getClientStatement(await ownerClientId(), 100));
   } catch (e: any) {
     return res.status(500).json({ error: e.message || String(e) });
   }
@@ -37,64 +51,51 @@ router.get("/me", async (_req, res) => {
 // ---------- полная выписка ----------
 router.get("/statement", async (req, res) => {
   try {
-    const userId = await ensureOwnerUserId();
     const limit = Math.min(Number(req.query.limit) || 200, 1000);
-    const acct = await db
-      .select()
-      .from(userInternalAccountsTable)
-      .where(eq(userInternalAccountsTable.user_id, userId))
-      .limit(1);
-    if (acct.length === 0) {
-      return res.status(404).json({ error: "Счёт не найден" });
-    }
-    const txns = await db
-      .select()
-      .from(internalTransactionsTable)
-      .where(eq(internalTransactionsTable.user_id, userId))
-      .orderBy(desc(internalTransactionsTable.created_at))
-      .limit(limit);
-    return res.json({
-      account: {
-        ...acct[0],
-        balance_usd: Number(acct[0].balance_usd),
-        high_water_mark_usd: Number(acct[0].high_water_mark_usd),
-      },
-      transactions: (txns as any[]).map((t: any) => ({
-        ...t,
-        amount_usd: Number(t.amount_usd),
-        balance_after_usd: Number(t.balance_after_usd),
-      })),
-    });
+    return res.json(await getClientStatement(await ownerClientId(), limit));
   } catch (e: any) {
     return res.status(500).json({ error: e.message || String(e) });
   }
 });
 
-// ---------- внутреннее начисление прибыли по сделке (вызывается из бота/API при закрытии) ----------
-router.post("/credit", async (req, res) => {
+// ---------- ручное пополнение (админ) ----------
+router.post("/topup", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
   try {
-    const { tradeId, pnlUsd, symbol, userId } = req.body as {
-      tradeId?: number;
-      pnlUsd?: number;
-      symbol?: string;
-      userId?: number;
+    const { amountUsd, clientId, reason, idempotencyKey } = req.body as {
+      amountUsd?: number;
+      clientId?: number;
+      reason?: string;
+      idempotencyKey?: string;
     };
-    if (tradeId === undefined || pnlUsd === undefined) {
-      return res.status(400).json({ error: "Нужны tradeId и pnlUsd" });
+    if (amountUsd === undefined) {
+      return res.status(400).json({ error: "Нужен amountUsd (сумма пополнения > 0)" });
     }
-    const result = await creditTradeProfit({
-      tradeId: Number(tradeId),
-      pnlUsd: Number(pnlUsd),
-      symbol,
-      userId: userId ? Number(userId) : undefined,
+    const targetClientId = clientId !== undefined ? Number(clientId) : await ownerClientId();
+    if (!Number.isFinite(targetClientId) || targetClientId <= 0) {
+      return res.status(400).json({ error: "Некорректный clientId" });
+    }
+    const result = await topUpClient({
+      clientId: targetClientId,
+      amountUsd: Number(amountUsd),
+      reason,
+      actor: "admin",
+      idempotencyKey,
     });
-    if (!result) {
-      return res.json({ ok: true, credited: false, reason: "pnl <= 0" });
-    }
     return res.json({ ok: true, ...result });
   } catch (e: any) {
-    return res.status(500).json({ error: e.message || String(e) });
+    return res.status(400).json({ error: e.message || String(e) });
   }
+});
+
+// ---------- старый роут начисления прибыли больше не поддерживается ----------
+// Модель A (прибыль зачислялась на счёт за вычетом 10%) отменена:
+// прибыль остаётся на Binance, с Internal Account списывается только комиссия.
+router.post("/credit", (_req, res) => {
+  return res.status(410).json({
+    error: "Модель изменена: прибыль на внутренний счёт не зачисляется",
+    hint: "Для пополнения используйте POST /api/internal-account/topup с x-admin-token",
+  });
 });
 
 export default router;

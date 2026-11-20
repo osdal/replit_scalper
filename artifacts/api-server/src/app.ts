@@ -40,7 +40,7 @@ app.use(
       cb(null, isAllowedOrigin(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "x-notify-token"],
+    allowedHeaders: ["Content-Type", "x-notify-token", "x-admin-token", "x-session-token"],
   }),
 );
 app.use(express.json());
