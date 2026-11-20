@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -998,12 +998,15 @@ export default function Dashboard() {
       if (rev.status === "fulfilled") {
         const rows = Array.isArray(rev.value?.trades) ? rev.value.trades : [];
         setReverseCounts(countReverses(rows));
-        // Глобальный список (без фильтра по монете) — отсюда берём количество
-        // открытых сделок, чтобы карточка не зависела от выбранного символа.
-        setAccount(prev => ({
-          ...prev,
-          open_trades: rows.filter((tr: Trade) => tr.is_open).length,
-        }));
+      }
+      // Открытые сделки — точный счёт с сервера (COUNT WHERE is_open=1),
+      // а не из страницы trades по 1000 записей, иначе при росте таблицы
+      // выше 1000 строк счёт занижается.
+      try {
+        const oc = await fetchOpenTradesCount();
+        setAccount(prev => ({ ...prev, open_trades: Number(oc.count) }));
+      } catch {
+        // игнорируем — картока покажет 0 до следующего рефреша
       }
       setLastRefresh(new Date());
     } catch {

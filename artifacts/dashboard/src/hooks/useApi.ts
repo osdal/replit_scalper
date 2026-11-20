@@ -187,6 +187,11 @@ export async function fetchDrawdown(): Promise<{
   return apiFetch(`${API}/live/drawdown`);
 }
 
+/** Точное число открытых сделок (не зависит от limit/offset страницы trades). */
+export async function fetchOpenTradesCount(): Promise<{ count: number }> {
+  return apiFetch(`${API}/trades/count-open`);
+}
+
 // Релей testnet→live: счётчики и последний сигнал.
 export async function fetchRelayStats(symbol?: string): Promise<{
   symbol: string | null; pending: number; consumed: number; skipped: number;

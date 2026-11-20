@@ -157,6 +157,18 @@ router.delete("/", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// GET /trades/count-open — точное число открытых сделок (не зависит от limit/offset).
+// Дашборд берёт отсюда open_trades, а не из страницы по 1000 записей, чтобы
+// счёт не занижался при росте таблицы trades выше 1000 строк.
+router.get("/count-open", async (_req, res) => {
+  try {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` })
+      .from(tradesTable)
+      .where(and(eq(tradesTable.is_open, true), isNull(tradesTable.reject_reason)));
+    res.json({ count: Number(count) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // DELETE /trades/clear-tp1 — удалить все TP1 записи (для миграции)
 router.delete("/clear-tp1", async (_req, res) => {
   try {
