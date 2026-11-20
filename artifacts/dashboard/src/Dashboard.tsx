@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, registrationUsers, registrationStats, registrationSetStatus, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -17,6 +17,7 @@ import {
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2, AlertTriangle, Zap,
   Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2, Wallet, Coins, Layers,
+  User, Users, ShieldCheck, Ban, CheckCircle2,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -126,6 +127,25 @@ interface AccountSnapshot {
   upnl: number;
   margin: number;
   open_trades: number;
+}
+
+// Внутренний счёт (комиссия платформы 10% с прибыли)
+interface InternalAccount {
+  id: number;
+  user_id: number;
+  balance_usd: number;
+  high_water_mark_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface InternalTransaction {
+  id: number;
+  type: string;
+  amount_usd: number;
+  balance_after_usd: number;
+  related_trade_id: number | null;
+  created_at: string;
 }
 
 interface BacktestParams {
@@ -876,6 +896,15 @@ export default function Dashboard() {
   const [allTradesRaw, setAllTradesRaw] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
   const [account, setAccount] = useState<AccountSnapshot>({ wallet: 0, upnl: 0, margin: 0, open_trades: 0 });
+  const [internalAccount, setInternalAccount] = useState<InternalAccount | null>(null);
+  const [internalTransactions, setInternalTransactions] = useState<InternalTransaction[]>([]);
+  const [internalError, setInternalError] = useState<string | null>(null);
+  const [internalLoading, setInternalLoading] = useState(false);
+  const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
+  const [regStats, setRegStats] = useState<RegistrationStats | null>(null);
+  const [regLoading, setRegLoading] = useState(false);
+  const [regError, setRegError] = useState<string | null>(null);
+  const [regBusy, setRegBusy] = useState<number | null>(null);
   const [reverseCounts, setReverseCounts] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
@@ -1008,6 +1037,22 @@ export default function Dashboard() {
       } catch {
         // игнорируем — картока покажет 0 до следующего рефреша
       }
+
+      // Внутренний счёт — загружаем автоматически (без отдельного логина)
+      try {
+        setInternalLoading(true);
+        const me = await internalMe();
+        setInternalAccount(me.account);
+        setInternalTransactions(me.transactions);
+        setInternalError(null);
+      } catch (e: any) {
+        setInternalError(e.message || "Не удалось загрузить внутренний счёт");
+        setInternalAccount(null);
+        setInternalTransactions([]);
+      } finally {
+        setInternalLoading(false);
+      }
+
       setLastRefresh(new Date());
     } catch {
       // API not available yet
@@ -1016,11 +1061,61 @@ export default function Dashboard() {
     }
   }, [selectedSymbol]);
 
+  const loadInternal = useCallback(async () => {
+    try {
+      setInternalLoading(true);
+      const me = await internalMe();
+      setInternalAccount(me.account);
+      setInternalTransactions(me.transactions);
+      setInternalError(null);
+    } catch (e: any) {
+      setInternalError(e.message || "Не удалось загрузить внутренний счёт");
+      setInternalAccount(null);
+      setInternalTransactions([]);
+    } finally {
+      setInternalLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     load();
     const id = setInterval(load, 15_000);
     return () => clearInterval(id);
   }, [load]);
+
+  // ── Пользователи, зарегистрированные через Telegram ──────────────────────
+  const loadUsers = useCallback(async () => {
+    try {
+      setRegLoading(true);
+      const [usersRes, statsRes] = await Promise.all([registrationUsers(), registrationStats()]);
+      setRegUsers(usersRes.users || []);
+      setRegStats(statsRes);
+      setRegError(null);
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось загрузить список пользователей");
+    } finally {
+      setRegLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsers();
+    const id = setInterval(loadUsers, 60_000);
+    return () => clearInterval(id);
+  }, [loadUsers]);
+
+  const handleRegToggleStatus = useCallback(async (u: RegisteredUser) => {
+    const next = u.status === "blocked" ? "active" : "blocked";
+    try {
+      setRegBusy(u.id);
+      await registrationSetStatus(u.id, next);
+      await loadUsers();
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось изменить статус");
+    } finally {
+      setRegBusy(null);
+    }
+  }, [loadUsers]);
 
   const [toggling, setToggling] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -1813,6 +1908,12 @@ export default function Dashboard() {
                   <AlertTriangle className="w-4 h-4 mr-1.5" />LIVE
                 </TabsTrigger>
               )}
+              <TabsTrigger value="internal" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
+                <Wallet className="w-4 h-4 mr-1.5" />Internal
+              </TabsTrigger>
+              <TabsTrigger value="users" className="shrink-0 px-2 text-xs data-[state=active]:bg-zinc-700 sm:px-3 sm:text-sm">
+                <Users className="w-4 h-4 mr-1.5" />Пользователи
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="chart" className="mt-4">
@@ -2162,6 +2263,253 @@ export default function Dashboard() {
 
             <TabsContent value="recovery" className="mt-4">
               <RecoveryTab />
+            </TabsContent>
+
+            <TabsContent value="internal" className="mt-4">
+              <div className="space-y-4">
+                <Card className="border border-zinc-800 bg-zinc-900">
+                  <CardHeader>
+                    <CardTitle className="text-base text-zinc-300">Внутренний счёт (комиссия платформы 10%)</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2 text-sm text-zinc-400">
+                    <p>• При закрытии сделки с прибылью на счёт зачисляется 90% прибыли, 10% уходит платформе как комиссия.</p>
+                    <p>• Убыточные сделки не списываются. Комиссия берётся только с прибыли, побившей исторический максимум баланса (HWM).</p>
+                    <p>• Баланс обновляется автоматически при закрытии сделки — отдельный вход не требуется.</p>
+                  </CardContent>
+                </Card>
+
+                {internalError && (
+                  <div className="rounded-md bg-red-900/30 border border-red-700/50 px-3 py-2 text-sm text-red-300">{internalError}</div>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardHeader>
+                      <CardTitle className="text-base text-zinc-300">Баланс</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-zinc-100">{fmt(internalAccount?.balance_usd, 2)} USD</div>
+                      <div className="text-xs text-zinc-500 mt-1">
+                        HWM: {fmt(internalAccount?.high_water_mark_usd, 2)} USD
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardHeader>
+                      <CardTitle className="text-base text-zinc-300">Транзакции</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-xs text-zinc-500">{internalTransactions.length} записей</div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {internalLoading && (
+                  <div className="flex items-center gap-2 text-sm text-zinc-500">
+                    <RefreshCw className="w-4 h-4 animate-spin" /> Загрузка…
+                  </div>
+                )}
+
+                <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-800 bg-zinc-900/50">
+                          <th className="px-4 py-2 text-left text-xs text-zinc-500">Время</th>
+                          <th className="px-4 py-2 text-left text-xs text-zinc-500">Тип</th>
+                          <th className="px-4 py-2 text-right text-xs text-zinc-500">Сумма</th>
+                          <th className="px-4 py-2 text-right text-xs text-zinc-500">Баланс после</th>
+                          <th className="px-4 py-2 text-left text-xs text-zinc-500">Сделка</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {internalTransactions.map(tx => (
+                          <tr key={tx.id} className="border-b border-zinc-800/50 hover:bg-zinc-900/30">
+                            <td className="px-4 py-2 text-xs text-zinc-300">{fmtTime(tx.created_at)}</td>
+                            <td className="px-4 py-2 text-xs">
+                              <span className={`px-2 py-0.5 rounded-full text-xs ${
+                                tx.type === "credit" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500" :
+                                tx.type === "commission" ? "bg-amber-500/15 text-amber-300 border-amber-500" :
+                                "bg-zinc-800 text-zinc-400 border-zinc-700"
+                              }`}>
+                                {tx.type === "credit" ? "Начисление" : tx.type === "commission" ? "Комиссия" : tx.type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-xs text-right">
+                              <span className={`font-mono ${tx.amount_usd >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                                {tx.amount_usd >= 0 ? "+" : ""}{fmt(tx.amount_usd, 4)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-xs text-right text-zinc-300">{fmt(tx.balance_after_usd, 4)}</td>
+                            <td className="px-4 py-2 text-xs text-zinc-500">{tx.related_trade_id ?? "—"}</td>
+                          </tr>
+                        ))}
+                        {internalTransactions.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="px-4 py-4 text-center text-xs text-zinc-500">Нет транзакций</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="users" className="mt-4">
+              <div className="space-y-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold text-zinc-200">Пользователи платформы</h3>
+                    <p className="text-xs text-zinc-500">
+                      Регистрация — через Telegram на странице{" "}
+                      <a
+                        href="https://osdal.duckdns.org/scalper-register/"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sky-400 hover:underline"
+                      >
+                        osdal.duckdns.org/scalper-register
+                      </a>
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadUsers}
+                    disabled={regLoading}
+                    className="text-xs"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${regLoading ? "animate-spin" : ""}`} />
+                    Обновить
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardContent className="p-3">
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <Users className="w-3.5 h-3.5" /> Всего
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-zinc-100">{regStats?.total ?? "—"}</div>
+                    </CardContent>
+                  </Card>
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardContent className="p-3">
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Активных
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-emerald-300">{regStats?.active ?? "—"}</div>
+                    </CardContent>
+                  </Card>
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardContent className="p-3">
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <User className="w-3.5 h-3.5" /> Через Telegram
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-sky-300">{regStats?.telegram ?? "—"}</div>
+                    </CardContent>
+                  </Card>
+                  <Card className="border border-zinc-800 bg-zinc-900">
+                    <CardContent className="p-3">
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <Ban className="w-3.5 h-3.5" /> Заблокировано
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-red-300">{regStats?.blocked ?? "—"}</div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {regError && (
+                  <div className="rounded-md bg-red-900/30 border border-red-700/50 px-3 py-2 text-sm text-red-300">
+                    {regError}
+                    <div className="mt-1 text-xs text-red-400/80">
+                      Проверьте, что сервис регистрации запущен: <code>systemctl status tradingbot-registration</code>
+                    </div>
+                  </div>
+                )}
+
+                <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-800 bg-zinc-900/50">
+                          <th className="px-3 py-2 text-left text-xs text-zinc-500">Пользователь</th>
+                          <th className="px-3 py-2 text-left text-xs text-zinc-500">Telegram ID</th>
+                          <th className="px-3 py-2 text-center text-xs text-zinc-500">Статус</th>
+                          <th className="px-3 py-2 text-right text-xs text-zinc-500">Баланс</th>
+                          <th className="px-3 py-2 text-center text-xs text-zinc-500">Ботов</th>
+                          <th className="px-3 py-2 text-left text-xs text-zinc-500">Регистрация</th>
+                          <th className="px-3 py-2 text-right text-xs text-zinc-500">Действие</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {regUsers.map(u => {
+                          const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.email;
+                          return (
+                            <tr key={u.id} className="border-b border-zinc-800/50 hover:bg-zinc-900/30">
+                              <td className="px-3 py-2">
+                                <div className="flex items-center gap-2">
+                                  {u.photo_url ? (
+                                    <img src={u.photo_url} alt="" className="w-7 h-7 rounded-full object-cover border border-zinc-700" />
+                                  ) : (
+                                    <div className="w-7 h-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-[10px] text-zinc-400">
+                                      {name.slice(0, 2).toUpperCase()}
+                                    </div>
+                                  )}
+                                  <div className="min-w-0">
+                                    <div className="truncate text-xs text-zinc-200 max-w-[160px]">{name}</div>
+                                    <div className="truncate text-[11px] text-zinc-500 max-w-[160px]">
+                                      {u.telegram_username ? `@${u.telegram_username}` : u.email}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-2 text-xs text-zinc-400 font-mono">
+                                {u.telegram_id ?? "—"}
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                <span className={`px-2 py-0.5 rounded-full text-[11px] border ${
+                                  u.status === "active"
+                                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-600/50"
+                                    : u.status === "blocked"
+                                      ? "bg-red-500/15 text-red-300 border-red-600/50"
+                                      : "bg-amber-500/15 text-amber-300 border-amber-600/50"
+                                }`}>
+                                  {u.status === "active" ? "активен" : u.status === "blocked" ? "заблокирован" : u.status}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right text-xs font-mono text-zinc-300">
+                                {fmt(u.balance_usd, 2)}
+                              </td>
+                              <td className="px-3 py-2 text-center text-xs text-zinc-400">{u.bots_count}</td>
+                              <td className="px-3 py-2 text-xs text-zinc-400 whitespace-nowrap">{fmtTime(u.created_at)}</td>
+                              <td className="px-3 py-2 text-right">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={regBusy === u.id || u.role === "owner"}
+                                  onClick={() => handleRegToggleStatus(u)}
+                                  className="text-[11px] h-7"
+                                >
+                                  {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
+                                </Button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {regUsers.length === 0 && (
+                          <tr>
+                            <td colSpan={7} className="px-4 py-6 text-center text-xs text-zinc-500">
+                              {regLoading ? "Загрузка…" : "Пока никто не зарегистрировался"}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </TabsContent>
           </Tabs>
         </div>

@@ -20,6 +20,12 @@ export default defineConfig(({ mode }) => {
     env.DASHBOARD_API_TARGET ||
     (mode === "live" ? "http://localhost:5001" : "http://localhost:5000");
 
+  // Сервис регистрации пользователей через Telegram (см. services/registration).
+  // Снаружи он доступен как /bot-api/* через Caddy; этот прокси нужен только
+  // при прямом доступе к vite-серверу (без домена).
+  const regTarget =
+    process.env.DASHBOARD_REG_TARGET || env.DASHBOARD_REG_TARGET || "http://127.0.0.1:5100";
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -33,6 +39,11 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": {
           target: apiTarget,
+          changeOrigin: true,
+          secure: false,
+        },
+        "/bot-api": {
+          target: regTarget,
           changeOrigin: true,
           secure: false,
         },

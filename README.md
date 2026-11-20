@@ -2349,3 +2349,169 @@ Done
 
 ---
 
+
+---
+
+## 23. Регистрация пользователей через Telegram (20.11.2026)
+
+Задача: дать людям возможность зарегистрироваться в боте самостоятельно — через Telegram,
+на отдельной странице сайта (не на главной), а зарегистрированных видеть в админке
+(`scalper-bot.duckdns.org` → вкладка **Пользователи**).
+
+### 23.1. Что получилось (схема)
+
+```
+Браузер
+  │
+  ├─ https://osdal.duckdns.org/scalper-register/      ← страница WordPress (id=6)
+  │     └─ <script src="/bot-api/registration/widget.js">
+  │
+  └─ /bot-api/registration/config|telegram|widget.js  ← Caddy → 127.0.0.1:5100
+                                                         (сервис регистрации, Python)
+Дашборд (scalper-bot.duckdns.org, за Basic auth)
+  └─ /bot-api/registration/users|stats|users/:id      ← Caddy → 127.0.0.1:5100
+                                                         + запись в data/bot_live.db
+```
+
+Ключевое решение: регистрация вынесена в **отдельный сервис**, а не в `api-live`.
+Причина — рестарт `api-live` убивает всех live-ботов. Такой сервис можно
+перезапускать в любой момент, торговля не затрагивается.
+
+### 23.2. Файлы
+
+| Путь | Что это |
+|---|---|
+| `/opt/trading-bot/services/registration/app.py` | HTTP-сервис (только stdlib Python), порт 5100 |
+| `/opt/trading-bot/services/registration/widget.js` | Весь UI страницы регистрации (стили + логика), отдаётся по `/bot-api/registration/widget.js` |
+| `/opt/trading-bot/services/registration/registration.service` | Копия systemd-unit для истории |
+| `/etc/systemd/system/tradingbot-registration.service` | Живой unit (`enable`, `Restart=always`) |
+| `/opt/trading-bot/data/registration_config.json` | Токен и username бота (**не в git**, создаётся вручную) |
+| `/opt/trading-bot/logs/registration.log` | Лог сервиса |
+| `/etc/caddy/Caddyfile` | Маршруты `/bot-api/*` (бэкапы `/etc/caddy/Caddyfile.bak-reg-*`) |
+
+### 23.3. Настройка Telegram-бота (делает владелец)
+
+1. В Telegram открыть **@BotFather** → `/newbot` → задать имя и username
+   (username обязан заканчиваться на `bot`, например `osdal_scalper_bot`).
+2. Скопировать токен вида `1234567890:AA...`.
+3. В @BotFather: `/setdomain` → выбрать бота → `osdal.duckdns.org`
+   **Без этого шага кнопка «Войти через Telegram» не отрисуется.**
+4. Положить токен в `data/registration_config.json`:
+
+```json
+{
+  "bot_token": "1234567890:AA...",
+  "bot_username": "osdal_scalper_bot",
+  "bot_name": "OSDAL Scalper"
+}
+```
+
+Перезапуск не нужен — конфиг читается на каждый запрос. Проверка:
+
+```bash
+curl -s https://osdal.duckdns.org/bot-api/registration/config
+# {"ready":true,"bot_username":"osdal_scalper_bot",...}
+```
+
+Права на файл: `chmod 600` (внутри токен).
+
+### 23.4. Как выглядит регистрация для пользователя
+
+1. Открывает `https://osdal.duckdns.org/scalper-register/`.
+2. Видит карточку «Регистрация доступа к торговому боту», жмёт **Войти через Telegram**.
+3. Подтверждает вход в Telegram.
+4. Сервис проверяет подпись (`HMAC-SHA256` от токена бота), создаёт аккаунт
+   и показывает «Готово! Регистрация завершена» + кнопку «Открыть бота в Telegram».
+5. Пользователь нажимает в боте **Start** — после этого ему можно писать.
+
+Статус по умолчанию — `active` (регистрация = доступ, без ручного подтверждения).
+Заблокировать можно в админке (см. 23.6).
+
+### 23.5. API сервиса
+
+| Метод | Путь | Доступ | Назначение |
+|---|---|---|---|
+| GET | `/registration/health` | публично | `{"ok":true}` |
+| GET | `/registration/config` | публично | `ready`, `bot_username`, `bot_name` |
+| GET | `/registration/widget.js` | публично | UI страницы регистрации |
+| POST | `/registration/telegram` | публично | Проверка подписи Telegram + создание/вход пользователя |
+| GET | `/registration/users?limit=500` | админка | Список пользователей + баланс + число ботов |
+| GET | `/registration/stats` | админка | Всего / активных / через Telegram / заблокировано |
+| PATCH | `/registration/users/:id` | админка | `{"status":"active"\|"blocked"}` |
+
+Снаружи: на `osdal.duckdns.org` открыты **только** `config`, `telegram`, `health`,
+`widget.js` (матчер `@botApiPublic` в Caddyfile). Админские ручки доступны только
+на `scalper-bot.duckdns.org` / `92-5-180-72.sslip.io`, где Caddy требует Basic auth.
+
+### 23.6. Где смотреть зарегистрированных
+
+Дашборд → вкладка **Пользователи**:
+
+- 4 счётчика: Всего / Активных / Через Telegram / Заблокировано;
+- таблица: аватар и имя, `@username`, Telegram ID, статус, внутренний баланс,
+  число ботов, дата регистрации, кнопка **Заблокировать/Разблокировать**;
+- список обновляется при открытии и раз в 60 с (кнопка «Обновить» — вручную).
+
+Данные берутся из тех же таблиц `users` / `user_internal_accounts`, что и
+внутренний счёт (§20), поэтому баланс и комиссия 10 % работают сразу.
+
+### 23.7. Изменения в БД
+
+`users` дополнена колонками (миграция идемпотентная, выполняется при старте сервиса):
+
+```
+telegram_id INTEGER, telegram_username TEXT, first_name TEXT, last_name TEXT,
+photo_url TEXT, phone TEXT, notes TEXT,
+status TEXT NOT NULL DEFAULT 'active', source TEXT NOT NULL DEFAULT 'telegram',
+last_login_at TEXT, registered_via TEXT
+```
+
+Плюс уникальный частичный индекс `idx_users_telegram_id` (по `telegram_id IS NOT NULL`).
+
+При регистрации создаётся:
+
+1. `users` — `email = tg<telegram_id>@telegram.local`, `role='buyer'`, `status='active'`;
+2. `user_internal_accounts` — баланс 0, HWM 0;
+3. запись в legacy-модели `clients` (role `client`, `fee_pct=10`, `telegram_chat_id=<id>`)
+   и `client_accounts` — чтобы пользователь сразу был виден будущему биллингу (§22).
+
+Повторный вход обновляет имя/username/фото/`last_login_at`, дублей не создаёт.
+Уже зарегистрированный пользователь получает `already_registered: true`.
+
+### 23.8. Эксплуатация
+
+```bash
+systemctl status tradingbot-registration     # состояние
+systemctl restart tradingbot-registration    # перезапуск (ботов не трогает)
+tail -f /opt/trading-bot/logs/registration.log
+curl -s localhost:5100/registration/stats
+```
+
+Проверка страницы:
+
+```bash
+curl -s https://osdal.duckdns.org/scalper-register/ | grep osd-register-root
+curl -s -o /dev/null -w '%{http_code}\n' https://osdal.duckdns.org/bot-api/registration/widget.js
+```
+
+После правки `widget.js` перезапуск не нужен (файл читается на каждый запрос),
+после правки `app.py` — `systemctl restart tradingbot-registration`.
+
+### 23.9. Проверено
+
+- подпись с неверным `hash` → `400 «Подпись Telegram не совпала»`;
+- корректно подписанный payload → `200`, создан пользователь, `user_internal_accounts`
+  и `clients`/`client_accounts`; повтор → `already_registered=true`, дублей нет;
+- `PATCH /registration/users/:id` → `{"ok":true,"status":"blocked"}`;
+- публичные ручки `config`/`widget.js` отдаются по HTTPS, админская ручка на
+  `osdal.duckdns.org` → `404`, на `scalper-bot.duckdns.org` без пароля → `401`.
+
+### 23.10. Откат
+
+```bash
+sudo cp /etc/caddy/Caddyfile.bak-reg-<дата> /etc/caddy/Caddyfile && sudo systemctl reload caddy
+sudo systemctl disable --now tradingbot-registration
+```
+
+Страница WordPress останется, но покажет «Регистрация пока не открыта» — это
+штатное состояние при `ready=false`.

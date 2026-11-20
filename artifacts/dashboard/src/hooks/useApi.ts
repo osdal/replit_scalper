@@ -215,6 +215,90 @@ export async function fetchTradingStatus(): Promise<{
   return apiFetch(`${API}/trading/status`);
 }
 
+// ── Внутренний счёт (комиссия платформы 10% с прибыли) ──────────────────────
+
+export interface InternalAccount {
+  id: number;
+  user_id: number;
+  balance_usd: number;
+  high_water_mark_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InternalTransaction {
+  id: number;
+  user_id: number;
+  type: "credit" | "commission" | "debit" | "withdrawal";
+  amount_usd: number;
+  balance_after_usd: number;
+  related_trade_id: number | null;
+  created_at: string;
+}
+
+export interface InternalMe {
+  account: InternalAccount;
+  transactions: InternalTransaction[];
+}
+
+export async function internalMe(): Promise<InternalMe> {
+  return apiFetch(`${API}/internal-account/me`);
+}
+
+export async function internalStatement(limit = 200) {
+  return apiFetch(`${API}/internal-account/statement?limit=${limit}`);
+}
+
+// ── Регистрация пользователей через Telegram ────────────────────────────────
+// Отдельный сервис (127.0.0.1:5100). Через домен путь /bot-api идёт в Caddy →
+// сервис регистрации; при прямом доступе к vite работает прокси из vite.config.
+const REG_API = "/bot-api/registration";
+
+export interface RegisteredUser {
+  id: number;
+  email: string;
+  role: string;
+  status: "active" | "pending" | "blocked" | string;
+  source: string;
+  telegram_id: number | null;
+  telegram_username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  photo_url: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  last_login_at: string | null;
+  balance_usd: number;
+  hwm_usd: number;
+  bots_count: number;
+}
+
+export interface RegistrationStats {
+  total: number;
+  telegram: number;
+  active: number;
+  blocked: number;
+  registered_today: number;
+  total_balance_usd: number;
+}
+
+export async function registrationUsers(limit = 500): Promise<{ users: RegisteredUser[] }> {
+  return apiFetch(`${REG_API}/users?limit=${limit}`);
+}
+
+export async function registrationStats(): Promise<RegistrationStats> {
+  return apiFetch(`${REG_API}/stats`);
+}
+
+export async function registrationSetStatus(id: number, status: "active" | "blocked") {
+  return apiFetch(`${REG_API}/users/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
 // Обновление глобальных лимитов позиций (max_position_loss_pct — убыток всей
 // позиции в % от депозита; один порог на всех ботов)
 export async function updateGlobalLimits(

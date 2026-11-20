@@ -1,0 +1,22 @@
+[Unit]
+Description=OSDAL Scalper — Telegram registration service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/trading-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=REGISTRATION_PORT=5100
+Environment=REGISTRATION_HOST=127.0.0.1
+ExecStart=/usr/bin/python3 /opt/trading-bot/services/registration/app.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/trading-bot/logs/registration.log
+StandardError=append:/opt/trading-bot/logs/registration.log
+
+[Install]
+WantedBy=multi-user.target
