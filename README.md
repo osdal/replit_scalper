@@ -2547,7 +2547,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
 - `document.title` = «Регистрация доступа».
 - Стили изолированы под `#osd-register-root`, поэтому тема WordPress не ломает вёрстку.
 
-### 23.12. Согласие на получение сообщений (21.11.2026)
+### 23.11. Согласие на получение сообщений (21.11.2026)
 
 - На странице регистрации перед кнопкой «Войти через Telegram» пользователь
   обязан отметить чекбокс «Я согласен(а) на получение сообщений от бота».
@@ -2566,7 +2566,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
 - Миграция: колонки `consent_messages INTEGER NOT NULL DEFAULT 0`,
   `consent_at TEXT` (идемпотентно, при старте сервиса).
 
-### 23.13. Защита от бана и управление уведомлениями (21.11.2026)
+### 23.12. Защита от бана и управление уведомлениями (21.11.2026)
 
 - Фоновый поток `poll_updates_loop` опрашивает `getUpdates` (long polling)
   и обрабатывает `callback_query` (кнопки «Отписаться»/«Подписаться») и
@@ -2583,7 +2583,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
     (~20 msg/sec, возвращает счётчики sent/blocked/failed).
 - Хелперы: `notify_user`, `notify_all`, `mark_user_blocked`.
 
-### 23.14. Личная страница пользователя (21.11.2026)
+### 23.13. Личная страница пользователя (21.11.2026)
 
 - Каждому зарегистрированному пользователю создаётся страница
   `https://osdal.duckdns.org/u/<slug>`, где slug = telegram_username
@@ -2598,7 +2598,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
   в дашборде имя пользователя — ссылка на его страницу.
 - Приветственное сообщение в Telegram содержит ссылку на страницу.
 
-### 23.15. Откат
+### 23.14. Откат
 
 ```bash
 sudo cp /etc/caddy/Caddyfile.bak-reg-<дата> /etc/caddy/Caddyfile && sudo systemctl reload caddy
