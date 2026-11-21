@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { clientsTable, clientAccountsTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import { getClientStatement, setClientBalance, topUpClient } from "../lib/clientAccount";
+import { deleteClientCredentials, getClientKeyInfo, hasMasterKey, saveClientCredentials } from "../lib/keystore";
 
 const router = Router();
 
@@ -102,7 +103,8 @@ router.get("/clients/:id", async (req, res) => {
       .limit(1);
     if (!client) return res.status(404).json({ error: "Клиент не найден" });
     const stmt = await getClientStatement(clientId, 200);
-    return res.json({ client, ...stmt });
+    const key = await getClientKeyInfo(clientId);
+    return res.json({ client, ...stmt, key, masterKeyReady: hasMasterKey() });
   } catch (e: any) {
     return res.status(500).json({ error: e.message || String(e) });
   }
@@ -158,6 +160,47 @@ router.post("/clients/:id/balance", async (req, res) => {
       actor: "admin",
     });
     return res.json({ ok: true, ...result });
+  } catch (e: any) {
+    return res.status(400).json({ error: e.message || String(e) });
+  }
+});
+
+// ---------- ключи Binance клиента ----------
+router.post("/clients/:id/keys", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const clientId = Number(req.params.id);
+    const { apiKey, apiSecret, label, ipWhitelisted } = req.body as {
+      apiKey?: string;
+      apiSecret?: string;
+      label?: string;
+      ipWhitelisted?: boolean;
+    };
+    if (!Number.isFinite(clientId) || clientId <= 0) {
+      return res.status(400).json({ error: "Некорректный clientId" });
+    }
+    const result = await saveClientCredentials({
+      clientId,
+      apiKey: String(apiKey || ""),
+      apiSecret: String(apiSecret || ""),
+      label,
+      ipWhitelisted,
+    });
+    return res.json({ ok: true, ...result });
+  } catch (e: any) {
+    return res.status(400).json({ error: e.message || String(e) });
+  }
+});
+
+router.delete("/clients/:id/keys", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const clientId = Number(req.params.id);
+    if (!Number.isFinite(clientId) || clientId <= 0) {
+      return res.status(400).json({ error: "Некорректный clientId" });
+    }
+    await deleteClientCredentials(clientId);
+    return res.json({ ok: true, deleted: true });
   } catch (e: any) {
     return res.status(400).json({ error: e.message || String(e) });
   }

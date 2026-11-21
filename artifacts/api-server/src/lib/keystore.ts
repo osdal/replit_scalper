@@ -58,6 +58,111 @@ export interface ClientCredentials {
   mask: string;
 }
 
+/** Маскированный ключ: показываем только хвост, секрет никогда не отдаём. */
+export function maskApiKey(value: string): string {
+  const s = String(value || "").trim();
+  if (s.length <= 8) return "*".repeat(s.length);
+  return `${"*".repeat(s.length - 4)}${s.slice(-4)}`;
+}
+
+/** Сохранить (или заменить) ключ биржи клиента. */
+export async function saveClientCredentials(params: {
+  clientId: number;
+  apiKey: string;
+  apiSecret: string;
+  label?: string;
+  ipWhitelisted?: boolean;
+  actor?: string;
+}): Promise<{ id: number; mask: string; created: boolean }> {
+  const clientId = Number(params.clientId);
+  const apiKey = String(params.apiKey || "").trim();
+  const apiSecret = String(params.apiSecret || "").trim();
+  if (!Number.isFinite(clientId) || clientId <= 0) throw new Error("Некорректный clientId");
+  if (!apiKey) throw new Error("Введите API key");
+  if (!apiSecret) throw new Error("Введите API secret");
+
+  const keyEnc = encryptSecret(apiKey);
+  const secretEnc = encryptSecret(apiSecret);
+  const mask = maskApiKey(apiKey);
+  const now = new Date().toISOString();
+
+  const [existing] = await db
+    .select({ id: clientApiKeysTable.id })
+    .from(clientApiKeysTable)
+    .where(eq(clientApiKeysTable.client_id, clientId))
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(clientApiKeysTable)
+      .set({
+        api_key_mask: mask,
+        api_key_enc: keyEnc.ciphertext,
+        api_secret_enc: secretEnc.ciphertext,
+        iv: keyEnc.iv,
+        label: params.label || null,
+        ip_whitelisted: params.ipWhitelisted ?? null,
+        status: "active",
+        last_error: null,
+        updated_at: now,
+      })
+      .where(eq(clientApiKeysTable.id, existing.id));
+    return { id: Number(existing.id), mask, created: false };
+  }
+
+  const [inserted] = await db
+    .insert(clientApiKeysTable)
+    .values({
+      client_id: clientId,
+      exchange: "binance",
+      label: params.label || null,
+      api_key_mask: mask,
+      api_key_enc: keyEnc.ciphertext,
+      api_secret_enc: secretEnc.ciphertext,
+      iv: keyEnc.iv,
+      key_version: 1,
+      ip_whitelisted: params.ipWhitelisted ?? null,
+      status: "active",
+      created_at: now,
+      updated_at: now,
+    })
+    .returning();
+  return { id: Number(inserted.id), mask, created: true };
+}
+
+/** Метаданные ключа клиента (без секретов) для карточки. */
+export async function getClientKeyInfo(clientId: number): Promise<{
+  id: number;
+  mask: string;
+  label: string | null;
+  ipWhitelisted: boolean | null;
+  status: string;
+  updatedAt: string;
+} | null> {
+  const [row] = await db
+    .select()
+    .from(clientApiKeysTable)
+    .where(eq(clientApiKeysTable.client_id, clientId))
+    .orderBy(desc(clientApiKeysTable.id))
+    .limit(1);
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    mask: row.api_key_mask,
+    label: row.label,
+    ipWhitelisted: row.ip_whitelisted == null ? null : Boolean(row.ip_whitelisted),
+    status: row.status,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Удалить ключ клиента (бот вернётся к ключу из окружения). */
+export async function deleteClientCredentials(clientId: number): Promise<void> {
+  await db
+    .delete(clientApiKeysTable)
+    .where(eq(clientApiKeysTable.client_id, clientId));
+}
+
 /**
  * Действующий ключ клиента. null — ключа нет или мастер-ключ не настроен:
  * вызывающий код откатывается на BINANCE_API_KEY/SECRET из окружения.

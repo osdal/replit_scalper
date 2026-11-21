@@ -266,8 +266,19 @@ export async function internalClients(): Promise<{ clients: BillingClient[] }> {
   return apiFetch(`${API}/internal-account/clients`);
 }
 
+export interface ClientKeyInfo {
+  id: number;
+  mask: string;
+  label: string | null;
+  ipWhitelisted: boolean | null;
+  status: string;
+  updatedAt: string;
+}
+
 export interface ClientDetail {
   client: { id: number; email: string; status: string; role: string };
+  key: ClientKeyInfo | null;
+  masterKeyReady: boolean;
   account: {
     id: number;
     user_id: number;
@@ -284,6 +295,25 @@ export interface ClientDetail {
 
 export async function internalClientDetail(clientId: number): Promise<ClientDetail> {
   return apiFetch(`${API}/internal-account/clients/${clientId}`);
+}
+
+/** Сохранить ключи Binance клиента (секрет шифруется на сервере). */
+export async function internalSaveKeys(
+  clientId: number,
+  apiKey: string,
+  apiSecret: string,
+  label?: string,
+  ipWhitelisted?: boolean,
+): Promise<{ ok: boolean; id: number; mask: string; created: boolean }> {
+  return apiFetch(`${API}/internal-account/clients/${clientId}/keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey, apiSecret, label, ipWhitelisted }),
+  });
+}
+
+export async function internalDeleteKeys(clientId: number): Promise<{ ok: boolean; deleted: boolean }> {
+  return apiFetch(`${API}/internal-account/clients/${clientId}/keys`, { method: "DELETE" });
 }
 
 /** Установить точный баланс клиента (админ-токен добавляет vite-прокси). */

@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClientDetail, internalSetBalance, type ClientDetail, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClientDetail, internalSetBalance, internalSaveKeys, internalDeleteKeys, type ClientDetail, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -17,7 +17,7 @@ import {
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, BarChart2, AlertTriangle, Zap,
   Play, Square, RefreshCw, Settings, Link2, Download, History, Trash2, Wallet, Coins, Layers,
-  User, Users, ShieldCheck, Ban, CheckCircle2,
+  User, Users, ShieldCheck, Ban, CheckCircle2, KeyRound,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -910,6 +910,9 @@ export default function Dashboard() {
   const [clientBalanceInput, setClientBalanceInput] = useState("");
   const [clientBalanceReason, setClientBalanceReason] = useState("");
   const [clientBusy, setClientBusy] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiSecretInput, setApiSecretInput] = useState("");
+  const [keyLabel, setKeyLabel] = useState("");
   const [giftAmount, setGiftAmount] = useState("");
   const [giftBusy, setGiftBusy] = useState(false);
   const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
@@ -1161,6 +1164,9 @@ export default function Dashboard() {
       setClientDetailUser(u);
       setClientBalanceInput(String(detail.account.balance_usd));
       setClientBalanceReason("");
+      setApiKeyInput("");
+      setApiSecretInput("");
+      setKeyLabel("");
     } catch (e: any) {
       setRegError(e.message || "Не удалось открыть карточку клиента");
     } finally {
@@ -1191,6 +1197,51 @@ export default function Dashboard() {
       setClientBusy(false);
     }
   }, [clientDetail, clientBalanceInput, clientBalanceReason, loadInternal, loadUsers]);
+
+  const handleSaveKeys = useCallback(async () => {
+    if (!clientDetail) return;
+    if (!apiKeyInput.trim() || !apiSecretInput.trim()) {
+      setRegError("Введите API key и API secret");
+      return;
+    }
+    try {
+      setClientBusy(true);
+      setRegError(null);
+      const res = await internalSaveKeys(
+        clientDetail.client.id,
+        apiKeyInput.trim(),
+        apiSecretInput.trim(),
+        keyLabel.trim() || undefined,
+        true,
+      );
+      const detail = await internalClientDetail(clientDetail.client.id);
+      setClientDetail(detail);
+      setApiKeyInput("");
+      setApiSecretInput("");
+      setNotice(`Ключ Binance клиента #${clientDetail.client.id} сохранён: ${res.mask}`);
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось сохранить ключи");
+    } finally {
+      setClientBusy(false);
+    }
+  }, [clientDetail, apiKeyInput, apiSecretInput, keyLabel]);
+
+  const handleDeleteKeys = useCallback(async () => {
+    if (!clientDetail) return;
+    if (!window.confirm("Удалить ключи Binance этого клиента? Его боты вернутся к общему ключу из окружения.")) return;
+    try {
+      setClientBusy(true);
+      setRegError(null);
+      await internalDeleteKeys(clientDetail.client.id);
+      const detail = await internalClientDetail(clientDetail.client.id);
+      setClientDetail(detail);
+      setNotice("Ключи Binance удалены");
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось удалить ключи");
+    } finally {
+      setClientBusy(false);
+    }
+  }, [clientDetail]);
 
   const handleRegToggleStatus = useCallback(async (u: RegisteredUser) => {
     const next = u.status === "blocked" ? "active" : "blocked";
@@ -2791,6 +2842,74 @@ export default function Dashboard() {
                       Сохранить
                     </Button>
                   </div>
+                </CardContent>
+              </Card>
+
+              <Card className="border border-zinc-800 bg-zinc-950">
+                <CardHeader>
+                  <CardTitle className="text-sm text-zinc-300">Ключи Binance</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {!clientDetail.masterKeyReady && (
+                    <div className="rounded-md bg-amber-900/30 border border-amber-700/50 px-3 py-2 text-xs text-amber-300">
+                      PLATFORM_MASTER_KEY не задан — сохранённые ключи не будут использоваться.
+                    </div>
+                  )}
+                  {clientDetail.key ? (
+                    <div className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs">
+                      <div>
+                        <div className="font-mono text-zinc-200">{clientDetail.key.mask}</div>
+                        <div className="text-zinc-500">
+                          {clientDetail.key.label || "Без названия"} · {clientDetail.key.status}
+                          {" · "}{clientDetail.key.ipWhitelisted ? "IP-привязка" : "без IP-привязки"}
+                        </div>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleDeleteKeys()}
+                        disabled={clientBusy}
+                        className="border-red-800/60 text-red-300 hover:bg-red-900/30"
+                      >
+                        Удалить
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-zinc-500">Ключ не сохранён — бот использует общий ключ из окружения.</div>
+                  )}
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      placeholder="API key"
+                      value={apiKeyInput}
+                      onChange={e => setApiKeyInput(e.target.value)}
+                      className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                    />
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="API secret"
+                      value={apiSecretInput}
+                      onChange={e => setApiSecretInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") void handleSaveKeys(); }}
+                      className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Название (необязательно)"
+                      value={keyLabel}
+                      onChange={e => setKeyLabel(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none sm:w-40"
+                    />
+                    <Button size="sm" onClick={() => void handleSaveKeys()} disabled={clientBusy}>
+                      {clientBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <KeyRound className="w-4 h-4 mr-1.5" />}
+                      Сохранить
+                    </Button>
+                  </div>
+                  <p className="text-xs text-zinc-500">
+                    Секрет шифруется AES-256-GCM и никогда не отображается в дашборде. Для ключа включите права Futures и привязку к IP сервера; вывод средств не нужен.
+                  </p>
                 </CardContent>
               </Card>
 
