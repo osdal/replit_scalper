@@ -2479,7 +2479,8 @@ curl -s https://osdal.duckdns.org/bot-api/registration/config
 telegram_id INTEGER, telegram_username TEXT, first_name TEXT, last_name TEXT,
 photo_url TEXT, phone TEXT, notes TEXT,
 status TEXT NOT NULL DEFAULT 'active', source TEXT NOT NULL DEFAULT 'telegram',
-last_login_at TEXT, registered_via TEXT
+last_login_at TEXT, registered_via TEXT,
+  consent_messages INTEGER NOT NULL DEFAULT 0, consent_at TEXT
 ```
 
 Плюс уникальный частичный индекс `idx_users_telegram_id` (по `telegram_id IS NOT NULL`).
