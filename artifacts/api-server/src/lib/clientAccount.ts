@@ -317,6 +317,95 @@ export async function topUpClient(params: {
   });
 }
 
+export interface SetBalanceResult {
+  clientId: number;
+  balanceBeforeUsd: number;
+  balanceAfterUsd: number;
+  deltaUsd: number;
+  unchanged: boolean;
+}
+
+/**
+ * Устанавливает баланс клиента в точное значение.
+ *
+ * Разница между текущим и новым значением пишется в `ledger` одним
+ * `adjustment` (или ничего, если разница нулевая). Позволяет и пополнить,
+ * и списать — в карточке клиента администратор редактирует именно итоговый
+ * баланс, а не «сумму пополнения».
+ */
+export async function setClientBalance(params: {
+  clientId: number;
+  balanceUsd: number;
+  reason?: string;
+  actor?: string;
+}): Promise<SetBalanceResult> {
+  const clientId = Number(params.clientId);
+  const target = round4(Number(params.balanceUsd));
+  if (!Number.isFinite(clientId) || clientId <= 0) {
+    throw new Error("clientId обязателен");
+  }
+  if (!Number.isFinite(target)) {
+    throw new Error("balanceUsd должен быть числом");
+  }
+
+  return db.transaction(async (tx) => {
+    let [acct] = (await tx
+      .select()
+      .from(clientAccountsTable)
+      .where(eq(clientAccountsTable.client_id, clientId))
+      .limit(1)) as AccountRow[];
+
+    if (!acct) {
+      [acct] = (await tx
+        .insert(clientAccountsTable)
+        .values({
+          client_id: clientId,
+          balance_usd: 0,
+          cum_pnl_usd: 0,
+          hwm_pnl_usd: 0,
+          updated_at: new Date().toISOString(),
+        })
+        .returning()) as AccountRow[];
+    }
+
+    const balanceBefore = round4(Number(acct.balance_usd || 0));
+    const deltaUsd = round4(target - balanceBefore);
+    if (Math.abs(deltaUsd) < 0.00005) {
+      return {
+        clientId,
+        balanceBeforeUsd: balanceBefore,
+        balanceAfterUsd: balanceBefore,
+        deltaUsd: 0,
+        unchanged: true,
+      } satisfies SetBalanceResult;
+    }
+
+    const key = `adjust:${clientId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    await tx.insert(ledgerTable).values({
+      client_id: clientId,
+      type: "adjustment",
+      amount_usd: deltaUsd,
+      balance_after_usd: target,
+      cum_pnl_after_usd: round4(Number(acct.cum_pnl_usd || 0)),
+      reason: params.reason || "Ручная корректировка баланса",
+      actor: params.actor || "admin",
+      idempotency_key: key,
+    });
+    await tx
+      .update(clientAccountsTable)
+      .set({ balance_usd: target, updated_at: new Date().toISOString() })
+      .where(eq(clientAccountsTable.client_id, clientId));
+
+    return {
+      clientId,
+      balanceBeforeUsd: balanceBefore,
+      balanceAfterUsd: target,
+      deltaUsd,
+      unchanged: false,
+    } satisfies SetBalanceResult;
+  });
+}
+
 /** Баланс и выписка клиента для дашборда (совместимый вид со старым /me). */
 export async function getClientStatement(clientId: number, limit = 100) {
   const id = Number(clientId);

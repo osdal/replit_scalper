@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClients, type BillingClient, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClientDetail, internalSetBalance, type ClientDetail, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -905,11 +905,11 @@ export default function Dashboard() {
   const [internalTransactions, setInternalTransactions] = useState<InternalTransaction[]>([]);
   const [internalError, setInternalError] = useState<string | null>(null);
   const [internalLoading, setInternalLoading] = useState(false);
-  const [topUpAmount, setTopUpAmount] = useState("");
-  const [topUpReason, setTopUpReason] = useState("");
-  const [topUpBusy, setTopUpBusy] = useState(false);
-  const [billingClients, setBillingClients] = useState<BillingClient[]>([]);
-  const [topUpClientId, setTopUpClientId] = useState<string>("");
+  const [clientDetail, setClientDetail] = useState<ClientDetail | null>(null);
+  const [clientDetailUser, setClientDetailUser] = useState<RegisteredUser | null>(null);
+  const [clientBalanceInput, setClientBalanceInput] = useState("");
+  const [clientBalanceReason, setClientBalanceReason] = useState("");
+  const [clientBusy, setClientBusy] = useState(false);
   const [giftAmount, setGiftAmount] = useState("");
   const [giftBusy, setGiftBusy] = useState(false);
   const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
@@ -1089,41 +1089,6 @@ export default function Dashboard() {
     }
   }, []);
 
-  const loadBillingClients = useCallback(async () => {
-    try {
-      const res = await internalClients();
-      setBillingClients(res.clients);
-      setTopUpClientId(prev => {
-        if (prev && res.clients.some(c => String(c.id) === prev)) return prev;
-        return res.clients.length ? String(res.clients[0].id) : "";
-      });
-    } catch {
-      // дашборд может быть открыт без админ-токена — просто не показываем список
-    }
-  }, []);
-
-  const handleTopUp = useCallback(async () => {
-    const amount = Number(String(topUpAmount).replace(",", "."));
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setInternalError("Введите сумму пополнения больше нуля");
-      return;
-    }
-    try {
-      setTopUpBusy(true);
-      setInternalError(null);
-      const clientId = topUpClientId ? Number(topUpClientId) : undefined;
-      const result = await internalTopUp(amount, topUpReason.trim() || undefined, clientId);
-      setNotice(`Счёт клиента #${result.clientId} пополнен на ${fmt(result.amountUsd, 2)} USD`);
-      setTopUpAmount("");
-      setTopUpReason("");
-      await Promise.all([loadInternal(), loadBillingClients()]);
-    } catch (e: any) {
-      setInternalError(e.message || "Не удалось пополнить счёт");
-    } finally {
-      setTopUpBusy(false);
-    }
-  }, [topUpAmount, topUpReason, topUpClientId, loadInternal, loadBillingClients]);
-
   const loadGiftSetting = useCallback(async () => {
     try {
       const res = await registrationSettings();
@@ -1176,14 +1141,56 @@ export default function Dashboard() {
   useEffect(() => {
     loadUsers();
     loadGiftSetting();
-    loadBillingClients();
     const id = setInterval(() => {
       loadUsers();
       loadGiftSetting();
-      loadBillingClients();
     }, 60_000);
     return () => clearInterval(id);
-  }, [loadUsers, loadGiftSetting, loadBillingClients]);
+  }, [loadUsers, loadGiftSetting]);
+
+  const openClient = useCallback(async (u: RegisteredUser) => {
+    if (!u.client_id) {
+      setRegError("У пользователя нет привязанного клиентского счёта");
+      return;
+    }
+    try {
+      setClientBusy(true);
+      setRegError(null);
+      const detail = await internalClientDetail(u.client_id);
+      setClientDetail(detail);
+      setClientDetailUser(u);
+      setClientBalanceInput(String(detail.account.balance_usd));
+      setClientBalanceReason("");
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось открыть карточку клиента");
+    } finally {
+      setClientBusy(false);
+    }
+  }, []);
+
+  const handleSaveClientBalance = useCallback(async () => {
+    if (!clientDetail) return;
+    const amount = Number(String(clientBalanceInput).replace(",", "."));
+    if (!Number.isFinite(amount)) {
+      setRegError("Введите корректный баланс");
+      return;
+    }
+    try {
+      setClientBusy(true);
+      setRegError(null);
+      await internalSetBalance(clientDetail.client.id, amount, clientBalanceReason.trim() || undefined);
+      const detail = await internalClientDetail(clientDetail.client.id);
+      setClientDetail(detail);
+      setClientBalanceInput(String(detail.account.balance_usd));
+      setClientBalanceReason("");
+      setNotice(`Баланс клиента #${detail.client.id}: ${fmt(detail.account.balance_usd, 2)} USD`);
+      await Promise.all([loadInternal(), loadUsers()]);
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось изменить баланс");
+    } finally {
+      setClientBusy(false);
+    }
+  }, [clientDetail, clientBalanceInput, clientBalanceReason, loadInternal, loadUsers]);
 
   const handleRegToggleStatus = useCallback(async (u: RegisteredUser) => {
     const next = u.status === "blocked" ? "active" : "blocked";
@@ -2379,57 +2386,9 @@ export default function Dashboard() {
                   </CardContent>
                 </Card>
 
-                <Card className="border border-zinc-800 bg-zinc-900">
-                  <CardHeader>
-                    <CardTitle className="text-base text-zinc-300">Изменить баланс клиента</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <select
-                        value={topUpClientId}
-                        onChange={e => setTopUpClientId(e.target.value)}
-                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-sky-500 focus:outline-none sm:w-64"
-                      >
-                        {billingClients.length === 0 && <option value="">Нет клиентов</option>}
-                        {billingClients.map(c => (
-                          <option key={c.id} value={c.id}>
-                            #{c.id} — {c.email} ({fmt(c.balance_usd, 2)}$)
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        min="0.01"
-                        step="0.01"
-                        placeholder="Сумма, USD"
-                        value={topUpAmount}
-                        onChange={e => setTopUpAmount(e.target.value)}
-                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
-                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none sm:w-48"
-                      />
-                      <input
-                        type="text"
-                        placeholder="Причина (необязательно)"
-                        value={topUpReason}
-                        onChange={e => setTopUpReason(e.target.value)}
-                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
-                        className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
-                      />
-                      <Button
-                        size="sm"
-                        onClick={() => void handleTopUp()}
-                        disabled={topUpBusy || !(Number(topUpAmount) > 0)}
-                        className="whitespace-nowrap"
-                      >
-                        {topUpBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <DollarSign className="w-4 h-4 mr-1.5" />}
-                        Пополнить
-                      </Button>
-                    </div>
-                    <p className="text-xs text-zinc-500">
-                      Выберите клиента и сумму пополнения. Админ-токен не хранится в браузере: заголовок добавляет серверная часть дашборда при проксировании запроса.
-                    </p>
-                  </CardContent>
-                </Card>
+                <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-500">
+                  Баланс клиента редактируется в карточке: откройте вкладку «Пользователи» и нажмите на строку клиента.
+                </div>
 
                 {internalError && (
                   <div className="rounded-md bg-red-900/30 border border-red-700/50 px-3 py-2 text-sm text-red-300">{internalError}</div>
@@ -2625,6 +2584,10 @@ export default function Dashboard() {
                   </div>
                 )}
 
+                <div className="rounded-md border border-zinc-800 bg-blue-950/20 px-3 py-2 text-xs text-sky-300/90">
+                  Нажмите на строку клиента, чтобы открыть его карточку и изменить баланс.
+                </div>
+
                 <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -2644,7 +2607,16 @@ export default function Dashboard() {
                         {regUsers.map(u => {
                           const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.email;
                           return (
-                            <tr key={u.id} className="border-b border-zinc-800/50 hover:bg-zinc-900/30">
+                            <tr
+                              key={u.id}
+                              className={`border-b border-zinc-800/50 hover:bg-zinc-900/30 ${u.client_id ? "cursor-pointer" : ""}`}
+                              onClick={(e) => {
+                                // Клики по кнопкам/ссылкам внутри строки не открывают карточку
+                                if ((e.target as HTMLElement).closest("button, a")) return;
+                                void openClient(u);
+                              }}
+                              title={u.client_id ? "Открыть карточку клиента" : undefined}
+                            >
                               <td className="px-3 py-2">
                                 <div className="flex items-center gap-2">
                                   {u.photo_url ? (
@@ -2703,7 +2675,7 @@ export default function Dashboard() {
                                     variant="outline"
                                     size="sm"
                                     disabled={regBusy === u.id || u.role === "owner"}
-                                    onClick={() => handleRegToggleStatus(u)}
+                                    onClick={(e) => { e.stopPropagation(); handleRegToggleStatus(u); }}
                                     className="text-[11px] h-7"
                                   >
                                     {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
@@ -2713,7 +2685,7 @@ export default function Dashboard() {
                                     size="sm"
                                     title="Удалить пользователя"
                                     disabled={regBusy === u.id || u.role === "owner"}
-                                    onClick={() => handleRegDelete(u)}
+                                    onClick={(e) => { e.stopPropagation(); handleRegDelete(u); }}
                                     className="text-[11px] h-7 border-red-800/60 text-red-300 hover:bg-red-900/30 hover:text-red-200"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
@@ -2737,6 +2709,122 @@ export default function Dashboard() {
               </div>
             </TabsContent>
           </Tabs>
+        </div>
+      )}
+
+      {/* Карточка клиента: открывается по клику на строку в списке пользователей */}
+      {clientDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setClientDetail(null)}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-zinc-100">Клиент #{clientDetail.client.id}</h3>
+                <p className="text-xs text-zinc-500">
+                  {clientDetailUser
+                    ? ([clientDetailUser.first_name, clientDetailUser.last_name].filter(Boolean).join(" ") || clientDetailUser.email)
+                    : clientDetail.client.email}
+                  {" · "}{clientDetail.client.email}
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setClientDetail(null)}>Закрыть</Button>
+            </div>
+
+            <div className="space-y-4 p-5">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <Card className="border border-zinc-800 bg-zinc-950">
+                  <CardContent className="p-3">
+                    <div className="text-xs text-zinc-500">Баланс</div>
+                    <div className="mt-1 text-xl font-bold text-zinc-100">{fmt(clientDetail.account.balance_usd, 2)} USD</div>
+                  </CardContent>
+                </Card>
+                <Card className="border border-zinc-800 bg-zinc-950">
+                  <CardContent className="p-3">
+                    <div className="text-xs text-zinc-500">Накопленный PnL</div>
+                    <div className="mt-1 text-xl font-bold text-zinc-100">{fmt(clientDetail.account.cum_pnl_usd, 2)} USD</div>
+                  </CardContent>
+                </Card>
+                <Card className="border border-zinc-800 bg-zinc-950">
+                  <CardContent className="p-3">
+                    <div className="text-xs text-zinc-500">Статус</div>
+                    <div className="mt-1 text-sm text-zinc-200">{clientDetail.client.status}</div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="border border-zinc-800 bg-zinc-950">
+                <CardHeader>
+                  <CardTitle className="text-sm text-zinc-300">Изменить баланс</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <p className="text-xs text-zinc-500">
+                    Введите новое значение баланса — разница будет записана в журнал как корректировка. Можно и пополнить, и списать.
+                  </p>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="Новый баланс, USD"
+                      value={clientBalanceInput}
+                      onChange={e => setClientBalanceInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") void handleSaveClientBalance(); }}
+                      className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-sky-500 focus:outline-none sm:w-56"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Причина (необязательно)"
+                      value={clientBalanceReason}
+                      onChange={e => setClientBalanceReason(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") void handleSaveClientBalance(); }}
+                      className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                    />
+                    <Button size="sm" onClick={() => void handleSaveClientBalance()} disabled={clientBusy}>
+                      {clientBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <DollarSign className="w-4 h-4 mr-1.5" />}
+                      Сохранить
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
+                <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                  Операции ({clientDetail.transactions.length})
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-zinc-900">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs text-zinc-500">Время</th>
+                        <th className="px-3 py-2 text-left text-xs text-zinc-500">Тип</th>
+                        <th className="px-3 py-2 text-right text-xs text-zinc-500">Сумма</th>
+                        <th className="px-3 py-2 text-right text-xs text-zinc-500">Баланс после</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clientDetail.transactions.map(tx => (
+                        <tr key={tx.id} className="border-b border-zinc-800/50">
+                          <td className="px-3 py-2 text-xs text-zinc-400">{fmtTime(tx.created_at)}</td>
+                          <td className="px-3 py-2 text-xs text-zinc-300">{tx.type}</td>
+                          <td className={`px-3 py-2 text-xs text-right font-mono ${tx.amount_usd >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                            {tx.amount_usd >= 0 ? "+" : ""}{fmt(tx.amount_usd, 4)}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-right text-zinc-300">{fmt(tx.balance_after_usd, 4)}</td>
+                        </tr>
+                      ))}
+                      {clientDetail.transactions.length === 0 && (
+                        <tr><td colSpan={4} className="px-3 py-4 text-center text-xs text-zinc-500">Нет операций</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

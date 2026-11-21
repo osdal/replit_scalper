@@ -266,6 +266,42 @@ export async function internalClients(): Promise<{ clients: BillingClient[] }> {
   return apiFetch(`${API}/internal-account/clients`);
 }
 
+export interface ClientDetail {
+  client: { id: number; email: string; status: string; role: string };
+  account: {
+    id: number;
+    user_id: number;
+    client_id: number;
+    balance_usd: number;
+    cum_pnl_usd: number;
+    hwm_pnl_usd: number;
+    high_water_mark_usd: number;
+    created_at: string;
+    updated_at: string;
+  };
+  transactions: InternalTransaction[];
+}
+
+export async function internalClientDetail(clientId: number): Promise<ClientDetail> {
+  return apiFetch(`${API}/internal-account/clients/${clientId}`);
+}
+
+/** Установить точный баланс клиента (админ-токен добавляет vite-прокси). */
+export async function internalSetBalance(clientId: number, balanceUsd: number, reason?: string): Promise<{
+  ok: boolean;
+  clientId: number;
+  balanceBeforeUsd: number;
+  balanceAfterUsd: number;
+  deltaUsd: number;
+  unchanged: boolean;
+}> {
+  return apiFetch(`${API}/internal-account/clients/${clientId}/balance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ balanceUsd, reason: reason || undefined }),
+  });
+}
+
 /** Ручное пополнение внутреннего счёта (админ-токен добавляет vite-прокси). */
 export async function internalTopUp(amountUsd: number, reason?: string, clientId?: number): Promise<{
   ok: boolean;
@@ -299,6 +335,7 @@ export interface RegisteredUser {
   last_name: string | null;
   photo_url: string | null;
   notes: string | null;
+  client_id: number | null;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;

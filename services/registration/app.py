@@ -291,6 +291,11 @@ def user_row_to_dict(row: sqlite3.Row) -> dict:
         "last_name": row["last_name"],
         "photo_url": row["photo_url"],
         "notes": row["notes"],
+        "client_id": (
+            int(re.search(r"client_id=(\d+)", row["notes"] or "").group(1))
+            if re.search(r"client_id=(\d+)", row["notes"] or "")
+            else None
+        ),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "last_login_at": row["last_login_at"],

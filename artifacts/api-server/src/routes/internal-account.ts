@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { db } from "@workspace/db";
 import { clientsTable, clientAccountsTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
-import { getClientStatement, topUpClient } from "../lib/clientAccount";
+import { getClientStatement, setClientBalance, topUpClient } from "../lib/clientAccount";
 
 const router = Router();
 
@@ -88,6 +88,26 @@ router.get("/clients", async (_req, res) => {
   }
 });
 
+// ---------- карточка клиента: счёт + выписка ----------
+router.get("/clients/:id", async (req, res) => {
+  try {
+    const clientId = Number(req.params.id);
+    if (!Number.isFinite(clientId) || clientId <= 0) {
+      return res.status(400).json({ error: "Некорректный clientId" });
+    }
+    const [client] = await db
+      .select({ id: clientsTable.id, email: clientsTable.email, status: clientsTable.status, role: clientsTable.role })
+      .from(clientsTable)
+      .where(eq(clientsTable.id, clientId))
+      .limit(1);
+    if (!client) return res.status(404).json({ error: "Клиент не найден" });
+    const stmt = await getClientStatement(clientId, 200);
+    return res.json({ client, ...stmt });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 // ---------- ручное пополнение (админ) ----------
 router.post("/topup", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -111,6 +131,31 @@ router.post("/topup", async (req, res) => {
       reason,
       actor: "admin",
       idempotencyKey,
+    });
+    return res.json({ ok: true, ...result });
+  } catch (e: any) {
+    return res.status(400).json({ error: e.message || String(e) });
+  }
+});
+
+// ---------- установить баланс клиента (корректировка на разницу) ----------
+router.post("/clients/:id/balance", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const clientId = Number(req.params.id);
+    const { balanceUsd, reason } = req.body as { balanceUsd?: number; reason?: string };
+    if (!Number.isFinite(clientId) || clientId <= 0) {
+      return res.status(400).json({ error: "Некорректный clientId" });
+    }
+    if (balanceUsd === undefined || !Number.isFinite(Number(balanceUsd))) {
+      return res.status(400).json({ error: "Нужен balanceUsd" });
+    }
+    const target = Math.round(Number(balanceUsd) * 10000) / 10000;
+    const result = await setClientBalance({
+      clientId,
+      balanceUsd: target,
+      reason: reason || "Ручная корректировка баланса",
+      actor: "admin",
     });
     return res.json({ ok: true, ...result });
   } catch (e: any) {
