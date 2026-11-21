@@ -2460,9 +2460,10 @@ curl -s https://osdal.duckdns.org/bot-api/registration/config
 | POST | `/registration/notify` | админка | `{telegram_id, text}` → отправить сообщение одному пользователю |
 | POST | `/registration/broadcast` | админка | `{text}` → рассылка всем согласившимся (~20 msg/sec) |
 
-Снаружи: на `osdal.duckdns.org` открыты **только** `config`, `telegram`, `health`,
-`widget.js` (матчер `@botApiPublic` в Caddyfile). Админские ручки доступны только
-на `scalper-bot.duckdns.org` / `92-5-180-72.sslip.io`, где Caddy требует Basic auth.
+Снаружи: на `osdal.duckdns.org` открыты `config`, `telegram`, `health`, `widget.js`,
+`/registration/profile/*` и `/u/*` (матчер `@botApiPublic` + `handle /u/*` в Caddyfile).
+Админские ручки (`/users`, `/stats`, `/notify`, `/broadcast`, `/users/:id`) доступны
+только на `scalper-bot.duckdns.org` / `92-5-180-72.sslip.io`, где Caddy требует Basic auth.
 
 ### 23.6. Где смотреть зарегистрированных
 
