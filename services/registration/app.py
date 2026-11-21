@@ -137,14 +137,27 @@ def verify_telegram_payload(payload: dict, bot_token: str) -> tuple[bool, str]:
     if not check_hash:
         return False, "Отсутствует hash"
 
+    # Telegram добавил в колбэк поле `consent` (подтверждение request_access=write),
+    # но НЕ включает его в подпись. Исключаем и его, и служебный hash.
+    # Значения приводим к строке: JSON-булевы (_fields consent) и числа должны
+    # давать тот же вид, что в query-строке виджета.
+    ignored = {"hash", "consent"}
     data_check_string = "\n".join(
         f"{key}={payload[key]}"
         for key in sorted(payload)
-        if key != "hash" and payload[key] is not None
+        if key not in ignored and payload[key] is not None
     )
     secret_key = hashlib.sha256(bot_token.encode("utf-8")).digest()
     expected = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, check_hash):
+        # Диагностика: логируем БЕЗ секретов — только имена полей, их значения
+        # (кроме hash) и обе подписи, чтобы понять, что именно прислал виджет.
+        fields = {k: v for k, v in payload.items() if k != "hash"}
+        print(
+            f"[SIGN MISMATCH] fields={fields!r} dcs={data_check_string!r}\n"
+            f"  expected={expected}\n  received={check_hash}",
+            flush=True,
+        )
         return False, "Подпись Telegram не совпала"
 
     try:
