@@ -12,6 +12,7 @@
   * Конфиг (токен бота) читается на каждый запрос — перезапуск не нужен.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -125,6 +126,147 @@ def load_config() -> dict:
         "bot_username": username.strip().lstrip("@"),
         "bot_name": name.strip(),
     }
+
+
+# ── Ключи Binance клиента (шифрование совместимо с api-server/lib/keystore.ts) ──
+
+def _master_key() -> bytes | None:
+    """Мастер-ключ из .env.live (base64, 32 байта). Читаем лениво."""
+    for env_file in (os.path.join(BASE_DIR, ".env.live"), os.path.join(BASE_DIR, ".env")):
+        try:
+            with open(env_file, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    m = re.match(r"^(PLATFORM_MASTER_KEY|SUPPORT_BOT_MASTER_KEY)\s*=\s*(.*)$", line.strip())
+                    if m:
+                        raw = m.group(2).strip().strip('"').strip("'")
+                        if not raw:
+                            continue
+                        try:
+                            key = base64.b64decode(raw)
+                            if len(key) == 32:
+                                return key
+                        except Exception:
+                            pass
+        except FileNotFoundError:
+            continue
+    token = os.environ.get("PLATFORM_MASTER_KEY") or os.environ.get("SUPPORT_BOT_MASTER_KEY") or ""
+    if token:
+        try:
+            key = base64.b64decode(token)
+            if len(key) == 32:
+                return key
+        except Exception:
+            pass
+    return None
+
+
+def _encrypt_secret(plain: str) -> tuple[str, str]:
+    """AES-256-GCM: возвращает (ciphertext||tag в base64, iv в base64)."""
+    key = _master_key()
+    if key is None:
+        raise RuntimeError("PLATFORM_MASTER_KEY не настроен")
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError:
+        raise RuntimeError("cryptography не установлен — нельзя зашифровать ключ")
+    iv = os.urandom(12)
+    ct = AESGCM(key).encrypt(iv, plain.encode("utf-8"), None)
+    return base64.b64encode(ct).decode(), base64.b64encode(iv).decode()
+
+
+def _decrypt_secret(ciphertext_b64: str, iv_b64: str) -> str:
+    key = _master_key()
+    if key is None:
+        raise RuntimeError("PLATFORM_MASTER_KEY не настроен")
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError:
+        raise RuntimeError("cryptography не установлен — нельзя расшифровать ключ")
+    ct = base64.b64decode(ciphertext_b64)
+    iv = base64.b64decode(iv_b64)
+    return AESGCM(key).decrypt(iv, ct, None).decode("utf-8")
+
+
+def _mask_key(value: str) -> str:
+    s = str(value or "")
+    if len(s) <= 8:
+        return "*" * len(s)
+    return "*" * (len(s) - 4) + s[-4:]
+
+
+def get_client_key(client_id: int, reveal: bool = False) -> dict | None:
+    """Ключи клиента. По умолчанию только маска; reveal=True — расшифровать."""
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT id, api_key_mask, api_key_enc, api_secret_enc, iv, label,
+                      ip_whitelisted, status, updated_at
+               FROM client_api_keys WHERE client_id = ? ORDER BY id DESC LIMIT 1""",
+            (client_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    result = {
+        "id": row["id"],
+        "mask": row["api_key_mask"],
+        "label": row["label"],
+        "ipWhitelisted": bool(row["ip_whitelisted"]) if row["ip_whitelisted"] is not None else None,
+        "status": row["status"],
+        "updatedAt": row["updated_at"],
+        "masterKeyReady": _master_key() is not None,
+    }
+    if reveal:
+        try:
+            result["apiKey"] = _decrypt_secret(row["api_key_enc"], row["iv"])
+            result["apiSecret"] = _decrypt_secret(row["api_secret_enc"], row["iv"])
+        except Exception as exc:
+            result["error"] = str(exc)
+    return result
+
+
+def save_client_key(client_id: int, api_key: str, api_secret: str, label: str = "",
+                    ip_whitelisted: bool = True) -> dict:
+    """Создать/заменить ключ клиента (шифруется AES-256-GCM)."""
+    api_key = (api_key or "").strip()
+    api_secret = (api_secret or "").strip()
+    if not api_key or not api_secret:
+        raise ValueError("Введите API key и API secret")
+    key_enc, iv = _encrypt_secret(api_key)
+    secret_enc, _ = _encrypt_secret(api_secret)
+    mask = _mask_key(api_key)
+    now = utc_now()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM client_api_keys WHERE client_id = ? ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE client_api_keys SET api_key_mask=?, api_key_enc=?, api_secret_enc=?,
+                       iv=?, label=?, ip_whitelisted=?, status='active', last_error=NULL, updated_at=?
+                   WHERE id=?""",
+                (mask, key_enc, secret_enc, iv, label or None,
+                 1 if ip_whitelisted else 0, now, existing["id"]),
+            )
+            key_id = int(existing["id"])
+        else:
+            cur = conn.execute(
+                """INSERT INTO client_api_keys
+                       (client_id, exchange, label, api_key_mask, api_key_enc,
+                        api_secret_enc, iv, key_version, ip_whitelisted, status,
+                        created_at, updated_at)
+                   VALUES (?, 'binance', ?, ?, ?, ?, ?, 1, ?, 'active', ?, ?)""",
+                (client_id, label or None, mask, key_enc, secret_enc, iv,
+                 1 if ip_whitelisted else 0, now, now),
+            )
+            key_id = int(cur.lastrowid)
+        conn.commit()
+    return {"id": key_id, "mask": mask, "label": label or None, "updatedAt": now}
+
+
+def delete_client_key(client_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM client_api_keys WHERE client_id = ?", (client_id,))
+        conn.commit()
 
 
 def get_default_gift() -> float:
@@ -563,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, x-admin-token")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, x-admin-token, Authorization")
 
     def _json(self, code: int, payload) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -626,6 +768,36 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/registration/settings":
                 return self._json(200, {"default_gift_usd": get_default_gift()})
 
+            # Ключи Binance: ?slug=<username|tgID|userID>&tg=<telegram_id>
+            if path == "/registration/keys":
+                qs = parse_qs(parsed.query)
+                slug = (qs.get("slug") or [""])[0]
+                try:
+                    tg = int((qs.get("tg") or ["0"])[0])
+                except (TypeError, ValueError):
+                    tg = 0
+                profile = get_profile(slug) if slug else None
+                if not profile:
+                    return self._json(404, {"error": "Пользователь не найден"})
+                # Подтверждение: либо Telegram ID из виджета, либо Basic auth админки.
+                is_admin = self.headers.get("Authorization", "").startswith("Basic ")
+                if not is_admin and (not tg or str(tg) != str(profile.get("telegram_id"))):
+                    return self._json(403, {"error": "Нужно подтверждение Telegram"})
+                with connect() as conn:
+                    prow = conn.execute(
+                        "SELECT notes FROM users WHERE id = ?", (profile["id"],)
+                    ).fetchone()
+                m = re.search(r"client_id=(\d+)", (prow["notes"] if prow else "") or "")
+                client_id = int(m.group(1)) if m else None
+                if not client_id:
+                    return self._json(404, {"error": "Клиентский счёт не найден"})
+                key = get_client_key(client_id, reveal=True)
+                return self._json(200, {
+                    "profile": {"name": profile["name"], "username": profile["username"]},
+                    "key": key,
+                    "canEdit": True,
+                })
+
             if path == "/registration/stats":
                 return self._json(200, stats())
 
@@ -640,6 +812,14 @@ class Handler(BaseHTTPRequestHandler):
                 prof = get_profile(slug)
                 if prof is None:
                     return self._json(404, {"error": "Пользователь не найден"})
+                with connect() as conn:
+                    prow = conn.execute(
+                        "SELECT notes FROM users WHERE id = ?", (prof["id"],)
+                    ).fetchone()
+                mm = re.search(r"client_id=(\d+)", (prow["notes"] if prow else "") or "")
+                cid = int(mm.group(1)) if mm else None
+                prof["client_id"] = cid
+                prof["key"] = get_client_key(cid) if cid else None
                 return self._json(200, prof)
 
             # страница пользователя /u/<slug>
@@ -648,6 +828,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not slug:
                     return self._json(400, {"error": "Укажите пользователя"})
                 prof = get_profile(slug)
+                if prof:
+                    with connect() as _conn:
+                        _prow = _conn.execute(
+                            "SELECT notes FROM users WHERE id = ?", (prof["id"],)
+                        ).fetchone()
+                    _m = re.search(r"client_id=(\d+)", (_prow["notes"] if _prow else "") or "")
+                    prof["client_id"] = int(_m.group(1)) if _m else None
+                    prof["key"] = get_client_key(prof["client_id"]) if prof["client_id"] else None
                 html = render_profile_html(prof, slug)
                 body = html.encode("utf-8")
                 self.send_response(200 if prof else 404)
@@ -667,6 +855,36 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path == "/registration/keys":
+                body = self._read_json()
+                try:
+                    client_id = int(body.get("client_id") or 0)
+                    tg = int(body.get("telegram_id") or 0)
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "Некорректный client_id/telegram_id"})
+                if client_id <= 0:
+                    return self._json(400, {"error": "Некорректный client_id"})
+                # Подтверждение: Telegram ID должен совпадать с владельцем счёта.
+                with connect() as conn:
+                    prow = conn.execute(
+                        "SELECT telegram_id FROM users WHERE notes LIKE ?",
+                        (f"%client_id={client_id}%",),
+                    ).fetchone()
+                is_admin = self.headers.get("Authorization", "").startswith("Basic ")
+                if not is_admin and (not prow or not tg or str(tg) != str(prow["telegram_id"])):
+                    return self._json(403, {"error": "Нужно подтверждение Telegram"})
+                try:
+                    res = save_client_key(
+                        client_id,
+                        str(body.get("apiKey") or ""),
+                        str(body.get("apiSecret") or ""),
+                        str(body.get("label") or ""),
+                        bool(body.get("ipWhitelisted", True)),
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    return self._json(400, {"error": str(exc)})
+                return self._json(200, {"ok": True, **res})
+
             if path == "/registration/telegram":
                 payload = self._read_json()
                 try:
@@ -700,6 +918,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path == "/registration/keys":
+                body = self._read_json()
+                try:
+                    client_id = int(body.get("client_id") or 0)
+                    tg = int(body.get("telegram_id") or 0)
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "Некорректный client_id/telegram_id"})
+                with connect() as conn:
+                    prow = conn.execute(
+                        "SELECT telegram_id FROM users WHERE notes LIKE ?",
+                        (f"%client_id={client_id}%",),
+                    ).fetchone()
+                is_admin = self.headers.get("Authorization", "").startswith("Basic ")
+                if not is_admin and (not prow or not tg or str(tg) != str(prow["telegram_id"])):
+                    return self._json(403, {"error": "Нужно подтверждение Telegram"})
+                delete_client_key(client_id)
+                return self._json(200, {"ok": True, "deleted": True})
+
             parts = path.split("/")
             if len(parts) == 4 and parts[1] == "registration" and parts[2] == "users":
                 try:
