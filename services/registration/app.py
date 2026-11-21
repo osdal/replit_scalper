@@ -396,8 +396,26 @@ def list_users(limit: int = 500) -> list:
     return [user_row_to_dict(r) for r in rows]
 
 
+def cleanup_orphan_accounts() -> int:
+    """Удаляет client_accounts, у которых нет соответствующей записи в clients.
+
+    Такие «сироты» остаются после неудачных/отменённых регистраций: счёт
+    создаётся раньше, чем клиент, или клиент удаляется отдельно. На работу
+    не влияют, но засоряют БД и мешают отладке. Вызывается при старте сервиса
+    и после каждого удаления пользователя.
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            """DELETE FROM client_accounts
+               WHERE client_id NOT IN (SELECT id FROM clients)"""
+        )
+        removed = cur.rowcount
+        conn.commit()
+    return removed
+
+
 def delete_user(user_id: int) -> dict:
-    """Удаляет зарегистрированного пользователя и его платформенный счёт.
+    """Удаляет зарегистрированного пользователя и её платформенный счёт.
 
     Защита:
       * владелец платформы (role='owner') не удаляется;
@@ -441,6 +459,12 @@ def delete_user(user_id: int) -> dict:
             conn.execute("DELETE FROM client_accounts WHERE client_id = ?", (client_id,))
             conn.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         conn.commit()
+
+    # Подстраховка: убираем любые счета без клиента (в т.ч. от старых тестов).
+    try:
+        cleanup_orphan_accounts()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] cleanup orphans: {exc}", flush=True)
 
     return {"deleted": True, "user_id": user_id, "client_id": client_id}
 
@@ -846,6 +870,12 @@ def notify_all(text: str) -> dict:
 
 def main() -> None:
     ensure_schema()
+    try:
+        removed = cleanup_orphan_accounts()
+        if removed:
+            print(f"[STARTUP] удалено {removed} сиротливых client_accounts", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] startup cleanup: {exc}", flush=True)
     cfg = load_config()
     # фоновый опрос Telegram (callback_query, /start, /stop)
     import threading
