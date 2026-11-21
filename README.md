@@ -2399,6 +2399,7 @@ Done
 | `/opt/trading-bot/services/registration/app.py` | HTTP-сервис (только stdlib Python), порт 5100 |
 | `/opt/trading-bot/services/registration/widget.js` | Весь UI страницы регистрации (стили + логика), отдаётся по `/bot-api/registration/widget.js` |
 | `/opt/trading-bot/services/registration/page-registration.html` | Пустой шаблон страницы WordPress (без header/footer) — копировать в тему |
+| `/opt/trading-bot/services/registration/profile.py` | Публичная страница пользователя `/u/<slug>`: `get_profile`, `render_profile_html` |
 | `/opt/trading-bot/services/registration/registration.service` | Копия systemd-unit для истории |
 | `/etc/systemd/system/tradingbot-registration.service` | Живой unit (`enable`, `Restart=always`) |
 | `/opt/trading-bot/data/registration_config.json` | Токен и username бота (**не в git**, создаётся вручную) |
@@ -2454,6 +2455,10 @@ curl -s https://osdal.duckdns.org/bot-api/registration/config
 | GET | `/registration/users?limit=500` | админка | Список пользователей + баланс + число ботов |
 | GET | `/registration/stats` | админка | Всего / активных / через Telegram / заблокировано |
 | PATCH | `/registration/users/:id` | админка | `{"status":"active"\|"blocked"}` |
+| GET | `/registration/profile/:slug` | публично | Публичные данные пользователя (имя, баланс, боты, согласие) |
+| GET | `/u/:slug` | публично | HTML-страница пользователя (светлая тема Telegram) |
+| POST | `/registration/notify` | админка | `{telegram_id, text}` → отправить сообщение одному пользователю |
+| POST | `/registration/broadcast` | админка | `{text}` → рассылка всем согласившимся (~20 msg/sec) |
 
 Снаружи: на `osdal.duckdns.org` открыты **только** `config`, `telegram`, `health`,
 `widget.js` (матчер `@botApiPublic` в Caddyfile). Админские ручки доступны только
@@ -2480,7 +2485,7 @@ telegram_id INTEGER, telegram_username TEXT, first_name TEXT, last_name TEXT,
 photo_url TEXT, phone TEXT, notes TEXT,
 status TEXT NOT NULL DEFAULT 'active', source TEXT NOT NULL DEFAULT 'telegram',
 last_login_at TEXT, registered_via TEXT,
-  consent_messages INTEGER NOT NULL DEFAULT 0, consent_at TEXT
+consent_messages INTEGER NOT NULL DEFAULT 0, consent_at TEXT
 ```
 
 Плюс уникальный частичный индекс `idx_users_telegram_id` (по `telegram_id IS NOT NULL`).
@@ -2593,7 +2598,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
   в дашборде имя пользователя — ссылка на его страницу.
 - Приветственное сообщение в Telegram содержит ссылку на страницу.
 
-### 23.10. Откат
+### 23.15. Откат
 
 ```bash
 sudo cp /etc/caddy/Caddyfile.bak-reg-<дата> /etc/caddy/Caddyfile && sudo systemctl reload caddy
