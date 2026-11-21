@@ -220,24 +220,19 @@ export async function fetchTradingStatus(): Promise<{
 export interface InternalAccount {
   id: number;
   user_id: number;
-  client_id?: number;
   balance_usd: number;
-  cum_pnl_usd?: number;
-  hwm_pnl_usd?: number;
-  high_water_mark_usd: number; // совместимость: дубль hwm_pnl_usd
+  high_water_mark_usd: number;
   created_at: string;
   updated_at: string;
 }
 
 export interface InternalTransaction {
   id: number;
-  client_id?: number;
-  type: "gift" | "topup" | "fee" | "adjustment" | "refund" | string;
+  user_id: number;
+  type: "credit" | "commission" | "debit" | "withdrawal";
   amount_usd: number;
   balance_after_usd: number;
-  cum_pnl_after_usd?: number | null;
   related_trade_id: number | null;
-  reason?: string | null;
   created_at: string;
 }
 
@@ -252,22 +247,6 @@ export async function internalMe(): Promise<InternalMe> {
 
 export async function internalStatement(limit = 200) {
   return apiFetch(`${API}/internal-account/statement?limit=${limit}`);
-}
-
-/** Ручное пополнение внутреннего счёта (админ-токен добавляет vite-прокси). */
-export async function internalTopUp(amountUsd: number, reason?: string): Promise<{
-  ok: boolean;
-  clientId: number;
-  amountUsd: number;
-  balanceBeforeUsd: number;
-  balanceAfterUsd: number;
-  alreadyApplied: boolean;
-}> {
-  return apiFetch(`${API}/internal-account/topup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ amountUsd, reason: reason || undefined }),
-  });
 }
 
 // ── Регистрация пользователей через Telegram ────────────────────────────────
@@ -293,6 +272,8 @@ export interface RegisteredUser {
   balance_usd: number;
   hwm_usd: number;
   bots_count: number;
+  consent_messages: boolean;
+  consent_at: string | null;
 }
 
 export interface RegistrationStats {
@@ -318,16 +299,6 @@ export async function registrationSetStatus(id: number, status: "active" | "bloc
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
   });
-}
-
-/** Удалить зарегистрированного пользователя (вместе с его счётом). */
-export async function registrationDeleteUser(id: number): Promise<{
-  ok: boolean;
-  deleted: boolean;
-  user_id: number;
-  client_id: number | null;
-}> {
-  return apiFetch(`${REG_API}/users/${id}`, { method: "DELETE" });
 }
 
 // Обновление глобальных лимитов позиций (max_position_loss_pct — убыток всей

@@ -16,7 +16,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import sqlite3
 import time
 import traceback
@@ -81,6 +80,8 @@ def ensure_schema() -> None:
         "source": "TEXT NOT NULL DEFAULT 'telegram'",
         "last_login_at": "TEXT",
         "registered_via": "TEXT",
+        "consent_messages": "INTEGER NOT NULL DEFAULT 0",
+        "consent_at": "TEXT",
     }
     with connect() as conn:
         cols = table_columns(conn, "users")
@@ -194,6 +195,8 @@ def user_row_to_dict(row: sqlite3.Row) -> dict:
         "balance_usd": float(row["balance_usd"] or 0),
         "hwm_usd": float(row["hwm_usd"] or 0),
         "bots_count": int(row["bots_count"] or 0),
+        "consent_messages": bool(row["consent_messages"]) if "consent_messages" in row.keys() else False,
+        "consent_at": row["consent_at"] if "consent_at" in row.keys() else None,
     }
 
 
@@ -208,11 +211,12 @@ def register_telegram_user(payload: dict) -> dict:
     first_name = (payload.get("first_name") or "").strip() or None
     last_name = (payload.get("last_name") or "").strip() or None
     photo_url = (payload.get("photo_url") or "").strip() or None
+    consent = bool(payload.get("consent"))
     now = utc_now()
 
     with connect() as conn:
         existing = conn.execute(
-            "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
+            "SELECT id, consent_messages FROM users WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
 
         if existing:
@@ -222,9 +226,12 @@ def register_telegram_user(payload: dict) -> dict:
                                     first_name = COALESCE(?, first_name),
                                     last_name = COALESCE(?, last_name),
                                     photo_url = COALESCE(?, photo_url),
-                                    last_login_at = ?, updated_at = ?
+                                    last_login_at = ?, updated_at = ?,
+                                    consent_messages = CASE WHEN ? THEN 1 ELSE consent_messages END,
+                                    consent_at = CASE WHEN ? AND consent_at IS NULL THEN ? ELSE consent_at END
                    WHERE id = ?""",
-                (username, first_name, last_name, photo_url, now, now, user_id),
+                (username, first_name, last_name, photo_url, now, now,
+                 1 if consent else 0, 1 if consent else 0, now, user_id),
             )
             already = True
         else:
@@ -233,9 +240,12 @@ def register_telegram_user(payload: dict) -> dict:
                 """INSERT INTO users
                        (email, password_hash, role, created_at, updated_at,
                         telegram_id, telegram_username, first_name, last_name, photo_url,
-                        status, source, last_login_at, registered_via)
-                   VALUES (?, '', 'buyer', ?, ?, ?, ?, ?, ?, ?, 'active', 'telegram', ?, 'telegram-widget')""",
-                (email, now, now, telegram_id, username, first_name, last_name, photo_url, now),
+                        status, source, last_login_at, registered_via,
+                        consent_messages, consent_at)
+                   VALUES (?, '', 'buyer', ?, ?, ?, ?, ?, ?, ?, 'active', 'telegram', ?, 'telegram-widget',
+                           ?, ?)""",
+                (email, now, now, telegram_id, username, first_name, last_name, photo_url, now,
+                 1 if consent else 0, now if consent else None),
             )
             user_id = int(cur.lastrowid)
             conn.execute(
@@ -281,7 +291,7 @@ def register_telegram_user(payload: dict) -> dict:
 
     user = user_row_to_dict(row)
 
-    if not already:
+    if not already and consent:
         send_telegram_message(
             cfg["bot_token"],
             telegram_id,
@@ -306,55 +316,6 @@ def list_users(limit: int = 500) -> list:
             (limit,),
         ).fetchall()
     return [user_row_to_dict(r) for r in rows]
-
-
-def delete_user(user_id: int) -> dict:
-    """Удаляет зарегистрированного пользователя и его платформенный счёт.
-
-    Защита:
-      * владелец платформы (role='owner') не удаляется;
-      * пользователь с привязанными ботами не удаляется — сначала отвяжите ботов.
-    Удаляются legacy-таблицы пользователя и его дубль в clients/client_accounts
-    (client_id берём из notes или по email).
-    """
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT id, email, role, notes FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
-        if not row:
-            raise LookupError("Пользователь не найден")
-        if row["role"] == "owner":
-            raise ValueError("Нельзя удалить владельца платформы")
-
-        bots = conn.execute(
-            "SELECT COUNT(*) FROM bots WHERE user_id = ?", (user_id,)
-        ).fetchone()[0]
-        if bots:
-            raise ValueError(
-                f"У пользователя {bots} ботов — сначала отвяжите их, затем удаляйте"
-            )
-
-        client_id = None
-        match = re.search(r"client_id=(\d+)", row["notes"] or "")
-        if match:
-            client_id = int(match.group(1))
-        else:
-            client_row = conn.execute(
-                "SELECT id FROM clients WHERE email = ?", (row["email"],)
-            ).fetchone()
-            if client_row:
-                client_id = int(client_row["id"])
-
-        conn.execute("DELETE FROM user_internal_accounts WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM internal_transactions WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        if client_id:
-            conn.execute("DELETE FROM ledger WHERE client_id = ?", (client_id,))
-            conn.execute("DELETE FROM client_accounts WHERE client_id = ?", (client_id,))
-            conn.execute("DELETE FROM clients WHERE id = ?", (client_id,))
-        conn.commit()
-
-    return {"deleted": True, "user_id": user_id, "client_id": client_id}
 
 
 def stats() -> dict:
@@ -407,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin in ALLOWED_ORIGINS:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, x-admin-token")
 
     def _json(self, code: int, payload) -> None:
@@ -491,23 +452,6 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 return self._json(200, {"ok": True, **result})
-            return self._json(404, {"error": "not found"})
-        except Exception as exc:  # noqa: BLE001
-            traceback.print_exc()
-            return self._json(500, {"error": str(exc)})
-
-    def do_DELETE(self):
-        path = urlparse(self.path).path.rstrip("/") or "/"
-        try:
-            parts = path.split("/")
-            if len(parts) == 4 and parts[1] == "registration" and parts[2] == "users":
-                try:
-                    res = delete_user(int(parts[3]))
-                except LookupError as exc:
-                    return self._json(404, {"error": str(exc)})
-                except ValueError as exc:
-                    return self._json(400, {"error": str(exc)})
-                return self._json(200, {"ok": True, **res})
             return self._json(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()

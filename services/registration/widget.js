@@ -30,6 +30,9 @@
     + "#osd-register-root .osd-tg-wrap{display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;border:1px dashed var(--osd-line);border-radius:12px;background:rgba(42,171,238,.05);}"
     + "#osd-register-root .osd-hint{font-size:12.5px;color:var(--osd-muted);line-height:1.5;margin:0;}"
     + "#osd-register-root .osd-divider{height:1px;background:var(--osd-line);margin:22px 0;}"
+    + "#osd-register-root .osd-consent{display:flex;align-items:flex-start;gap:10px;margin:0 0 16px;padding:14px;border:1px solid var(--osd-line);border-radius:12px;background:rgba(42,171,238,.04);cursor:pointer;font-size:13.5px;line-height:1.5;color:var(--osd-text);}"
+    + "#osd-register-root .osd-consent input{margin-top:3px;accent-color:var(--osd-accent);width:16px;height:16px;flex-shrink:0;}"
+    + "#osd-register-root .osd-consent span{flex:1;}"
     + "#osd-register-root .osd-spinner{width:18px;height:18px;border:2px solid rgba(0,0,0,.12);border-top-color:var(--osd-accent);border-radius:50%;display:inline-block;animation:osd-spin .8s linear infinite;vertical-align:-3px;margin-right:8px;}"
     + "@keyframes osd-spin{to{transform:rotate(360deg);}}"
     + "#osd-register-root .osd-loading{color:var(--osd-muted);font-size:14px;}"
@@ -94,9 +97,13 @@
       "  <li>Личный кабинет с историей сделок и балансом</li>" +
       "  <li>Уведомления о входе в сделку и закрытии по TP</li>" +
       "</ul>" +
+      '<label class="osd-consent" id="osd-consent-wrap">' +
+      '  <input type="checkbox" id="osd-consent" />' +
+      '  <span>Я согласен(а) на получение сообщений от бота в Telegram — уведомления о сделках, доступе и сервисных событиях. Без этого согласия регистрация невозможна (защита от спама).</span>' +
+      "</label>" +
       '<div class="osd-tg-wrap">' +
       '  <div id="osd-tg-slot"></div>' +
-      '  <p class="osd-hint" id="osd-tg-hint">Нажмите «Войти через Telegram» и подтвердите вход в открывшемся окне.</p>' +
+      '  <p class="osd-hint" id="osd-tg-hint">Сначала отметьте согласие выше, затем нажмите «Войти через Telegram».</p>' +
       "</div>" +
       '<div class="osd-divider"></div>' +
       '<div id="osd-tg-fallback" class="osd-hide">' +
@@ -104,7 +111,21 @@
       "Напишите нам в Telegram — зарегистрируем вручную.</p>" +
       "</div>"
     );
-    mountWidget();
+    var cb = document.getElementById("osd-consent");
+    if (cb) {
+      cb.addEventListener("change", function () {
+        if (cb.checked) {
+          mountWidget();
+          var hint = document.getElementById("osd-tg-hint");
+          if (hint) hint.textContent = "Нажмите «Войти через Telegram» и подтвердите вход в открывшемся окне.";
+        } else {
+          var slot = document.getElementById("osd-tg-slot");
+          if (slot) slot.innerHTML = "";
+          var hint2 = document.getElementById("osd-tg-hint");
+          if (hint2) hint2.textContent = "Сначала отметьте согласие выше, затем нажмите «Войти через Telegram».";
+        }
+      });
+    }
   }
 
   function showError(msg) {
@@ -174,6 +195,11 @@
   // ───────────────────── колбэк Telegram ─────────────────────
   window.osdOnTelegramAuth = function (user) {
     if (!user) return;
+    var cb = document.getElementById("osd-consent");
+    if (!cb || !cb.checked) {
+      showError("Отметьте согласие на получение сообщений — без него регистрация невозможна.");
+      return;
+    }
     var payload = {
       id: user.id,
       first_name: user.first_name,
@@ -181,7 +207,8 @@
       username: user.username,
       photo_url: user.photo_url,
       auth_date: user.auth_date,
-      hash: user.hash
+      hash: user.hash,
+      consent: true
     };
     var slot = document.getElementById("osd-tg-slot");
     if (slot) slot.innerHTML = '<div class="osd-loading"><span class="osd-spinner"></span>Проверяем подпись Telegram…</div>';
