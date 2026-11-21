@@ -28,11 +28,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 try:
-    from profile import get_profile, render_profile_html
+    from profile import get_profile, render_profile_html, get_positions
 except Exception:  # noqa: BLE001
     import sys as _sys, os as _os
     _sys.path.insert(0, _os.path.dirname(os.path.abspath(__file__)))
-    from profile import get_profile, render_profile_html
+    from profile import get_profile, render_profile_html, get_positions
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.environ.get("REGISTRATION_DB", os.path.join(BASE_DIR, "data", "bot_live.db"))
@@ -868,6 +868,7 @@ class Handler(BaseHTTPRequestHandler):
                 cid = int(mm.group(1)) if mm else None
                 prof["client_id"] = cid
                 prof["key"] = get_client_key(cid) if cid else None
+                prof["positions"] = get_positions(cid) if cid else []
                 return self._json(200, prof)
 
             # страница пользователя /u/<slug>
@@ -884,6 +885,7 @@ class Handler(BaseHTTPRequestHandler):
                     _m = re.search(r"client_id=(\d+)", (_prow["notes"] if _prow else "") or "")
                     prof["client_id"] = int(_m.group(1)) if _m else None
                     prof["key"] = get_client_key(prof["client_id"]) if prof["client_id"] else None
+                    prof["positions"] = get_positions(prof["client_id"]) if prof["client_id"] else []
                 html = render_profile_html(prof, slug)
                 body = html.encode("utf-8")
                 self.send_response(200 if prof else 404)

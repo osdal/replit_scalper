@@ -50,3 +50,35 @@ export const tradesTable = sqliteTable("trades", {
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ id: true });
 export type InsertTrade = z.infer<typeof insertTradeSchema>;
 export type Trade = typeof tradesTable.$inferSelect;
+
+/**
+ * Отдельные ноги reverse-цикла.
+ *
+ * В `trades` весь цикл живёт в одной строке (reverse обновляет ту же запись),
+ * поэтому для истории позиций нужна отдельная таблица: каждая нога — своя
+ * запись со своим entry/exit/pnl. `is_open=1` у последней ещё не закрытой ноги.
+ * `trade_id` связывает ногу со строкой trades; `client_id` — владелец для кабинета.
+ */
+export const tradeLegsTable = sqliteTable("trade_legs", {
+  id:          integer("id").primaryKey({ autoIncrement: true }),
+  trade_id:    integer("trade_id").notNull(),
+  client_id:   integer("client_id"),
+  bot_id:      integer("bot_id"),
+  symbol:      text("symbol").notNull(),
+  leg_index:   integer("leg_index").notNull(),        // 0 = исходная нога, 1.. = reverse
+  direction:   text("direction").notNull(),
+  entry_price: real("entry_price").notNull(),
+  exit_price:  real("exit_price"),
+  qty:         real("qty").notNull(),
+  sl_price:    real("sl_price"),
+  tp1_price:   real("tp1_price"),
+  pnl:         real("pnl"),
+  exit_reason: text("exit_reason"),
+  entry_time:  text("entry_time").notNull(),
+  exit_time:   text("exit_time"),
+  is_open:     integer("is_open", { mode: "boolean" }).notNull().default(false),
+  commission:  real("commission"),
+  created_at:  text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export type TradeLeg = typeof tradeLegsTable.$inferSelect;

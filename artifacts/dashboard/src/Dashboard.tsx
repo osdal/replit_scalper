@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Fragment } from "react";
 import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClientDetail, internalSetBalance, internalSaveKeys, internalDeleteKeys, type ClientDetail, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClientDetail, internalSetBalance, internalSaveKeys, internalDeleteKeys, fetchPositions, type PositionView, type ClientDetail, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -910,6 +910,8 @@ export default function Dashboard() {
   const [clientBalanceInput, setClientBalanceInput] = useState("");
   const [clientBalanceReason, setClientBalanceReason] = useState("");
   const [clientBusy, setClientBusy] = useState(false);
+  const [clientPositions, setClientPositions] = useState<PositionView[]>([]);
+  const [expandedPosition, setExpandedPosition] = useState<number | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiSecretInput, setApiSecretInput] = useState("");
   const [keyLabel, setKeyLabel] = useState("");
@@ -1159,8 +1161,13 @@ export default function Dashboard() {
     try {
       setClientBusy(true);
       setRegError(null);
-      const detail = await internalClientDetail(u.client_id);
+      const [detail, pos] = await Promise.all([
+        internalClientDetail(u.client_id),
+        fetchPositions({ clientId: u.client_id, limit: 50 }),
+      ]);
       setClientDetail(detail);
+      setClientPositions(pos.positions || []);
+      setExpandedPosition(null);
       setClientDetailUser(u);
       setClientBalanceInput(String(detail.account.balance_usd));
       setClientBalanceReason("");
@@ -2912,6 +2919,71 @@ export default function Dashboard() {
                   </p>
                 </CardContent>
               </Card>
+
+              <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
+                <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                  История позиций ({clientPositions.length}) — нажмите, чтобы раскрыть ноги
+                </div>
+                <div className="max-h-72 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-zinc-900">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs text-zinc-500">Пара</th>
+                        <th className="px-3 py-2 text-left text-xs text-zinc-500">Направление</th>
+                        <th className="px-3 py-2 text-right text-xs text-zinc-500">Вход</th>
+                        <th className="px-3 py-2 text-right text-xs text-zinc-500">PnL</th>
+                        <th className="px-3 py-2 text-center text-xs text-zinc-500">Ног</th>
+                        <th className="px-3 py-2 text-left text-xs text-zinc-500">Время</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clientPositions.map(p => (
+                        <Fragment key={p.id}>
+                          <tr
+                            className="border-b border-zinc-800/50 hover:bg-zinc-900/40 cursor-pointer"
+                            onClick={() => setExpandedPosition(expandedPosition === p.id ? null : p.id)}
+                          >
+                            <td className="px-3 py-2 text-xs text-zinc-200">{p.symbol}</td>
+                            <td className={`px-3 py-2 text-xs ${p.direction === "LONG" ? "text-emerald-300" : "text-red-300"}`}>
+                              {p.direction}{p.is_open ? " • открыта" : ""}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-right font-mono text-zinc-300">{fmt(p.entry_price, 6)}</td>
+                            <td className={`px-3 py-2 text-xs text-right font-mono ${(p.cycle_pnl ?? p.pnl ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                              {fmt(p.cycle_pnl ?? p.pnl, 4)}
+                            </td>
+                            <td className="px-3 py-2 text-center text-xs text-zinc-400">{p.legs.length}</td>
+                            <td className="px-3 py-2 text-xs text-zinc-500">{fmtTime(p.entry_time)}</td>
+                          </tr>
+                          {expandedPosition === p.id && (
+                            <tr className="border-b border-zinc-800/50 bg-zinc-900/60">
+                              <td colSpan={6} className="px-3 py-2">
+                                <div className="space-y-1">
+                                  {p.legs.map(leg => (
+                                    <div key={leg.id} className="flex items-center justify-between gap-2 rounded bg-zinc-950 px-2 py-1.5 text-xs">
+                                      <span className="text-zinc-400">Нога {leg.leg_index + 1}</span>
+                                      <span className={leg.direction === "LONG" ? "text-emerald-300" : "text-red-300"}>{leg.direction}</span>
+                                      <span className="font-mono text-zinc-300">вх {fmt(leg.entry_price, 6)}</span>
+                                      <span className="font-mono text-zinc-300">вых {leg.exit_price == null ? "—" : fmt(leg.exit_price, 6)}</span>
+                                      <span className="font-mono text-zinc-300">qty {fmt(leg.qty, 4)}</span>
+                                      <span className={`font-mono ${leg.is_open ? "text-sky-300" : (leg.pnl ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                                        {leg.is_open ? "открыта" : fmt(leg.pnl, 4)}
+                                      </span>
+                                      <span className="text-zinc-500">{leg.exit_reason || "—"}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      ))}
+                      {clientPositions.length === 0 && (
+                        <tr><td colSpan={6} className="px-3 py-4 text-center text-xs text-zinc-500">Позиций нет</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
 
               <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
                 <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">

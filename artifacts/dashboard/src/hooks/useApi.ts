@@ -192,6 +192,49 @@ export async function fetchOpenTradesCount(): Promise<{ count: number }> {
   return apiFetch(`${API}/trades/count-open`);
 }
 
+export interface TradeLegView {
+  id: number;
+  trade_id: number;
+  leg_index: number;
+  direction: string;
+  entry_price: number;
+  exit_price: number | null;
+  qty: number;
+  pnl: number | null;
+  exit_reason: string | null;
+  entry_time: string;
+  exit_time: string | null;
+  is_open: boolean;
+  sl_price: number | null;
+  tp1_price: number | null;
+}
+
+export interface PositionView {
+  id: number;
+  symbol: string;
+  direction: string;
+  entry_price: number;
+  qty: number;
+  pnl: number | null;
+  is_open: boolean;
+  status: string;
+  exit_reason: string | null;
+  entry_time: string;
+  exit_time: string | null;
+  cycle_pnl: number | null;
+  chain_depth: number | null;
+  legs: TradeLegView[];
+}
+
+/** История позиций с ногами (для админки и кабинета клиента). */
+export async function fetchPositions(params: { clientId?: number; symbol?: string; limit?: number } = {}): Promise<{ positions: PositionView[] }> {
+  const qs = new URLSearchParams();
+  if (params.clientId) qs.set("clientId", String(params.clientId));
+  if (params.symbol) qs.set("symbol", params.symbol);
+  if (params.limit) qs.set("limit", String(params.limit));
+  return apiFetch(`${API}/trades/positions?${qs.toString()}`);
+}
+
 // Релей testnet→live: счётчики и последний сигнал.
 export async function fetchRelayStats(symbol?: string): Promise<{
   symbol: string | null; pending: number; consumed: number; skipped: number;

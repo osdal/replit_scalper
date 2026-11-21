@@ -352,6 +352,8 @@ class PositionTracker:
                 "direction":   direction,
                 "entry_price": entry_price,
                 "qty":         qty,
+                "new_leg":     True,  # API: закрыть текущую ногу и начать новую в trade_legs
+                "leg_pnl":     round(float(self._last_leg_pnl or 0.0), 4),
             })
             if not success:
                 self.log.warning(

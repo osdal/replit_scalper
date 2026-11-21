@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, tradeLegsTable } from "@workspace/db";
 import { and, eq, desc, sql, isNull } from "drizzle-orm";
 import { botsTable } from "@workspace/db/schema";
 import { chargeTradeCommission } from "../lib/clientAccount";
@@ -157,6 +157,96 @@ router.delete("/", async (_req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// GET /trades/positions — история позиций с ногами. ?clientId=<id>&symbol=<SYM>&limit=50
+// Группируем по trade_id: внутри — все ноги цикла, включая ещё открытую.
+router.get("/positions", async (req, res) => {
+  try {
+    const clientId = req.query.clientId ? Number(req.query.clientId) : null;
+    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : null;
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+
+    const conds: any[] = [isNull(tradesTable.reject_reason)];
+    if (symbol) conds.push(eq(tradesTable.symbol, symbol));
+    if (clientId && Number.isFinite(clientId)) {
+      conds.push(sql`${tradesTable.bot_id} IN (SELECT id FROM bots WHERE client_id = ${clientId})`);
+    }
+    const trades = await db
+      .select()
+      .from(tradesTable)
+      .where(and(...conds))
+      .orderBy(desc(tradesTable.entry_time))
+      .limit(limit);
+    if (trades.length === 0) return res.json({ positions: [] });
+
+    const ids = trades.map((t) => Number(t.id));
+    const legs = await db
+      .select()
+      .from(tradeLegsTable)
+      .where(sql`${tradeLegsTable.trade_id} IN ${ids}`)
+      .orderBy(tradeLegsTable.trade_id, tradeLegsTable.leg_index);
+
+    const byTrade = new Map<number, any[]>();
+    for (const leg of legs) {
+      const list = byTrade.get(Number(leg.trade_id)) || [];
+      list.push({
+        ...leg,
+        entry_price: Number(leg.entry_price),
+        exit_price: leg.exit_price == null ? null : Number(leg.exit_price),
+        qty: Number(leg.qty),
+        pnl: leg.pnl == null ? null : Number(leg.pnl),
+        is_open: Boolean(Number(leg.is_open)),
+      });
+      byTrade.set(Number(leg.trade_id), list);
+    }
+
+    const positions = trades.map((t) => {
+      let list = byTrade.get(Number(t.id)) || [];
+      // Fallback для старых сделок до появления trade_legs: одна нога = сама сделка.
+      if (list.length === 0) {
+        list = [{
+          id: 0,
+          trade_id: Number(t.id),
+          client_id: null,
+          bot_id: t.bot_id,
+          symbol: t.symbol,
+          leg_index: 0,
+          direction: t.direction,
+          entry_price: Number(t.entry_price),
+          exit_price: t.exit_price == null ? null : Number(t.exit_price),
+          qty: Number(t.qty),
+          sl_price: t.sl_price,
+          tp1_price: t.tp1_price,
+          pnl: t.pnl == null ? null : Number(t.pnl),
+          exit_reason: t.exit_reason,
+          entry_time: t.entry_time,
+          exit_time: t.exit_time,
+          is_open: Boolean(Number(t.is_open)),
+          commission: t.commission,
+        }];
+      }
+      return {
+        id: Number(t.id),
+        symbol: t.symbol,
+        direction: t.direction,
+        entry_price: Number(t.entry_price),
+        qty: Number(t.qty),
+        pnl: t.pnl == null ? null : Number(t.pnl),
+        is_open: Boolean(Number(t.is_open)),
+        status: t.status,
+        exit_reason: t.exit_reason,
+        entry_time: t.entry_time,
+        exit_time: t.exit_time,
+        cycle_pnl: t.cycle_pnl == null ? null : Number(t.cycle_pnl),
+        chain_depth: t.chain_depth == null ? null : Number(t.chain_depth),
+        legs: list,
+      };
+    });
+    return res.json({ positions });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
 // GET /trades/count-open — точное число открытых сделок (не зависит от limit/offset).
 // Дашборд берёт отсюда open_trades, а не из страницы по 1000 записей, чтобы
 // счёт не занижался при росте таблицы trades выше 1000 строк.
@@ -217,6 +307,8 @@ router.patch("/:id", async (req, res) => {
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
+    // Сервисный флаг: reverse открыл новую ногу на той же строке trades.
+    const newLeg = req.body.new_leg === true;
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: "No valid fields to update" });
     }
@@ -234,13 +326,111 @@ router.patch("/:id", async (req, res) => {
     if (result.length === 0) {
       return res.status(404).json({ error: "Trade not found" });
     }
+    const updated = result[0] as any;
+
+    // Reverse: закрываем предыдущую ногу и начинаем новую.
+    if (newLeg) {
+      try {
+        const legs = await db
+          .select()
+          .from(tradeLegsTable)
+          .where(eq(tradeLegsTable.trade_id, Number(updated.id)))
+          .orderBy(desc(tradeLegsTable.id));
+        const current = legs.find((l) => Boolean(Number(l.is_open)));
+        if (current) {
+          await db
+            .update(tradeLegsTable)
+            .set({
+              exit_price: updated.entry_price != null ? Number(updated.entry_price) : null,
+              pnl: updated.leg_pnl != null ? Number(updated.leg_pnl) : null,
+              exit_reason: "reverse",
+              exit_time: new Date().toISOString(),
+              is_open: false,
+            })
+            .where(eq(tradeLegsTable.id, current.id));
+        }
+        const [bot] = updated.bot_id != null
+          ? await db.select({ client_id: botsTable.client_id }).from(botsTable)
+              .where(eq(botsTable.id, Number(updated.bot_id))).limit(1)
+          : [];
+        await db.insert(tradeLegsTable).values({
+          trade_id: Number(updated.id),
+          client_id: bot?.client_id ?? null,
+          bot_id: updated.bot_id != null ? Number(updated.bot_id) : null,
+          symbol: String(updated.symbol || "").toUpperCase(),
+          leg_index: legs.length,
+          direction: String(updated.direction || "LONG"),
+          entry_price: Number(updated.entry_price || 0),
+          qty: Number(updated.qty || 0),
+          sl_price: updated.sl_price != null ? Number(updated.sl_price) : null,
+          tp1_price: updated.tp1_price != null ? Number(updated.tp1_price) : null,
+          entry_time: new Date().toISOString(),
+          is_open: true,
+        });
+      } catch (e) {
+        console.error(`[trade-legs] reverse leg for trade #${updated.id}:`, String(e));
+      }
+    }
+
+    // Закрываем последнюю открытую ногу в истории цикла.
+    try {
+      const [openLeg] = await db
+        .select({ id: tradeLegsTable.id })
+        .from(tradeLegsTable)
+        .where(and(
+          eq(tradeLegsTable.trade_id, Number(updated.id)),
+          eq(tradeLegsTable.is_open, true),
+        ))
+        .orderBy(desc(tradeLegsTable.id))
+        .limit(1);
+      if (openLeg) {
+        await db
+          .update(tradeLegsTable)
+          .set({
+            exit_price: updated.exit_price != null ? Number(updated.exit_price) : null,
+            pnl: updated.pnl != null ? Number(updated.pnl) : null,
+            exit_reason: updated.exit_reason ?? null,
+            exit_time: updated.exit_time ?? new Date().toISOString(),
+            commission: updated.commission != null ? Number(updated.commission) : null,
+            is_open: false,
+          })
+          .where(eq(tradeLegsTable.id, openLeg.id));
+      } else {
+        // Сделка создана до появления trade_legs — создаём ногу задним числом
+        // из данных самой сделки, чтобы история была полной.
+        const [bot] = updated.bot_id != null
+          ? await db.select({ client_id: botsTable.client_id }).from(botsTable)
+              .where(eq(botsTable.id, Number(updated.bot_id))).limit(1)
+          : [];
+        await db.insert(tradeLegsTable).values({
+          trade_id: Number(updated.id),
+          client_id: bot?.client_id ?? null,
+          bot_id: updated.bot_id != null ? Number(updated.bot_id) : null,
+          symbol: String(updated.symbol || "").toUpperCase(),
+          leg_index: 0,
+          direction: String(updated.direction || "LONG"),
+          entry_price: Number(updated.entry_price || 0),
+          exit_price: updated.exit_price != null ? Number(updated.exit_price) : null,
+          qty: Number(updated.qty || 0),
+          sl_price: updated.sl_price != null ? Number(updated.sl_price) : null,
+          tp1_price: updated.tp1_price != null ? Number(updated.tp1_price) : null,
+          pnl: updated.pnl != null ? Number(updated.pnl) : null,
+          exit_reason: updated.exit_reason ?? null,
+          entry_time: String(updated.entry_time || new Date().toISOString()),
+          exit_time: updated.exit_time ?? new Date().toISOString(),
+          commission: updated.commission != null ? Number(updated.commission) : null,
+          is_open: false,
+        });
+      }
+    } catch (e) {
+      console.error(`[trade-legs] close leg for trade #${updated.id}:`, String(e));
+    }
 
     // Модель B: прибыль НЕ зачисляется на внутренний счёт. При закрытии
     // прибыльной сделки 10% её pnl списывается с предоплаченного баланса
     // клиента. Убыточная сделка баланс не меняет (но обновляет справочный
-    // cum_pnl). Владелец находится по bot_id внутри.clientAccount — символ
+    // cum_pnl). Владелец находится по bot_id внутри clientAccount — символ
     // больше не уникален, поэтому выборка по символу опасна при 2 клиентах.
-    const updated = result[0] as any;
     const nowClosed = updated.status === "closed" && Number(updated.is_open) === 0;
     if (wasOpen && nowClosed && updated.status !== "rejected") {
       try {
@@ -345,6 +535,32 @@ router.post("/", async (req, res) => {
       if (bot) body.bot_id = Number(bot.id);
     }
     const [trade] = await db.insert(tradesTable).values(body).returning();
+
+    // Первая нога цикла. При reverse бот обновляет ту же строку trades, но
+    // новую ногу дописываем отдельной записью в trade_legs.
+    try {
+      const [bot] = body.bot_id != null
+        ? await db.select({ client_id: botsTable.client_id }).from(botsTable)
+            .where(eq(botsTable.id, Number(body.bot_id))).limit(1)
+        : [];
+      await db.insert(tradeLegsTable).values({
+        trade_id: Number(trade.id),
+        client_id: bot?.client_id ?? null,
+        bot_id: body.bot_id != null ? Number(body.bot_id) : null,
+        symbol: String(body.symbol || "").toUpperCase(),
+        leg_index: 0,
+        direction: String(body.direction || "LONG"),
+        entry_price: Number(body.entry_price || 0),
+        qty: Number(body.qty || 0),
+        sl_price: body.sl_price != null ? Number(body.sl_price) : null,
+        tp1_price: body.tp1_price != null ? Number(body.tp1_price) : null,
+        entry_time: String(body.entry_time || new Date().toISOString()),
+        is_open: true,
+      });
+    } catch (e) {
+      console.error(`[trade-legs] insert leg for trade #${trade.id}:`, String(e));
+    }
+
     res.status(201).json(trade);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

@@ -113,6 +113,34 @@ await db.run(sql`CREATE TABLE IF NOT EXISTS trades (
   leg_pnl REAL, cycle_pnl REAL, chain_depth INTEGER, cycle_close_reason TEXT
 )`);
 
+// История ног reverse-циклов: каждая нога отдельной строкой, включая ещё
+// открытую. Позволяет показать клиенту/админу все ноги позиции по клику.
+await db.run(sql`
+  CREATE TABLE IF NOT EXISTS trade_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL,
+    client_id INTEGER,
+    bot_id INTEGER,
+    symbol TEXT NOT NULL,
+    leg_index INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL,
+    qty REAL NOT NULL,
+    sl_price REAL,
+    tp1_price REAL,
+    pnl REAL,
+    exit_reason TEXT,
+    entry_time TEXT NOT NULL,
+    exit_time TEXT,
+    is_open INTEGER NOT NULL DEFAULT 0,
+    commission REAL,
+    created_at TEXT NOT NULL
+  )
+`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_trade_legs_trade ON trade_legs(trade_id)`);
+await db.run(sql`CREATE INDEX IF NOT EXISTS idx_trade_legs_client ON trade_legs(client_id)`);
+
 // Мигрируем существующие БД: добавляем status/reject_reason и индикаторы/пресет, если их нет.
 const { rows: tradeCols } = await db.run(sql`PRAGMA table_info(trades)`);
 const tradeColNames: string[] = (tradeCols as any[]).map((r: any) => String(r.name));

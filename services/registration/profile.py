@@ -1,5 +1,6 @@
 """Публичная страница пользователя: /u/<slug>."""
 import json
+import os
 
 
 def _render_keys_block(profile) -> str:
@@ -31,6 +32,41 @@ def _render_keys_block(profile) -> str:
         "  <button type='button' id='key-save'>Сохранить ключ</button>\n"
         "  <button type='button' id='key-show' class='ghost' style='color:#2aabee;border-color:#bae6fd'>Показать сохранённый ключ</button>\n"
         "  <button type='button' id='key-delete' class='ghost'>Удалить ключ</button>\n"
+        "</div>"
+    )
+
+
+def _render_positions_block(positions) -> str:
+    if not positions:
+        return ""
+    rows = []
+    for p in positions:
+        legs = "".join(
+            "<div class='leg'>"
+            "<b>Нога " + str(l["leg_index"] + 1) + "</b> · "
+            + str(l["direction"]) + " · вход " + str(l["entry_price"])
+            + " · выход " + (str(l["exit_price"]) if l["exit_price"] is not None else "—")
+            + " · qty " + str(l["qty"])
+            + " · " + ("<span style='color:#0284c7'>открыта</span>" if l["is_open"]
+                       else "PnL " + str(l["pnl"]) + " (" + str(l["exit_reason"] or "—") + ")")
+            + "</div>"
+            for l in p["legs"]
+        )
+        pnl = p.get("cycle_pnl") if p.get("cycle_pnl") is not None else p.get("pnl")
+        rows.append(
+            "<div class='pos'>"
+            "<div class='pos-head' onclick='this.nextElementSibling.classList.toggle(\"open\")'>"
+            "<span><b>" + str(p["symbol"]) + "</b> " + str(p["direction"])
+            + (" <span style='color:#0284c7'>• открыта</span>" if p["is_open"] else "")
+            + "</span><span>PnL: " + str(pnl) + " · ног: " + str(len(p["legs"]))
+            + " · " + str(p["entry_time"])[:16] + "</span></div>"
+            "<div class='pos-legs'>" + legs + "</div></div>"
+        )
+    return (
+        "<div class='keys' id='positions-block'>\n"
+        "  <h2>История позиций</h2>\n"
+        "  <p>Нажмите на позицию, чтобы раскрыть все ноги цикла, включая ещё не закрытые.</p>\n"
+        + "".join(rows) + "\n"
         "</div>"
     )
 
@@ -184,6 +220,61 @@ def get_profile(slug: str):
     }
 
 
+def get_positions(client_id: int, limit: int = 50):
+    """История позиций клиента с ногами (из trades + trade_legs)."""
+    import sqlite3
+    db_path = os.environ.get("REGISTRATION_DB", "/opt/trading-bot/data/bot_live.db")
+    try:
+        conn = sqlite3.connect(db_path, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT t.* FROM trades t
+               WHERE t.bot_id IN (SELECT id FROM bots WHERE client_id=?)
+                 AND t.reject_reason IS NULL
+               ORDER BY t.entry_time DESC LIMIT ?""",
+            (client_id, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            legs = conn.execute(
+                "SELECT * FROM trade_legs WHERE trade_id=? ORDER BY leg_index, id", (r["id"],)
+            ).fetchall()
+            leg_list = []
+            for l in legs:
+                leg_list.append({
+                    "id": l["id"], "leg_index": l["leg_index"], "direction": l["direction"],
+                    "entry_price": round(float(l["entry_price"] or 0), 8),
+                    "exit_price": None if l["exit_price"] is None else round(float(l["exit_price"]), 8),
+                    "qty": round(float(l["qty"] or 0), 6),
+                    "pnl": None if l["pnl"] is None else round(float(l["pnl"]), 4),
+                    "is_open": bool(l["is_open"]), "exit_reason": l["exit_reason"],
+                })
+            if not leg_list:
+                leg_list = [{
+                    "id": 0, "leg_index": 0, "direction": r["direction"],
+                    "entry_price": round(float(r["entry_price"] or 0), 8),
+                    "exit_price": r["exit_price"], "qty": round(float(r["qty"] or 0), 6),
+                    "pnl": r["pnl"], "is_open": bool(r["is_open"]), "exit_reason": r["exit_reason"],
+                }]
+            out.append({
+                "id": r["id"], "symbol": r["symbol"], "direction": r["direction"],
+                "entry_price": round(float(r["entry_price"] or 0), 8),
+                "pnl": None if r["pnl"] is None else round(float(r["pnl"]), 4),
+                "cycle_pnl": None if r["cycle_pnl"] is None else round(float(r["cycle_pnl"]), 4),
+                "chain_depth": r["chain_depth"], "is_open": bool(r["is_open"]),
+                "entry_time": r["entry_time"], "legs": leg_list,
+            })
+        return out
+    except Exception as exc:
+        print(f"[WARN] get_positions: {exc}", flush=True)
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def render_profile_html(profile, slug):
     if profile is None:
         return ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
@@ -243,6 +334,13 @@ def render_profile_html(profile, slug):
         "  .keys .current{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;\n"
         "    font-size:13px;margin-bottom:10px;}\n"
         "  .keys .current code{font-size:12px;color:#1f2937;}\n"
+        "  .pos{border:1px solid #e2e8f0;border-radius:10px;margin-bottom:8px;overflow:hidden;}\n"
+        "  .pos-head{display:flex;justify-content:space-between;gap:8px;padding:10px 12px;background:#f8fafc;\n"
+        "    cursor:pointer;font-size:12px;color:#1f2937;}\n"
+        "  .pos-head:hover{background:#eef6fd;}\n"
+        "  .pos-legs{display:none;padding:6px 12px;background:#fff;}\n"
+        "  .pos-legs.open{display:block;}\n"
+        "  .leg{font-size:11px;color:#475569;padding:6px 0;border-bottom:1px dashed #e2e8f0;}\n"
         "</style>\n</head>\n<body>\n"
         "<div class='wrap'>\n  <div class='card'>\n"
         "    " + photo + "\n"
@@ -257,6 +355,7 @@ def render_profile_html(profile, slug):
         "    </div>\n"
         "    <p class='foot'>Зарегистрирован: " + created + "</p>\n"
         "    " + _render_keys_block(profile) + "\n"
+        "    " + _render_positions_block(profile.get("positions") or []) + "\n"
         "    <p class='foot'><a href='https://osdal.duckdns.org/scalper-register/'>Регистрация</a></p>\n"
         "  </div>\n</div>\n"
         "<script>window.__OSDAL_TG_ID__=" + str(profile.get("telegram_id") or 0)
