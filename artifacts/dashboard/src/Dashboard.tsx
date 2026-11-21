@@ -2627,20 +2627,23 @@ export default function Dashboard() {
                                     </div>
                                   )}
                                   <div className="min-w-0">
-                                    <div className="truncate text-xs text-zinc-200 max-w-[160px]">
-                                      <a
-                                        href={u.profile_url ? "https://osdal.duckdns.org" + u.profile_url : "#"}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="hover:text-sky-300 hover:underline"
-                                      >
-                                        {name}
-                                      </a>
-                                    </div>
+                                    <div className="truncate text-xs text-zinc-200 max-w-[160px]">{name}</div>
                                     <div className="truncate text-[11px] text-zinc-500 max-w-[160px]">
                                       {u.telegram_username ? `@${u.telegram_username}` : u.email}
                                     </div>
                                   </div>
+                                  {u.profile_url && (
+                                    <a
+                                      href={"https://osdal.duckdns.org" + u.profile_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title="Открыть публичный профиль"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="shrink-0 text-zinc-500 hover:text-sky-300"
+                                    >
+                                      <Link2 className="w-3.5 h-3.5" />
+                                    </a>
+                                  )}
                                 </div>
                               </td>
                               <td className="px-3 py-2 text-xs text-zinc-400 font-mono">
