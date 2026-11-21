@@ -2578,6 +2578,21 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
     (~20 msg/sec, возвращает счётчики sent/blocked/failed).
 - Хелперы: `notify_user`, `notify_all`, `mark_user_blocked`.
 
+### 23.14. Личная страница пользователя (21.11.2026)
+
+- Каждому зарегистрированному пользователю создаётся страница
+  `https://osdal.duckdns.org/u/<slug>`, где slug = telegram_username
+  (или `tg<telegram_id>` если username нет).
+- Страница отдаётся сервисом регистрации (Caddy: `/u/*` → 127.0.0.1:5100),
+  без WordPress — светлая тема в стиле Telegram, карточка с именем,
+  аватаром, балансом, HWM, числом ботов, статусом, согласием, датой.
+- JSON: `GET /registration/profile/<slug>` (публичный).
+- В ответе регистрации и в `RegisteredUser` добавлены `profile_slug` /
+  `profile_url` (`/u/<slug>`).
+- Виджет показывает кнопку «Моя страница» после успешной регистрации;
+  в дашборде имя пользователя — ссылка на его страницу.
+- Приветственное сообщение в Telegram содержит ссылку на страницу.
+
 ### 23.10. Откат
 
 ```bash
