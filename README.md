@@ -2561,6 +2561,23 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
 - Миграция: колонки `consent_messages INTEGER NOT NULL DEFAULT 0`,
   `consent_at TEXT` (идемпотентно, при старте сервиса).
 
+### 23.13. Защита от бана и управление уведомлениями (21.11.2026)
+
+- Фоновый поток `poll_updates_loop` опрашивает `getUpdates` (long polling)
+  и обрабатывает `callback_query` (кнопки «Отписаться»/«Подписаться») и
+  команды `/start`, `/stop`, `/subscribe`, `/unsubscribe`.
+- При `403 Forbidden` (пользователь заблокировал бота) вызывается
+  `mark_user_blocked`: `status='blocked'`, `consent_messages=0` — больше
+  не шлём.
+- Приветственное сообщение содержит inline-кнопку «🔕 Отписаться»;
+  при отписке — «🔔 Подписаться снова».
+- Эндпоинты (админские, за Basic auth на scalper-bot):
+  - `POST /registration/notify` — `{telegram_id, text}` → одному пользователю
+    (проверяет согласие и статус).
+  - `POST /registration/broadcast` — `{text}` → всем согласившимся
+    (~20 msg/sec, возвращает счётчики sent/blocked/failed).
+- Хелперы: `notify_user`, `notify_all`, `mark_user_blocked`.
+
 ### 23.10. Откат
 
 ```bash
