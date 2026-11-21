@@ -128,6 +128,54 @@ def load_config() -> dict:
     }
 
 
+# ── Проверка ключей Binance через подписанный запрос ─────────────────────────
+
+def verify_binance_keys(api_key: str, api_secret: str) -> tuple[bool, str]:
+    """Проверяет ключ подписанным GET /fapi/v2/account.
+
+    Возвращает (ok, человекочитаемый результат).lized Это же подтверждает,
+    что IP сервера в whitelist ключа и что права Futures включены.
+    """
+    try:
+        ts = int(time.time() * 1000)
+        query = f"recvWindow=5000&timestamp={ts}"
+        sig = hmac.new(api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+        req = urllib.request.Request(
+            f"https://fapi.binance.com/fapi/v2/account?{query}&signature={sig}",
+            headers={"X-MBX-APIKEY": api_key},
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        can_trade = bool(data.get("canTrade"))
+        can_withdraw = bool(data.get("canWithdraw"))
+        balance = data.get("totalWalletBalance")
+        parts = ["✅ Ключи Binance рабочие: подключение и подпись подтверждены."]
+        parts.append("Торговля фьючерсами: " + ("разрешена" if can_trade else "НЕ разрешена"))
+        if can_withdraw:
+            parts.append("⚠️ Внимание: у ключа включён вывод средств — лучше отключить его.")
+        if balance is not None:
+            parts.append(f"Баланс фьючерсов: {balance} USDT")
+        return True, "\n".join(parts)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            body = {}
+        code = body.get("code")
+        msg = str(body.get("msg") or exc)
+        if code in (-2015, -2014, -1022):
+            detail = " ключ неверный, закрыт, истёк или у него нет прав Futures. Проверьте ключ в Binance."
+        elif code == -1003:
+            detail = " запрос с IP нашего сервера заблокирован Binance — добавьте IP сервера в whitelist ключа."
+        elif code == -1002:
+            detail = " запрос отклонён (неверный timestamp) — проверьте время на сервере."
+        else:
+            detail = f" ответ Binance: {msg}"
+        return False, "❌ Ключи Binance НЕ работают." + detail
+    except Exception as exc:  # noqa: BLE001
+        return False, "❌ Не удалось проверить ключи Binance: " + str(exc)
+
+
 # ── Ключи Binance клиента (шифрование совместимо с api-server/lib/keystore.ts) ──
 
 def _master_key() -> bytes | None:
@@ -883,7 +931,23 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except (ValueError, RuntimeError) as exc:
                     return self._json(400, {"error": str(exc)})
-                return self._json(200, {"ok": True, **res})
+
+                # Проверяем ключи на бирже и уведомляем клиента в Telegram.
+                key_ok, key_msg = verify_binance_keys(
+                    str(body.get("apiKey") or ""), str(body.get("apiSecret") or "")
+                )
+                cfg = load_config()
+                chat_id = prow["telegram_id"] if prow else 0
+                sent = False
+                if chat_id:
+                    sent, _blocked = send_telegram_message(cfg["bot_token"], int(chat_id), key_msg)
+                return self._json(200, {
+                    "ok": True,
+                    **res,
+                    "keysValid": key_ok,
+                    "checkMessage": key_msg,
+                    "notified": sent,
+                })
 
             if path == "/registration/telegram":
                 payload = self._read_json()
