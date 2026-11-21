@@ -295,6 +295,8 @@ export interface RegisteredUser {
   bots_count: number;
   consent_messages: boolean;
   consent_at: string | null;
+  profile_slug: string;
+  profile_url: string;
 }
 
 export interface RegistrationStats {
