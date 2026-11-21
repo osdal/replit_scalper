@@ -254,8 +254,20 @@ export async function internalStatement(limit = 200) {
   return apiFetch(`${API}/internal-account/statement?limit=${limit}`);
 }
 
+export interface BillingClient {
+  id: number;
+  email: string;
+  status: string;
+  role: string;
+  balance_usd: number;
+}
+
+export async function internalClients(): Promise<{ clients: BillingClient[] }> {
+  return apiFetch(`${API}/internal-account/clients`);
+}
+
 /** Ручное пополнение внутреннего счёта (админ-токен добавляет vite-прокси). */
-export async function internalTopUp(amountUsd: number, reason?: string): Promise<{
+export async function internalTopUp(amountUsd: number, reason?: string, clientId?: number): Promise<{
   ok: boolean;
   clientId: number;
   amountUsd: number;
@@ -266,7 +278,7 @@ export async function internalTopUp(amountUsd: number, reason?: string): Promise
   return apiFetch(`${API}/internal-account/topup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ amountUsd, reason: reason || undefined }),
+    body: JSON.stringify({ amountUsd, reason: reason || undefined, clientId }),
   });
 }
 
@@ -332,6 +344,21 @@ export async function registrationDeleteUser(id: number): Promise<{
   client_id: number | null;
 }> {
   return apiFetch(`${REG_API}/users/${id}`, { method: "DELETE" });
+}
+
+export async function registrationSettings(): Promise<{ default_gift_usd: number }> {
+  return apiFetch(`${REG_API}/settings`);
+}
+
+export async function registrationSetGift(default_gift_usd: number): Promise<{
+  ok: boolean;
+  default_gift_usd: number;
+}> {
+  return apiFetch(`${REG_API}/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ default_gift_usd }),
+  });
 }
 
 // Обновление глобальных лимитов позиций (max_position_loss_pct — убыток всей

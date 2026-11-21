@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "@workspace/db";
-import { clientsTable } from "@workspace/db/schema";
+import { clientsTable, clientAccountsTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import { getClientStatement, topUpClient } from "../lib/clientAccount";
 
@@ -53,6 +53,36 @@ router.get("/statement", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 200, 1000);
     return res.json(await getClientStatement(await ownerClientId(), limit));
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// ---------- список клиентов (для выбора счёта в дашборде) ----------
+router.get("/clients", async (_req, res) => {
+  try {
+    const rows = await db
+      .select({
+        id: clientsTable.id,
+        email: clientsTable.email,
+        status: clientsTable.status,
+        role: clientsTable.role,
+      })
+      .from(clientsTable)
+      .orderBy(clientsTable.id);
+    const balances = await db
+      .select()
+      .from(clientAccountsTable);
+    const byClient = new Map(balances.map((b: any) => [Number(b.client_id), Number(b.balance_usd)]));
+    return res.json({
+      clients: rows.map((r) => ({
+        id: Number(r.id),
+        email: r.email,
+        status: r.status,
+        role: r.role,
+        balance_usd: byClient.get(Number(r.id)) ?? 0,
+      })),
+    });
   } catch (e: any) {
     return res.status(500).json({ error: e.message || String(e) });
   }

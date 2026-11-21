@@ -127,6 +127,34 @@ def load_config() -> dict:
     }
 
 
+def get_default_gift() -> float:
+    """Стартовый подарок новым клиентам (USD). Хранится в registration_config.json."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh) or {}
+        value = float(cfg.get("default_gift_usd") or 0)
+        return round(max(0.0, min(value, 100_000.0)), 4)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def set_default_gift(value: float) -> float:
+    """Задаёт стартовый подарок новым клиентам (только админский эндпоинт)."""
+    amount = round(float(value), 4)
+    if amount < 0 or amount > 100_000:
+        raise ValueError("Подарок должен быть от 0 до 100000 USD")
+    cfg = {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh) or {}
+    except FileNotFoundError:
+        pass
+    cfg["default_gift_usd"] = amount
+    with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    return amount
+
+
 # ───────────────────────── Telegram login widget ─────────────────────────
 
 def verify_telegram_payload(payload: dict, bot_token: str) -> tuple[bool, str]:
@@ -332,22 +360,32 @@ def register_telegram_user(payload: dict) -> dict:
                 (user_id, now, now),
             )
             # Дублируем в legacy-модель clients (используется торговым ядром/будущей биллинг-логикой).
+            gift = get_default_gift()
             try:
                 cur = conn.execute(
                     """INSERT INTO clients
                            (email, password_hash, role, status, fee_pct, gift_usd,
                             telegram_chat_id, auto_resume, notes, created_at, updated_at)
-                       VALUES (?, '', 'client', 'active', 10, 0, ?, 1, ?, ?, ?)""",
-                    (email, str(telegram_id), "Зарегистрирован через Telegram", now, now),
+                       VALUES (?, '', 'client', 'active', 10, ?, ?, 1, ?, ?, ?)""",
+                    (email, gift, str(telegram_id), "Зарегистрирован через Telegram", now, now),
                 )
                 client_id = int(cur.lastrowid)
                 conn.execute(
                     """INSERT INTO client_accounts
                            (client_id, balance_usd, cum_pnl_usd, hwm_pnl_usd, updated_at)
-                       VALUES (?, 0, 0, 0, ?)
+                       VALUES (?, ?, 0, 0, ?)
                        ON CONFLICT(client_id) DO NOTHING""",
-                    (client_id, now),
+                    (client_id, gift, now),
                 )
+                if gift > 0:
+                    conn.execute(
+                        """INSERT INTO ledger
+                               (client_id, type, amount_usd, balance_after_usd,
+                                cum_pnl_after_usd, reason, actor, idempotency_key, created_at)
+                           VALUES (?, 'gift', ?, ?, 0, ?, 'registration', ?, ?)""",
+                        (client_id, gift, gift, "Подарок при регистрации",
+                         f"gift:client:{client_id}", now),
+                    )
                 conn.execute(
                     "UPDATE users SET notes = ? WHERE id = ?", (f"client_id={client_id}", user_id)
                 )
@@ -580,6 +618,9 @@ class Handler(BaseHTTPRequestHandler):
                     "platform": "OSDAL Scalper",
                 })
 
+            if path == "/registration/settings":
+                return self._json(200, {"default_gift_usd": get_default_gift()})
+
             if path == "/registration/stats":
                 return self._json(200, stats())
 
@@ -671,6 +712,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path == "/registration/settings":
+                body = self._read_json()
+                try:
+                    gift = set_default_gift(body.get("default_gift_usd", 0))
+                except (TypeError, ValueError) as exc:
+                    return self._json(400, {"error": str(exc)})
+                return self._json(200, {"ok": True, "default_gift_usd": gift})
+
             parts = path.split("/")
             if len(parts) == 4 and parts[1] == "registration" and parts[2] == "users":
                 body = self._read_json()

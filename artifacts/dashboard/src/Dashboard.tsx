@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, registrationSettings, registrationSetGift, internalClients, type BillingClient, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -908,6 +908,10 @@ export default function Dashboard() {
   const [topUpAmount, setTopUpAmount] = useState("");
   const [topUpReason, setTopUpReason] = useState("");
   const [topUpBusy, setTopUpBusy] = useState(false);
+  const [billingClients, setBillingClients] = useState<BillingClient[]>([]);
+  const [topUpClientId, setTopUpClientId] = useState<string>("");
+  const [giftAmount, setGiftAmount] = useState("");
+  const [giftBusy, setGiftBusy] = useState(false);
   const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
   const [regStats, setRegStats] = useState<RegistrationStats | null>(null);
   const [regLoading, setRegLoading] = useState(false);
@@ -1085,6 +1089,19 @@ export default function Dashboard() {
     }
   }, []);
 
+  const loadBillingClients = useCallback(async () => {
+    try {
+      const res = await internalClients();
+      setBillingClients(res.clients);
+      setTopUpClientId(prev => {
+        if (prev && res.clients.some(c => String(c.id) === prev)) return prev;
+        return res.clients.length ? String(res.clients[0].id) : "";
+      });
+    } catch {
+      // дашборд может быть открыт без админ-токена — просто не показываем список
+    }
+  }, []);
+
   const handleTopUp = useCallback(async () => {
     const amount = Number(String(topUpAmount).replace(",", "."));
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -1094,17 +1111,46 @@ export default function Dashboard() {
     try {
       setTopUpBusy(true);
       setInternalError(null);
-      const result = await internalTopUp(amount, topUpReason.trim() || undefined);
-      setNotice(`Счёт пополнен на ${fmt(result.amountUsd, 2)} USD`);
+      const clientId = topUpClientId ? Number(topUpClientId) : undefined;
+      const result = await internalTopUp(amount, topUpReason.trim() || undefined, clientId);
+      setNotice(`Счёт клиента #${result.clientId} пополнен на ${fmt(result.amountUsd, 2)} USD`);
       setTopUpAmount("");
       setTopUpReason("");
-      await loadInternal();
+      await Promise.all([loadInternal(), loadBillingClients()]);
     } catch (e: any) {
       setInternalError(e.message || "Не удалось пополнить счёт");
     } finally {
       setTopUpBusy(false);
     }
-  }, [topUpAmount, topUpReason, loadInternal]);
+  }, [topUpAmount, topUpReason, topUpClientId, loadInternal, loadBillingClients]);
+
+  const loadGiftSetting = useCallback(async () => {
+    try {
+      const res = await registrationSettings();
+      setGiftAmount(String(res.default_gift_usd));
+    } catch {
+      //registration service недоступен
+    }
+  }, []);
+
+  const handleSaveGift = useCallback(async () => {
+    const amount = Number(String(giftAmount).replace(",", "."));
+    if (!Number.isFinite(amount) || amount < 0) {
+      setRegError("Подарок должен быть числом ≥ 0");
+      return;
+    }
+    try {
+      setGiftBusy(true);
+      setRegError(null);
+      const res = await registrationSetGift(amount);
+      setGiftAmount(String(res.default_gift_usd));
+      setNotice(`Подарок при регистрации: ${fmt(res.default_gift_usd, 2)} USD`);
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось сохранить подарок");
+    } finally {
+      setGiftBusy(false);
+    }
+  }, [giftAmount]);
 
   useEffect(() => {
     load();
@@ -1129,9 +1175,15 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadUsers();
-    const id = setInterval(loadUsers, 60_000);
+    loadGiftSetting();
+    loadBillingClients();
+    const id = setInterval(() => {
+      loadUsers();
+      loadGiftSetting();
+      loadBillingClients();
+    }, 60_000);
     return () => clearInterval(id);
-  }, [loadUsers]);
+  }, [loadUsers, loadGiftSetting, loadBillingClients]);
 
   const handleRegToggleStatus = useCallback(async (u: RegisteredUser) => {
     const next = u.status === "blocked" ? "active" : "blocked";
@@ -2329,10 +2381,22 @@ export default function Dashboard() {
 
                 <Card className="border border-zinc-800 bg-zinc-900">
                   <CardHeader>
-                    <CardTitle className="text-base text-zinc-300">Пополнить внутренний счёт</CardTitle>
+                    <CardTitle className="text-base text-zinc-300">Изменить баланс клиента</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex flex-col gap-2 sm:flex-row">
+                      <select
+                        value={topUpClientId}
+                        onChange={e => setTopUpClientId(e.target.value)}
+                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-sky-500 focus:outline-none sm:w-64"
+                      >
+                        {billingClients.length === 0 && <option value="">Нет клиентов</option>}
+                        {billingClients.map(c => (
+                          <option key={c.id} value={c.id}>
+                            #{c.id} — {c.email} ({fmt(c.balance_usd, 2)}$)
+                          </option>
+                        ))}
+                      </select>
                       <input
                         type="number"
                         min="0.01"
@@ -2362,7 +2426,7 @@ export default function Dashboard() {
                       </Button>
                     </div>
                     <p className="text-xs text-zinc-500">
-                      Админ-токен не хранится в браузере: заголовок добавляет серверная часть дашборда при проксировании запроса.
+                      Выберите клиента и сумму пополнения. Админ-токен не хранится в браузере: заголовок добавляет серверная часть дашборда при проксировании запроса.
                     </p>
                   </CardContent>
                 </Card>
@@ -2482,6 +2546,40 @@ export default function Dashboard() {
                     Обновить
                   </Button>
                 </div>
+
+                <Card className="border border-zinc-800 bg-zinc-900">
+                  <CardHeader>
+                    <CardTitle className="text-base text-zinc-300">Подарок при регистрации</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <p className="text-xs text-zinc-500">
+                      Начисляется на внутренний счёт каждого нового клиента при регистрации через Telegram. При значении 0 подарок не начисляется.
+                    </p>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={giftAmount}
+                        onChange={e => setGiftAmount(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") void handleSaveGift(); }}
+                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none sm:w-48"
+                      />
+                      <span className="text-sm text-zinc-400">USD</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleSaveGift()}
+                        disabled={giftBusy}
+                        className="text-xs"
+                      >
+                        {giftBusy ? <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : null}
+                        Сохранить
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
 
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <Card className="border border-zinc-800 bg-zinc-900">
