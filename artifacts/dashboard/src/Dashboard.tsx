@@ -3,7 +3,7 @@ import OptimizerTab from "./OptimizerTab";
 import RecoveryTab from "./RecoveryTab";
 import LivePanel from "./LivePanel";
 import { fmtKyiv, fmtKyivTime } from "./lib/kyivTime";
-import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, registrationUsers, registrationStats, registrationSetStatus, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
+import { fetchBots, fetchTrades, fetchStats, fetchDrawdown, fetchOpenTradesCount, startBot, stopBot, killBot, deleteBot, syncBinance, runBacktest, clearTrades, refreshBots, stopAllBots, clearRecoveryChains, healthz, updateConfig, closeAllAndReset, internalMe, internalStatement, internalTopUp, registrationUsers, registrationStats, registrationSetStatus, registrationDeleteUser, type RegisteredUser, type RegistrationStats } from "./hooks/useApi";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -133,7 +133,10 @@ interface AccountSnapshot {
 interface InternalAccount {
   id: number;
   user_id: number;
+  client_id?: number;
   balance_usd: number;
+  cum_pnl_usd?: number;
+  hwm_pnl_usd?: number;
   high_water_mark_usd: number;
   created_at: string;
   updated_at: string;
@@ -144,7 +147,9 @@ interface InternalTransaction {
   type: string;
   amount_usd: number;
   balance_after_usd: number;
+  cum_pnl_after_usd?: number | null;
   related_trade_id: number | null;
+  reason?: string | null;
   created_at: string;
 }
 
@@ -900,6 +905,9 @@ export default function Dashboard() {
   const [internalTransactions, setInternalTransactions] = useState<InternalTransaction[]>([]);
   const [internalError, setInternalError] = useState<string | null>(null);
   const [internalLoading, setInternalLoading] = useState(false);
+  const [topUpAmount, setTopUpAmount] = useState("");
+  const [topUpReason, setTopUpReason] = useState("");
+  const [topUpBusy, setTopUpBusy] = useState(false);
   const [regUsers, setRegUsers] = useState<RegisteredUser[]>([]);
   const [regStats, setRegStats] = useState<RegistrationStats | null>(null);
   const [regLoading, setRegLoading] = useState(false);
@@ -1077,6 +1085,27 @@ export default function Dashboard() {
     }
   }, []);
 
+  const handleTopUp = useCallback(async () => {
+    const amount = Number(String(topUpAmount).replace(",", "."));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setInternalError("Введите сумму пополнения больше нуля");
+      return;
+    }
+    try {
+      setTopUpBusy(true);
+      setInternalError(null);
+      const result = await internalTopUp(amount, topUpReason.trim() || undefined);
+      setNotice(`Счёт пополнен на ${fmt(result.amountUsd, 2)} USD`);
+      setTopUpAmount("");
+      setTopUpReason("");
+      await loadInternal();
+    } catch (e: any) {
+      setInternalError(e.message || "Не удалось пополнить счёт");
+    } finally {
+      setTopUpBusy(false);
+    }
+  }, [topUpAmount, topUpReason, loadInternal]);
+
   useEffect(() => {
     load();
     const id = setInterval(load, 15_000);
@@ -1112,6 +1141,24 @@ export default function Dashboard() {
       await loadUsers();
     } catch (e: any) {
       setRegError(e.message || "Не удалось изменить статус");
+    } finally {
+      setRegBusy(null);
+    }
+  }, [loadUsers]);
+
+  const handleRegDelete = useCallback(async (u: RegisteredUser) => {
+    const label = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.email;
+    if (!window.confirm(`Удалить пользователя ${label}? Его счёт и записи будут удалены безвозвратно.`)) {
+      return;
+    }
+    try {
+      setRegBusy(u.id);
+      setRegError(null);
+      await registrationDeleteUser(u.id);
+      setNotice(`Пользователь ${label} удалён`);
+      await loadUsers();
+    } catch (e: any) {
+      setRegError(e.message || "Не удалось удалить пользователя");
     } finally {
       setRegBusy(null);
     }
@@ -2269,12 +2316,54 @@ export default function Dashboard() {
               <div className="space-y-4">
                 <Card className="border border-zinc-800 bg-zinc-900">
                   <CardHeader>
-                    <CardTitle className="text-base text-zinc-300">Внутренний счёт (комиссия платформы 10%)</CardTitle>
+                    <CardTitle className="text-base text-zinc-300">Внутренний счёт (предоплата, комиссия 10%)</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2 text-sm text-zinc-400">
-                    <p>• При закрытии сделки с прибылью на счёт зачисляется 90% прибыли, 10% уходит платформе как комиссия.</p>
-                    <p>• Убыточные сделки не списываются. Комиссия берётся только с прибыли, побившей исторический максимум баланса (HWM).</p>
-                    <p>• Баланс обновляется автоматически при закрытии сделки — отдельный вход не требуется.</p>
+                    <p>• Это <span className="text-zinc-200">предоплата за обслуживание</span>, а не кошелёк с торговой прибылью. Прибыль остаётся на биржевом счету и сюда <span className="text-zinc-200">не зачисляется</span>.</p>
+                    <p>• При закрытии <span className="text-zinc-200">прибыльной</span> сделки с баланса списывается <span className="text-zinc-200">10% от её pnl</span> — с каждой, без high-water mark. Убыточная или нулевая сделка баланс не меняет.</p>
+                    <p>• Пополнение — только вручную (сейчас владельцем, позже клиентом): форма ниже отправляет запрос от вашего имени, админ-токен добавляется сервером дашборда.</p>
+                    <p>• <span className="text-zinc-200">Накопленный PnL</span> ниже — справочная статистика, на комиссию она не влияет. HWM больше не используется для расчёта.</p>
+                    <p className="text-amber-300/90">• При балансе ≤ 0 списание уводит его в минус (долг); блокировка новых входов будет добавлена отдельно.</p>
+                  </CardContent>
+                </Card>
+
+                <Card className="border border-zinc-800 bg-zinc-900">
+                  <CardHeader>
+                    <CardTitle className="text-base text-zinc-300">Пополнить внутренний счёт</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        placeholder="Сумма, USD"
+                        value={topUpAmount}
+                        onChange={e => setTopUpAmount(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
+                        className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none sm:w-48"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Причина (необязательно)"
+                        value={topUpReason}
+                        onChange={e => setTopUpReason(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") void handleTopUp(); }}
+                        className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => void handleTopUp()}
+                        disabled={topUpBusy || !(Number(topUpAmount) > 0)}
+                        className="whitespace-nowrap"
+                      >
+                        {topUpBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <DollarSign className="w-4 h-4 mr-1.5" />}
+                        Пополнить
+                      </Button>
+                    </div>
+                    <p className="text-xs text-zinc-500">
+                      Админ-токен не хранится в браузере: заголовок добавляет серверная часть дашборда при проксировании запроса.
+                    </p>
                   </CardContent>
                 </Card>
 
@@ -2289,14 +2378,19 @@ export default function Dashboard() {
                     </CardHeader>
                     <CardContent>
                       <div className="text-2xl font-bold text-zinc-100">{fmt(internalAccount?.balance_usd, 2)} USD</div>
+                      {typeof internalAccount?.balance_usd === "number" && internalAccount.balance_usd <= 0 && (
+                        <div className="text-xs text-amber-300 mt-1">
+                          Баланс исчерпан — пополните, чтобы покрывать комиссию
+                        </div>
+                      )}
                       <div className="text-xs text-zinc-500 mt-1">
-                        HWM: {fmt(internalAccount?.high_water_mark_usd, 2)} USD
+                        Накопленный PnL клиента: {fmt(internalAccount?.cum_pnl_usd, 2)} USD
                       </div>
                     </CardContent>
                   </Card>
                   <Card className="border border-zinc-800 bg-zinc-900">
                     <CardHeader>
-                      <CardTitle className="text-base text-zinc-300">Транзакции</CardTitle>
+                      <CardTitle className="text-base text-zinc-300">Операции</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <div className="text-xs text-zinc-500">{internalTransactions.length} записей</div>
@@ -2328,11 +2422,15 @@ export default function Dashboard() {
                             <td className="px-4 py-2 text-xs text-zinc-300">{fmtTime(tx.created_at)}</td>
                             <td className="px-4 py-2 text-xs">
                               <span className={`px-2 py-0.5 rounded-full text-xs ${
-                                tx.type === "credit" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500" :
-                                tx.type === "commission" ? "bg-amber-500/15 text-amber-300 border-amber-500" :
+                                tx.type === "topup" || tx.type === "gift" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500" :
+                                tx.type === "fee" ? "bg-amber-500/15 text-amber-300 border-amber-500" :
                                 "bg-zinc-800 text-zinc-400 border-zinc-700"
                               }`}>
-                                {tx.type === "credit" ? "Начисление" : tx.type === "commission" ? "Комиссия" : tx.type}
+                                {tx.type === "topup" ? "Пополнение" :
+                                 tx.type === "gift" ? "Подарок" :
+                                 tx.type === "fee" ? "Комиссия" :
+                                 tx.type === "adjustment" ? "Корректировка" :
+                                 tx.type === "refund" ? "Возврат" : tx.type}
                               </span>
                             </td>
                             <td className="px-4 py-2 text-xs text-right">
@@ -2493,15 +2591,27 @@ export default function Dashboard() {
                               <td className="px-3 py-2 text-center text-xs text-zinc-400">{u.bots_count}</td>
                               <td className="px-3 py-2 text-xs text-zinc-400 whitespace-nowrap">{fmtTime(u.created_at)}</td>
                               <td className="px-3 py-2 text-right">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  disabled={regBusy === u.id || u.role === "owner"}
-                                  onClick={() => handleRegToggleStatus(u)}
-                                  className="text-[11px] h-7"
-                                >
-                                  {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
-                                </Button>
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={regBusy === u.id || u.role === "owner"}
+                                    onClick={() => handleRegToggleStatus(u)}
+                                    className="text-[11px] h-7"
+                                  >
+                                    {u.status === "blocked" ? "Разблокировать" : "Заблокировать"}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    title="Удалить пользователя"
+                                    disabled={regBusy === u.id || u.role === "owner"}
+                                    onClick={() => handleRegDelete(u)}
+                                    className="text-[11px] h-7 border-red-800/60 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
                               </td>
                             </tr>
                           );
