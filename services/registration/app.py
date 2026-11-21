@@ -26,6 +26,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+try:
+    from profile import get_profile, render_profile_html
+except Exception:  # noqa: BLE001
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(os.path.abspath(__file__)))
+    from profile import get_profile, render_profile_html
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.environ.get("REGISTRATION_DB", os.path.join(BASE_DIR, "data", "bot_live.db"))
 CONFIG_PATH = os.environ.get(
@@ -248,6 +255,8 @@ def user_row_to_dict(row: sqlite3.Row) -> dict:
         "last_login_at": row["last_login_at"],
         "consent_messages": bool(row["consent_messages"]) if "consent_messages" in row.keys() else False,
         "consent_at": row["consent_at"] if "consent_at" in row.keys() else None,
+        "profile_slug": (row["telegram_username"] or ("tg" + str(row["id"]))),
+        "profile_url": "/u/" + (row["telegram_username"] or ("tg" + str(row["id"]))),
         "balance_usd": float(row["balance_usd"] or 0),
         "hwm_usd": float(row["hwm_usd"] or 0),
         "bots_count": int(row["bots_count"] or 0),
@@ -346,12 +355,13 @@ def register_telegram_user(payload: dict) -> dict:
     user = user_row_to_dict(row)
 
     if not already and consent:
+        slug = user.get("profile_slug") or ("tg" + str(user["id"]))
         send_telegram_message(
             cfg["bot_token"],
             telegram_id,
             "✅ Регистрация на торговой платформе завершена.\n"
-            "Ваш аккаунт активен. Доступ к торговым сигналам и статистике — по ссылке "
-            "из личного кабинета.\n\n"
+            "Ваш аккаунт активен.\n\n"
+            "Ваша страница: https://osdal.duckdns.org/u/" + slug + "\n"
             "Уведомления можно отключить кнопкой ниже в любой момент.",
             reply_markup=unsubscribe_keyboard(telegram_id),
         )
@@ -540,6 +550,31 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 limit = min(int(qs.get("limit", ["500"])[0]), 2000)
                 return self._json(200, {"users": list_users(limit)})
+
+            # публичный профиль (JSON)
+            if path.startswith("/registration/profile/"):
+                slug = path[len("/registration/profile/"):].strip("/")
+                prof = get_profile(slug)
+                if prof is None:
+                    return self._json(404, {"error": "Пользователь не найден"})
+                return self._json(200, prof)
+
+            # страница пользователя /u/<slug>
+            if path.startswith("/u/"):
+                slug = path[len("/u/"):].strip("/")
+                if not slug:
+                    return self._json(400, {"error": "Укажите пользователя"})
+                prof = get_profile(slug)
+                html = render_profile_html(prof, slug)
+                body = html.encode("utf-8")
+                self.send_response(200 if prof else 404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self._cors()
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
             return self._json(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001

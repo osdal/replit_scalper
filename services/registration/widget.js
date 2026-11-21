@@ -160,6 +160,9 @@
       '<p class="osd-hint" style="margin-bottom:12px">Чтобы получать уведомления о сделках, откройте бота и нажмите <b>Start</b>.</p>' +
       (cfg.bot_username
         ? '<a class="osd-btn" href="https://t.me/' + esc(cfg.bot_username) + '" target="_blank" rel="noopener">Открыть бота в Telegram</a>'
+        : "") +
+      (user.profile_url
+        ? ' <a class="osd-btn ghost" href="' + esc(user.profile_url) + '" target="_blank" rel="noopener">Моя страница</a>'
         : "")
     );
   }

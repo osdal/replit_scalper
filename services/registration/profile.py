@@ -1,0 +1,144 @@
+"""Публичная страница пользователя: /u/<slug>."""
+import json
+
+
+def get_profile(slug: str):
+    """Публичные данные пользователя по slug (username / tg<id> / id)."""
+    import sqlite3
+    slug = (slug or "").strip().strip("/")
+    if not slug:
+        return None
+    DB_PATH = "/opt/trading-bot/data/bot_live.db"  # overridden below
+    import os
+    db_path = os.environ.get("REGISTRATION_DB", "/opt/trading-bot/data/bot_live.db")
+
+    def connect():
+        c = sqlite3.connect(db_path, timeout=15.0)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout = 15000")
+        return c
+
+    with connect() as conn:
+        row = None
+        row = conn.execute(
+            """SELECT u.id, u.telegram_username, u.first_name, u.last_name, u.photo_url,
+                      u.status, u.created_at, u.consent_messages,
+                      COALESCE(a.balance_usd, 0) AS balance_usd,
+                      COALESCE(a.high_water_mark_usd, 0) AS hwm_usd,
+                      (SELECT COUNT(*) FROM bots b WHERE b.user_id = u.id) AS bots_count
+               FROM users u LEFT JOIN user_internal_accounts a ON a.user_id = u.id
+               WHERE u.telegram_username = ?""",
+            (slug,),
+        ).fetchone()
+        if row is None and slug.lower().startswith("tg"):
+            try:
+                tid = int(slug[2:])
+                row = conn.execute(
+                    """SELECT u.id, u.telegram_username, u.first_name, u.last_name, u.photo_url,
+                              u.status, u.created_at, u.consent_messages,
+                              COALESCE(a.balance_usd, 0) AS balance_usd,
+                              COALESCE(a.high_water_mark_usd, 0) AS hwm_usd,
+                              (SELECT COUNT(*) FROM bots b WHERE b.user_id = u.id) AS bots_count
+                       FROM users u LEFT JOIN user_internal_accounts a ON a.user_id = u.id
+                       WHERE u.telegram_id = ?""",
+                    (tid,),
+                ).fetchone()
+            except ValueError:
+                pass
+        if row is None:
+            try:
+                uid = int(slug)
+                row = conn.execute(
+                    """SELECT u.id, u.telegram_username, u.first_name, u.last_name, u.photo_url,
+                              u.status, u.created_at, u.consent_messages,
+                              COALESCE(a.balance_usd, 0) AS balance_usd,
+                              COALESCE(a.high_water_mark_usd, 0) AS hwm_usd,
+                              (SELECT COUNT(*) FROM bots b WHERE b.user_id = u.id) AS bots_count
+                       FROM users u LEFT JOIN user_internal_accounts a ON a.user_id = u.id
+                       WHERE u.id = ?""",
+                    (uid,),
+                ).fetchone()
+            except ValueError:
+                pass
+    if row is None:
+        return None
+    name = " ".join(x for x in (row["first_name"], row["last_name"]) if x) or "Пользователь"
+    return {
+        "id": row["id"],
+        "slug": (row["telegram_username"] or ("tg" + str(row["id"]))),
+        "name": name,
+        "username": row["telegram_username"],
+        "photo_url": row["photo_url"],
+        "status": row["status"],
+        "balance_usd": round(float(row["balance_usd"] or 0), 4),
+        "hwm_usd": round(float(row["hwm_usd"] or 0), 4),
+        "bots_count": int(row["bots_count"] or 0),
+        "consent_messages": bool(row["consent_messages"]),
+        "created_at": row["created_at"],
+        "profile_slug": (row["telegram_username"] or ("tg" + str(row["id"]))),
+        "profile_url": "/u/" + (row["telegram_username"] or ("tg" + str(row["id"]))),
+    }
+
+
+def render_profile_html(profile, slug):
+    if profile is None:
+        return ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Пользователь не найден — OSDAL Scalper</title>"
+                "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#eef3f8;"
+                "display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;color:#1f2937;}"
+                ".card{background:#fff;border-radius:16px;padding:40px;text-align:center;"
+                "box-shadow:0 10px 40px rgba(15,23,42,.08);max-width:420px;}"
+                "h1{font-size:22px;margin:0 0 8px;}p{color:#64748b;margin:0 0 20px;}"
+                "a{color:#2aabee;text-decoration:none;font-weight:600;}</style></head>"
+                "<body><div class='card'><h1>Пользователь не найден</h1>"
+                "<p>Страница <b>/" + slug + "</b> не существует.</p>"
+                "<a href='/scalper-register/'>Регистрация</a></div></body></html>")
+    name = profile["name"]
+    username = ("@" + profile["username"]) if profile["username"] else ""
+    photo = ('<img class="avatar" src="' + profile["photo_url"] + '" alt="">'
+             if profile["photo_url"] else
+             '<div class="avatar ph">' + name[:2].upper() + '</div>')
+    status = "активен" if profile["status"] == "active" else profile["status"]
+    consent = "подписан" if profile["consent_messages"] else "отписан"
+    created = (profile["created_at"] or "")[:10]
+    return (
+        "<!DOCTYPE html>\n<html lang='ru'>\n<head>\n"
+        "<meta charset='utf-8'>\n"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
+        "<title>" + name + " — OSDAL Scalper</title>\n"
+        "<style>\n"
+        "  html,body{margin:0;padding:0;min-height:100vh;background:#eef3f8;\n"
+        "    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;}\n"
+        "  .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}\n"
+        "  .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:32px 28px;\n"
+        "    box-shadow:0 10px 40px rgba(15,23,42,.08);max-width:460px;width:100%;text-align:center;}\n"
+        "  .avatar{width:88px;height:88px;border-radius:50%;object-fit:cover;border:3px solid #e2e8f0;margin:0 auto 14px;display:block;}\n"
+        "  .avatar.ph{background:#e2e8f0;color:#64748b;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;}\n"
+        "  h1{font-size:22px;margin:0 0 4px;color:#1f2937;}\n"
+        "  .uname{color:#64748b;font-size:15px;margin:0 0 18px;}\n"
+        "  .badge{display:inline-block;font-size:12px;padding:4px 10px;border-radius:999px;\n"
+        "    background:rgba(42,171,238,.1);border:1px solid rgba(42,171,238,.3);color:#2aabee;margin-bottom:18px;}\n"
+        "  .stats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0;text-align:left;}\n"
+        "  .stat{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;}\n"
+        "  .stat .lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;}\n"
+        "  .stat .val{font-size:18px;font-weight:700;color:#1f2937;margin-top:4px;}\n"
+        "  .foot{margin-top:18px;font-size:12px;color:#94a3b8;}\n"
+        "  a{color:#2aabee;text-decoration:none;font-weight:600;}\n"
+        "</style>\n</head>\n<body>\n"
+        "<div class='wrap'>\n  <div class='card'>\n"
+        "    " + photo + "\n"
+        "    <h1>" + name + "</h1>\n"
+        "    <p class='uname'>" + username + "</p>\n"
+        "    <span class='badge'>&#10003; " + status + "</span>\n"
+        "    <div class='stats'>\n"
+        "      <div class='stat'><div class='lbl'>Баланс</div><div class='val'>$" + str(profile["balance_usd"]) + "</div></div>\n"
+        "      <div class='stat'><div class='lbl'>Ботов</div><div class='val'>" + str(profile["bots_count"]) + "</div></div>\n"
+        "      <div class='stat'><div class='lbl'>HWM</div><div class='val'>$" + str(profile["hwm_usd"]) + "</div></div>\n"
+        "      <div class='stat'><div class='lbl'>Уведомления</div><div class='val' style='font-size:14px;'>" + consent + "</div></div>\n"
+        "    </div>\n"
+        "    <p class='foot'>Зарегистрирован: " + created + "</p>\n"
+        "    <p class='foot'><a href='https://osdal.duckdns.org/scalper-register/'>Регистрация</a></p>\n"
+        "  </div>\n</div>\n"
+        "</body>\n</html>"
+    )
