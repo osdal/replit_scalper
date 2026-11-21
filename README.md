@@ -2535,7 +2535,7 @@ docker cp services/registration/page-registration.html wp_osdal_app:/var/www/htm
 - публичные ручки `config`/`widget.js` отдаются по HTTPS, админская ручка на
   `osdal.duckdns.org` → `404`, на `scalper-bot.duckdns.org` без пароля → `401`.
 
-### 23.11. Внешний вид (20.11.2026)
+### 23.10. Внешний вид (20.11.2026)
 
 - Страница `/scalper-register/` рендерится по пустому шаблону `page-registration`
   (только `post-content`, без header/footer/меню/сайдбара WordPress) —
