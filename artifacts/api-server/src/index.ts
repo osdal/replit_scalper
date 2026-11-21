@@ -34,7 +34,7 @@ import { fileURLToPath } from "url";
 import { reloadConfigsFromYaml, autoRestartBots, reconcileBotRunningStates, restartDesiredBots, tryFindAllBotPids } from "./routes/bots";
 import { recoverStaleChains } from "./routes/recovery";
 import { startGridEngine } from "./grid-engine";
-import { configPath, assertEnvMatchesExchange } from "./botPaths";
+import { configPath, assertEnvMatchesExchange, BOT_DIR, lockPrefix } from "./botPaths";
 import { checkDailyLossLimit, checkDayRollover } from "./routes/live";
 import { syncBinanceTime } from "./grid-orders-lib";
 import { cleanupStaleGateFiles } from "./lib/banFiles";
@@ -56,6 +56,47 @@ try {
   if (removed) logger.info("[GATE] cleaned %d stale gate files", removed);
 } catch {
   /* не критично: чтение gate продолжает работать без очистки */
+}
+
+// Очистка lock-файлов ботов при СТАРТЕ КОНТЕЙНЕРА.
+//
+// Боты запускаются внутри контейнера и пишут туда свой PID (namespace
+// контейнера). После docker restart namespace обнуляется: старые lock-файлы
+// содержат PID'а прошлого контейнера, который в новом может принадлежать
+// ДРУГОМУ живому процессу — бот при старте думает, что он уже запущен, и
+// падает с «Another bot instance already running».
+//
+// Очищаем только lock-файлы, у которых PID не принадлежит живущему боту.
+// Проверяем через /proc/<pid>/cmdline: живой бот содержит "main.py" и имя
+// конфига. Так мы не тронем локи работающих ботов при обычном рестарте API
+// внутри контейнера, но уберём мусор от прошлого контейнера, где PID'ы
+// переиспользовались другими процессами.
+try {
+  const prefix = lockPrefix();
+  let removed = 0;
+  for (const name of fs.readdirSync(BOT_DIR)) {
+    if (!name.startsWith(prefix)) continue;
+    let alive = false;
+    try {
+      const pid = Number(fs.readFileSync(path.join(BOT_DIR, name), "utf8").trim());
+      if (Number.isFinite(pid) && pid > 0) {
+        const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
+        alive = cmdline.includes("main.py") && cmdline.includes("configs/");
+      }
+    } catch {
+      alive = false; // процесс не найден — лок мёртвый
+    }
+    if (alive) continue;
+    try {
+      fs.unlinkSync(path.join(BOT_DIR, name));
+      removed++;
+    } catch {
+      /* файл уже удалён — ок */
+    }
+  }
+  if (removed) logger.info("[LOCK] cleaned %d stale bot lock files", removed);
+} catch {
+  /* не критично: боты сами удалят битые локи при захвате */
 }
 
 // Идемпотентная миграция схемы для уже существующих БД: новая колонка сайзинга
