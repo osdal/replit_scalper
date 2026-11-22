@@ -316,11 +316,10 @@ router.patch("/:id", async (req, res) => {
     // Повторные PATCH уже закрытой сделки (refinalize после residual flat,
     // ручной ретрай, синхронизация PnL) не должны списывать комиссию дважды:
     // защита — уникальный idempotency_key в ledger (fee:trade:<id>).
-    const [prev] = await db.select().from(tradesTable).where(eq(tradesTable.id, id)).limit(1);
+    const [prev] = await db.select({ id: tradesTable.id }).from(tradesTable).where(eq(tradesTable.id, id)).limit(1);
     if (!prev) {
       return res.status(404).json({ error: "Trade not found" });
     }
-    const wasOpen = Boolean(Number((prev as any).is_open));
 
     const result = await db.update(tradesTable).set(updates).where(eq(tradesTable.id, id)).returning();
     if (result.length === 0) {
@@ -432,7 +431,12 @@ router.patch("/:id", async (req, res) => {
     // cum_pnl). Владелец находится по bot_id внутри clientAccount — символ
     // больше не уникален, поэтому выборка по символу опасна при 2 клиентах.
     const nowClosed = updated.status === "closed" && Number(updated.is_open) === 0;
-    if (wasOpen && nowClosed && updated.status !== "rejected") {
+    // Вызываем и при повторном PATCH уже закрытой сделки: бот сначала пишет
+    // pnl<=0 (комиссия не списывается), а после ре-финализации по биржевым
+    // филлам pnl становится >0 — в этом случае комиссия всё равно должна
+    // быть списана. chargeTradeCommission идемпотентна по trade_id (ledger
+    // idempotency_key), поэтому повторный вызов не спишет дважды.
+    if (nowClosed && updated.status !== "rejected") {
       try {
         const resFee = await chargeTradeCommission(Number(updated.id));
         if (resFee?.charged) {

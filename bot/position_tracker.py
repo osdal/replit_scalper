@@ -1813,9 +1813,25 @@ class PositionTracker:
             if pos_info is None:
                 return
             real_pnl = pos_info.get("unrealized_pnl", 0)
-            if abs(real_pnl) > 0.0001 and self._trade_id:
-                await self.reporter.patch_trade(self._trade_id, {"pnl": round(real_pnl, 4)})
-                self.log.debug(f"[PNL_SYNC] Updated unrealized Pnl to {real_pnl:.4f}")
+            # pnl открытой сделки в БД = реализованный net уже закрытых ног
+            # текущего цикла + нереализованный PnL живой позиции. Раньше
+            # писался только unrealized — из-за этого крупные реализованные
+            # убытки reverse-ног (INJ/STEEM/ATOM) исчезали из дашборда и
+            # расходились с Binance income на несколько долларов.
+            realized = 0.0
+            try:
+                net_realized, _, _ = await self.cycle_realized_net()
+                if net_realized is not None:
+                    realized = float(net_realized)
+            except Exception:
+                realized = 0.0
+            total = round(realized + float(real_pnl or 0), 4)
+            if self._trade_id:
+                await self.reporter.patch_trade(self._trade_id, {"pnl": total})
+                self.log.debug(
+                    f"[PNL_SYNC] Updated open PnL to {total:.4f} "
+                    f"(realized={realized:.4f} unrealized={float(real_pnl or 0):.4f})"
+                )
         except Exception as e:
             self.log.warning(f"[PNL_SYNC] Failed to sync unrealized PnL: {e}")
 
