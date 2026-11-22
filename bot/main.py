@@ -826,6 +826,32 @@ def _reverse_cycle_tp_price(
     return tp if tp > 0 else 0.0
 
 
+def _state_can_be_reconciled(order_mgr, pos, direction, entry_price, exchange_qty):
+    """Мягкая сверка: можно ли сохранить reverse-контекст при расхождении entry.
+
+    Жёсткая `_state_matches_exchange` требует совпадения цены входа в пределах
+    тика. Но Binance иногда немного корректирует entry (комиссии, частичные
+    филлы, rest-api округление) — из-за этого при рестарте весь state
+    выбрасывался, `is_reverse` терялся, TP пересчитывался из конфига и цикл
+    закрывался по обычному TP1 вместо циклического.
+
+    Здесь проверяем только идентификаторы позиции: направление и объём. Если они
+    совпадают — state можно «подлечить» (взять биржевой entry/qty, но оставить
+    уровни и флаг reverse).
+    """
+    if pos is None:
+        return False, "empty state"
+    if pos.direction != direction:
+        return False, f"direction state={pos.direction} exchange={direction}"
+    qty_tol = _qty_tol(order_mgr, exchange_qty)
+    if abs(pos.remaining_qty - exchange_qty) > qty_tol:
+        return False, (
+            f"remaining_qty state={pos.remaining_qty} exchange={exchange_qty} "
+            f"(tol={qty_tol})"
+        )
+    return True, ""
+
+
 def _state_matches_exchange(order_mgr, pos, direction, entry_price, exchange_qty):
     """Проверяет, соответствует ли сохранённая позиция биржевой.
 
@@ -1788,14 +1814,41 @@ async def _sync_position_on_start(
             order_mgr, pos, direction, entry_price, exchange_qty
         )
         if not matched:
-            log.warning(
-                f"[SYNC] Saved state does not match exchange position "
-                f"({mismatch_reason}) — recalculating levels from config"
+            # Мягкое примирение: если совпадают направление и объём, а разошлась
+            # только цена входа — НЕ выбрасываем state. Иначе теряется is_reverse
+            # и циклический TP, и позиция закрывается по обычному TP1 из конфига
+            # (случай XRP #56052 21.11). Берём биржевой entry/qty, уровни и флаг
+            # reverse оставляем из state.
+            reconcilable, recon_reason = _state_can_be_reconciled(
+                order_mgr, pos, direction, entry_price, exchange_qty
             )
-            tracker.position = None
-            tracker._trade_id = None
-            tracker._entry_fill_ms = None
-            pos = None
+            if reconcilable and getattr(pos, "is_reverse", False):
+                old_entry = pos.entry_price
+                log.warning(
+                    f"[SYNC] Entry mismatch on reverse position "
+                    f"(state={old_entry} exchange={entry_price}, {mismatch_reason}) "
+                    f"— keeping cycle levels/context, adopting exchange entry/qty"
+                )
+                pos.entry_price = entry_price
+                pos.remaining_qty = exchange_qty
+                if not pos.tp1_hit:
+                    pos.total_qty = exchange_qty
+                # Уровни цикла (tp1/tp2/sl) остаются из state — они считались под
+                # весь reverse-цикл, а не под одну эту ногу.
+                tracker._trade_id = tracker._trade_id  # сохраняем
+                tracker._save_state()
+                pos = tracker.position
+                matched = True
+            else:
+                log.warning(
+                    f"[SYNC] Saved state does not match exchange position "
+                    f"({mismatch_reason}{'; ' + recon_reason if not reconcilable else ''}) "
+                    f"— recalculating levels from config"
+                )
+                tracker.position = None
+                tracker._trade_id = None
+                tracker._entry_fill_ms = None
+                pos = None
     else:
         log.info(f"[SYNC] No saved state for {cfg.symbol} — recalculating levels from config")
 

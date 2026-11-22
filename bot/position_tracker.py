@@ -690,6 +690,16 @@ class PositionTracker:
         if exit_price is None or exit_price <= 0:
             # Цена выхода недоступна: planned-TP хит обратной ноги трактуем как BE.
             return "REVERSE_BE" if hit == "TP1" else "REVERSE_MARKET"
+        # Страховка после рестарта: если is_reverse потерялся (старый state был
+        # выброшен из-за расхождения entry), но цена выхода совпадает с TP —
+        # всё равно помечаем как закрытие цикла, а не как обычный TP1.
+        if hit == "TP1" and p_before is not None:
+            for target in (
+                getattr(p_before, "tp1_price", 0.0),
+                getattr(p_before, "tp2_price", 0.0),
+            ):
+                if target and target > 0 and self._price_close(exit_price, target):
+                    return "REVERSE_BE"
         targets = [
             getattr(p_before, "tp1_price", 0.0) if p_before else 0.0,
             getattr(p_before, "tp2_price", 0.0) if p_before else 0.0,
@@ -1002,6 +1012,24 @@ class PositionTracker:
         reject_before = p.reject_reason if p else None
         accumulated_pnl_before = p.realized_pnl if p else 0.0
         is_reverse_before = bool(p and getattr(p, "is_reverse", False))
+        # Страховка после рестарта: если state был выброшен из-за расхождения
+        # entry и флаг is_reverse потерялся, восстанавливаем его из БД — по
+        # chain_depth>1 / cycle_close_reason закрытой ранее ноги цикла.
+        if not is_reverse_before and trade_id_before and p is not None:
+            try:
+                import requests as _rq
+                api_url = os.getenv("DASHBOARD_API_URL", "http://localhost:5001/api")
+                _row = _rq.get(f"{api_url}/trades/{trade_id_before}", timeout=3).json()
+                _depth = int(_row.get("chain_depth") or 0) if isinstance(_row, dict) else 0
+                if _depth > 1 or _row.get("cycle_close_reason"):
+                    is_reverse_before = True
+                    p.is_reverse = True
+                    self.log.warning(
+                        f"[REVERSE] restored is_reverse from DB for trade #{trade_id_before} "
+                        f"(chain_depth={_depth})"
+                    )
+            except Exception:
+                pass
         direction_before = p.direction if p else "LONG"
         # Фактическое время входа — из позиции (entry_fill_ms, зафиксирован при
         # открытии). Кэш переживает очистку self.position при закрытии.
