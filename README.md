@@ -1966,6 +1966,15 @@ python3 -m unittest discover -s tests -t . -v     # 12 тестов
 - «Протухшие» цепочки: `EXPIRED_HARD_CLOSE_HOURS=0` (по возрасту не закрываются) и закрытие только когда
   net ≥ комиссия выхода + добавка `clamp(0.5% × leg_notional, $0.025, $0.10)` (live). В testnet
   масштабирование выключено, добавка фиксированная `EXPIRED_CLOSE_MIN_PROFIT_USD=$0.02`.
+- **Старт флота при 60+ ботах:** `POST /api/bots/start-staggered` с телом
+  `{"batchSize":10,"delayMs":25000}` запускает остановленных ботов батчами — иначе одновременно
+  стартующие боты давали всплеск ~1500/2400 weight и срабатывал собственный shed-гейт.
+- **Общий rate-limit гейт live:** `BINANCE_GATE_ENABLED=1`, `BINANCE_WEIGHT_LIMIT_1M=2400`,
+  `BINANCE_SHED_AT=0.5` (сброс второстепенных запросов уже при 1200/2400, запас до бана).
+- **Мониторинг бана** (`artifacts/api-server/src/lib/banMonitor.ts`): раз в 15 с читает общий
+  `ban_until_ms`, одно уведомление на каждый новый бан в Telegram (`TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID` из env, иначе chat_id берётся из `clients.telegram_chat_id`). Без токена событие
+  пишется в `data/binance_ban_events_<env>.log`; дедупликация — `data/binance_ban_notified_<env>.json`.
 
 ### 19.8 Работа с телефона (OpenCode на VPS)
 ПК может быть выключен: сервер OpenCode живёт на VPS.

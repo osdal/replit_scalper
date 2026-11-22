@@ -39,6 +39,7 @@ import { checkDailyLossLimit, checkDayRollover } from "./routes/live";
 import { syncBinanceTime } from "./grid-orders-lib";
 import { cleanupStaleGateFiles } from "./lib/banFiles";
 import { GATE_DIR, GATE_PREFIX } from "./lib/binanceBan";
+import { startBanMonitor } from "./lib/banMonitor";
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -185,6 +186,7 @@ if (Number.isNaN(port) || port <= 0) {
 // автоматически поднимаем ботов, которые были запущены (AUTO_RESTART_BOTS) ->
 // только затем слушаем порт.
 let stopGridEngine: (() => void) | null = null;
+let stopBanMonitor: (() => void) | null = null;
 resetStaleRunningBots()
   .then((stale) => reloadConfigsFromYaml().then(() => stale))
   .then((stale) => autoRestartBots(stale))
@@ -196,6 +198,9 @@ resetStaleRunningBots()
       }
       logger.info({ port }, "Server listening");
       stopGridEngine = startGridEngine();
+      // Мониторинг бана Binance: одно Telegram-уведомление на каждый новый ban_until_ms.
+      // Без TELEGRAM_BOT_TOKEN событие пишется в data/binance_ban_events_<env>.log.
+      stopBanMonitor = startBanMonitor();
       // Дневной лимит убытка (только live) — проверяем раз в минуту.
       // Тот же тик снимает дневной стоп на смене дня по Киеву и поднимает ботов.
       void checkDayRollover();
@@ -220,6 +225,7 @@ resetStaleRunningBots()
 function shutdown(signal: string): void {
   logger.info({ signal }, "Shutting down");
   if (stopGridEngine) stopGridEngine();
+  if (stopBanMonitor) stopBanMonitor();
   process.exit(0);
 }
 process.on("SIGINT", () => shutdown("SIGINT"));

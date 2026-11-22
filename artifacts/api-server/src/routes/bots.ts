@@ -595,6 +595,59 @@ router.post("/:symbol/start", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+/**
+ * POST /bots/start-staggered — запуск флота батчами, чтобы не делать всплеск
+ * REST-веса Binance на старте. 60 ботов подряд давали ~1500/2400 weight и
+ * срабатывал наш же shed-гейт (24.11 18:31), а до этого — короткий -1003.
+ *
+ * Тело (необязательно): { symbols?: string[], batchSize?: number (1..20),
+ * delayMs?: number (1000..120000), onlyStopped?: boolean (default true) }.
+ */
+router.post("/start-staggered", async (req, res) => {
+  try {
+    const batchSize = Math.max(1, Math.min(20, Number(req.body?.batchSize) || 10));
+    const delayMs = Math.max(1000, Math.min(120_000, Number(req.body?.delayMs) || 25_000));
+    let symbols: string[] = [];
+    if (Array.isArray(req.body?.symbols) && req.body.symbols.length > 0) {
+      symbols = req.body.symbols.map((s: unknown) => String(s).toUpperCase());
+    } else {
+      const rows = await db.select({ symbol: botsTable.symbol }).from(botsTable);
+      symbols = rows.map((r) => String(r.symbol).toUpperCase()).sort();
+    }
+    if (req.body?.onlyStopped !== false) {
+      const runningRows = await db.select({ symbol: botsTable.symbol })
+        .from(botsTable).where(eq(botsTable.is_running, true));
+      const running = new Set(runningRows.map((r) => String(r.symbol).toUpperCase()));
+      symbols = symbols.filter((s) => !running.has(s));
+    }
+
+    const started: string[] = [];
+    const failed: { symbol: string; reason: string }[] = [];
+    for (let i = 0; i < symbols.length; i += batchSize) {
+      const batch = symbols.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map(async (symbol) => {
+        try {
+          return { symbol, result: await startBotProcess(symbol) };
+        } catch (e) {
+          return { symbol, result: { ok: false, error: String(e) } as StartBotResult };
+        }
+      }));
+      for (const { symbol, result } of results) {
+        if (result.ok) started.push(symbol);
+        else failed.push({ symbol, reason: result.error ?? result.message ?? "unknown" });
+      }
+      if (i + batchSize < symbols.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    console.log(
+      `[start-staggered] requested=${symbols.length} started=${started.length} ` +
+      `failed=${failed.length} batch=${batchSize} delay=${delayMs}ms`,
+    );
+    res.json({ requested: symbols.length, started, failed, batchSize, delayMs });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // Arm/disarm: разрешение боту открывать позиции (используется в live).
 router.post("/:symbol/arm", async (req, res) => {
   try {
