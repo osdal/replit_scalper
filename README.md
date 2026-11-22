@@ -1825,9 +1825,12 @@ quantity и попытки закрыть остаток, который бир�
   FET step 3, POL step 3, AVAX step 1) при `max_positions=1`, т.к. три из них старше 2 ч не считались.
   Теперь `_expired_cycle_profit_snapshot()` на тиках (троттлинг `EXPIRED_CLOSE_INTERVAL_SEC=10`) для
   reverse-позиции старше `MAX_POSITIONS_IGNORE_AFTER_HOURS` считает net цикла (реализованный net закрытых
-  ног + плавающий) и, если он покрывает **комиссию выхода рынком + `EXPIRED_CLOSE_MIN_PROFIT_USD`**
-  (0.02 в testnet, 0.04 в live — мягкий компромисс, ближе к медианной цели цепочки ~$0.037),
+  ног + плавающий) и, если он покрывает **комиссию выхода рынком + добавку к безубытку**,
   закрывает весь цикл рынком через `process_hit("EXPIRED_PROFIT")` → `_close_cycle_by_cum_loss_cap("expired_profit")`.
+  Добавка масштабируется по размеру текущей ноги (вариант B): `clamp(0.5% × leg_notional, $0.025, $0.10)`
+  (`EXPIRED_MIN_PROFIT_BPS=50`, `EXPIRED_MIN_PROFIT_MIN_USD=0.025`, `EXPIRED_MIN_PROFIT_MAX_USD=0.10`
+  в `.env.live`), т.е. около 50% от TP1 (1%) при любом размере позиции. При `BPS=0` используется
+  фиксированный `EXPIRED_CLOSE_MIN_PROFIT_USD` (0.02 в testnet, 0.04 в live как fallback).
   Метки: `exit_reason=REVERSE_EXPIRED_PROFIT`, `cycle_close_reason=expired_profit`. TP/SL снимаются,
   остаток добивается, строка финализируется по полному окну цикла. Возраст считается от первого филла
   цикла (как и в слот-лимите), поэтому «протухшая» цепочка не ждёт своего TP бесконечно; в минусе она
@@ -1961,7 +1964,8 @@ python3 -m unittest discover -s tests -t . -v     # 12 тестов
 - Убыток позиции ограничен **одним** глобальным `max_position_loss_pct`; per-bot `position_loss_pct`
   и env `LIVE_MAX_DRAWDOWN_PCT` не используются, `checkMaxDrawdown()` в `live.ts` — no-op.
 - «Протухшие» цепочки: `EXPIRED_HARD_CLOSE_HOURS=0` (по возрасту не закрываются) и закрытие только когда
-  net ≥ комиссия выхода + `EXPIRED_CLOSE_MIN_PROFIT_USD` ($0.04 в live, $0.02 в testnet).
+  net ≥ комиссия выхода + добавка `clamp(0.5% × leg_notional, $0.025, $0.10)` (live). В testnet
+  масштабирование выключено, добавка фиксированная `EXPIRED_CLOSE_MIN_PROFIT_USD=$0.02`.
 
 ### 19.8 Работа с телефона (OpenCode на VPS)
 ПК может быть выключен: сервер OpenCode живёт на VPS.
@@ -2358,7 +2362,7 @@ Done
 **Проверка торговых инвариантов после рестарта**
 
 - Лимит убытка позиции — 30 % депозита (осознанное решение владельца): `data/global_limits_live.json` → `max_position_loss_pct: 30`. Per-bot `position_loss_pct` не используется (`checkMaxDrawdown()` — no-op), поэтому значения 5 % в 4 конфигах не снижают порог.
-- `EXPIRED_HARD_CLOSE_HOURS` не задан (0): принудительного закрытия протухших позиций в минус нет; закрытие только при `net ≥ комиссия выхода + $0.04` (live), лимит всех открытых — 70.
+- `EXPIRED_HARD_CLOSE_HOURS` не задан (0): принудительного закрытия протухших позиций в минус нет; закрытие только при `net ≥ комиссия выхода + clamp(0.5% × нотионал ноги, $0.025, $0.10)` (live), лимит всех открытых — 70.
 - Дневной лимит — отдельный бюджет 10 % от базы (§19.7), граница Europe/Kyiv; на момент проверки `tripped=false`, `remaining_usd=4.49`. Не путать с лимитом убытка позиции.
 - Плечо 75 и `position_size_pct=0.3` сохранились у всех 40 ботов.
 

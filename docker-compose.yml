@@ -260,9 +260,14 @@ services:
       # только при минимальном плюсе, слот освобождается по времени.
       - EXPIRED_HARD_CLOSE_HOURS=0
       # Минимальный плюс сверх комиссии выхода для «потухшей» позиции (live):
-      # $0.04 вместо дефолтных $0.02 — мягкий компромисс, ближе к медианной цели
-      # reverse-цепочки (~$0.037). Testnet оставлен на $0.02 для сопоставимости.
+      # ---- Вариант B ----
+      # добавка = clamp(0.5% × нотионал текущей ноги, $0.025, $0.10), т.е. ~50%
+      # от TP1 (1%) при любом размере ноги. EXPIRED_CLOSE_MIN_PROFIT_USD ($0.04)
+      # остаётся fallback только на случай BPS=0. Testnet — прежние $0.02.
       - EXPIRED_CLOSE_MIN_PROFIT_USD=0.04
+      - EXPIRED_MIN_PROFIT_BPS=50
+      - EXPIRED_MIN_PROFIT_MIN_USD=0.025
+      - EXPIRED_MIN_PROFIT_MAX_USD=0.10
 
   dashboard-live:
     <<: *dashboard-base

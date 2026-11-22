@@ -67,6 +67,9 @@ def _pos(is_reverse=True, qty=4.0, entry=6.948, mode="live"):
 def env(monkeypatch):
     monkeypatch.setattr(main, "_EXPIRED_CLOSE_HOURS", 2.0)
     monkeypatch.setattr(main, "_EXPIRED_CLOSE_MIN_PROFIT_USD", 0.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_BPS", 0.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MIN_USD", 0.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MAX_USD", 0.0)
     monkeypatch.setattr(main, "_EXPIRED_CLOSE_INTERVAL_SEC", 10.0)
     monkeypatch.setattr(main, "_expired_close_ts", {})
 
@@ -114,6 +117,41 @@ def test_min_profit_buffer_is_added_to_threshold(env, monkeypatch):
     cap.total_pnl = EXIT_FEE + 0.05 + 0.001
     main._expired_close_ts.clear()  # снять троттлинг между проверками в тесте
     assert run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG)) is not None
+
+
+@pytest.mark.parametrize("qty,entry,expected_addon", [
+    (1.0, 5.0, 0.025),    # 0.5% от $5 = $0.025 → нижняя граница
+    (1.0, 10.0, 0.05),    # 0.5% от $10 = $0.05 → середина диапазона
+    (2.0, 10.0, 0.10),    # 0.5% от $20 = $0.10 → верхняя граница
+    (4.0, 6.948, 0.10),   # 0.5% от $27.8 = $0.139 → ограничено $0.10
+])
+def test_scaled_min_profit_by_leg_notional(env, monkeypatch, qty, entry, expected_addon):
+    """Вариант B: добавка = clamp(0.5% × нотионал ноги, $0.025, $0.10)."""
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_BPS", 50.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MIN_USD", 0.025)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MAX_USD", 0.10)
+    fee = qty * entry * 0.0005
+    cap = FakeCap(total_pnl=fee + expected_addon - 0.001)
+    monkeypatch.setattr(main, "_CUM_CAP", cap)
+    tracker = FakeTracker(_pos(qty=qty, entry=entry), _age_ms(3.0))
+    assert run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG)) is None
+    main._expired_close_ts.clear()
+    cap.total_pnl = fee + expected_addon + 0.001
+    assert run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG)) is not None
+
+
+def test_scaled_min_profit_overrides_fixed(env, monkeypatch):
+    """При BPS>0 фиксированная добавка не используется."""
+    monkeypatch.setattr(main, "_EXPIRED_CLOSE_MIN_PROFIT_USD", 5.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_BPS", 50.0)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MIN_USD", 0.025)
+    monkeypatch.setattr(main, "_EXPIRED_MIN_PROFIT_MAX_USD", 0.10)
+    fee = 2.0 * 10.0 * 0.0005  # $0.01
+    cap = FakeCap(total_pnl=fee + 0.11)
+    monkeypatch.setattr(main, "_CUM_CAP", cap)
+    tracker = FakeTracker(_pos(qty=2.0, entry=10.0), _age_ms(3.0))  # добавка $0.10
+    snap = run(main._expired_cycle_profit_snapshot("UNIUSDT", FakeOrderMgr(), tracker, LOG))
+    assert snap is not None  # при фиксированных $5 было бы ожидание
 
 
 def test_disabled_when_hours_zero(env, monkeypatch):

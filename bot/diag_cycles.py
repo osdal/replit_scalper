@@ -57,10 +57,25 @@ TESTNET = (os.getenv("BINANCE_TESTNET", "true").lower() == "true")
 # Те же дефолты, что в main.py (должны совпадать, иначе решение разойдётся с ботом).
 EXPIRED_HOURS = float(os.getenv("MAX_POSITIONS_IGNORE_AFTER_HOURS") or "0")
 EXPIRED_MIN_PROFIT_USD = float(os.getenv("EXPIRED_CLOSE_MIN_PROFIT_USD") or "0.02")
+EXPIRED_MIN_PROFIT_BPS = float(os.getenv("EXPIRED_MIN_PROFIT_BPS") or "0")
+EXPIRED_MIN_PROFIT_MIN_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MIN_USD") or "0")
+EXPIRED_MIN_PROFIT_MAX_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MAX_USD") or "0")
 CUM_LOSS_PCT = float(os.getenv("REVERSE_CUM_LOSS_PCT") or "5")
 TAKER_FEE = float(os.getenv("TAKER_FEE_RATE") or "0.0005")  # 0.05% futures taker
 
 DEFAULT_DB = os.getenv("BOT_DB_PATH") or "/app/data/bot.db"
+
+
+def _expired_min_profit(notional: float) -> float:
+    """Тот же порог, что в main._expired_min_profit_usd (вариант B)."""
+    if EXPIRED_MIN_PROFIT_BPS > 0 and notional > 0:
+        v = notional * EXPIRED_MIN_PROFIT_BPS / 10000.0
+        if EXPIRED_MIN_PROFIT_MIN_USD > 0:
+            v = max(v, EXPIRED_MIN_PROFIT_MIN_USD)
+        if EXPIRED_MIN_PROFIT_MAX_USD > 0:
+            v = min(v, EXPIRED_MIN_PROFIT_MAX_USD)
+        return max(0.0, v)
+    return max(0.0, EXPIRED_MIN_PROFIT_USD)
 
 
 def _parse_ms(value: Any) -> int:
@@ -239,7 +254,7 @@ async def analyze(client: AsyncClient, symbol: str, pos: dict, args) -> dict:
         expired = "off (MAX_POSITIONS_IGNORE_AFTER_HOURS=0)"
     elif age_h < EXPIRED_HOURS:
         expired = f"wait age<{EXPIRED_HOURS:g}h"
-    elif net >= exit_fee + EXPIRED_MIN_PROFIT_USD:
+    elif net >= exit_fee + _expired_min_profit(qty * entry_price):
         expired = "CLOSE"
     else:
         expired = "wait net<fee+min"

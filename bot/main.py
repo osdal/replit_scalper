@@ -224,13 +224,37 @@ def _reverse_tp_recalc_interval_for(symbol: str) -> float:
 # дожидаясь TP. 0 часов = выкл (в live env не задан).
 _EXPIRED_CLOSE_HOURS = float(os.getenv("MAX_POSITIONS_IGNORE_AFTER_HOURS") or "0")
 # Минимальный плюс сверх комиссии выхода (USD): 0 = закрывать ровно в безубыток.
+# Используется как fallback, когда масштабирование (BPS) выключено.
 _EXPIRED_CLOSE_MIN_PROFIT_USD = float(os.getenv("EXPIRED_CLOSE_MIN_PROFIT_USD") or "0.02")
+# Вариант B: добавка к безубытку масштабируется по размеру ТЕКУЩЕЙ ноги:
+#   addon = clamp(leg_notional * BPS / 10000, MIN_USD, MAX_USD)
+# BPS=50 → 0.5% от нотионала ноги; MIN/MAX=0 означают «без границы».
+# BPS=0 → старая фиксированная добавка EXPIRED_CLOSE_MIN_PROFIT_USD.
+_EXPIRED_MIN_PROFIT_BPS = float(os.getenv("EXPIRED_MIN_PROFIT_BPS") or "0")
+_EXPIRED_MIN_PROFIT_MIN_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MIN_USD") or "0")
+_EXPIRED_MIN_PROFIT_MAX_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MAX_USD") or "0")
 _EXPIRED_CLOSE_INTERVAL_SEC = float(os.getenv("EXPIRED_CLOSE_INTERVAL_SEC") or "10")
 # Жёсткий дедлайн для «протухшей» позиции: если цикл так и не вышел в
 # минимальный плюс за N часов, закрываем его рынком при любом результате.
 # 0 = выкл (testnet по умолчанию; live включает EXPIRED_HARD_CLOSE_HOURS=6).
 _EXPIRED_HARD_CLOSE_HOURS = float(os.getenv("EXPIRED_HARD_CLOSE_HOURS") or "0")
 _expired_close_ts: dict = {}
+
+
+def _expired_min_profit_usd(leg_notional: float) -> float:
+    """Добавка сверх комиссии выхода для «протухшей» позиции.
+
+    BPS > 0: 0.5% от нотионала текущей ноги с ограничением MIN/MAX (вариант B).
+    BPS == 0: фиксированная добавка EXPIRED_CLOSE_MIN_PROFIT_USD (старое поведение).
+    """
+    if _EXPIRED_MIN_PROFIT_BPS > 0 and leg_notional > 0:
+        addon = leg_notional * _EXPIRED_MIN_PROFIT_BPS / 10000.0
+        if _EXPIRED_MIN_PROFIT_MIN_USD > 0:
+            addon = max(addon, _EXPIRED_MIN_PROFIT_MIN_USD)
+        if _EXPIRED_MIN_PROFIT_MAX_USD > 0:
+            addon = min(addon, _EXPIRED_MIN_PROFIT_MAX_USD)
+        return max(0.0, addon)
+    return max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD)
 
 # Очередь симуляции исходов отклонённых сигналов.
 # Каждый элемент: {"trade_id": int, "direction": str, "entry": float, "sl": float,
@@ -1579,9 +1603,12 @@ async def _expired_cycle_profit_snapshot(
     # комиссию выхода НЕ учитывает, поэтому без неё «плюс» после закрытия
     # превратился бы в минус на размер тейкера.
     qty = abs(float(pos.remaining_qty or 0.0))
+    entry_px = float(pos.entry_price or 0.0)
     fee_pct = float(getattr(order_mgr.cfg, "taker_fee_pct", 0.05) or 0.0) / 100.0
-    exit_fee = qty * float(pos.entry_price or 0.0) * fee_pct
-    required = exit_fee + max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD)
+    leg_notional = qty * entry_px
+    exit_fee = leg_notional * fee_pct
+    min_profit = _expired_min_profit_usd(leg_notional)
+    required = exit_fee + min_profit
     if forced:
         # Дедлайн важнее порога: закрываем даже в минусе, чтобы не держать цикл
         # бессрочно. Метка deadline=True → process_hit закроет с отдельной
@@ -1592,6 +1619,8 @@ async def _expired_cycle_profit_snapshot(
             f"[EXPIRED] hard deadline after {age_h:.1f}h (limit {hard_h:g}h) — "
             f"force closing | symbol={symbol} reverse={is_reverse} "
             f"net={snap.total_pnl:+.4f} required={required:.4f} "
+            f"exit_fee={exit_fee:.4f} min_profit={min_profit:.4f} "
+            f"leg_notional={leg_notional:.2f} "
             f"realized={snap.realized_pnl:+.4f} unrealized={snap.unrealized_pnl:+.4f}"
         )
         return snap
@@ -1601,7 +1630,8 @@ async def _expired_cycle_profit_snapshot(
         f"[EXPIRED] position in profit after {age_h:.1f}h — closing without waiting TP | "
         f"symbol={symbol} reverse={is_reverse} net={snap.total_pnl:+.4f} "
         f"required={required:.4f} "
-        f"(exit_fee={exit_fee:.4f} min_profit={max(0.0, _EXPIRED_CLOSE_MIN_PROFIT_USD):.4f}) "
+        f"(exit_fee={exit_fee:.4f} min_profit={min_profit:.4f} "
+        f"leg_notional={leg_notional:.2f} bps={_EXPIRED_MIN_PROFIT_BPS:g}) "
         f"realized={snap.realized_pnl:+.4f} unrealized={snap.unrealized_pnl:+.4f}"
     )
     return snap
