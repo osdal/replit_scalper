@@ -154,6 +154,7 @@ export function startBanMonitor(): () => void {
   if (started) return () => { /* уже запущен */ };
   started = true;
   lastNotified = readNotified();
+  console.log(`[ban-monitor] started (every ${CHECK_MS / 1000}s, env=${BOT_ENV}, telegram=${process.env.TELEGRAM_BOT_TOKEN ? "on" : "off"})`);
   void checkBan();
   const timer = setInterval(() => { void checkBan(); }, CHECK_MS);
   return () => {

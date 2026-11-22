@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, botsTable, clientsTable } from "@workspace/db";
-import { eq, getTableColumns } from "drizzle-orm";
+import { and, eq, getTableColumns } from "drizzle-orm";
 import { spawn, exec, execFile, execSync, type ChildProcess } from "child_process";
 import { promisify } from "util";
 import path from "path";
@@ -619,6 +619,16 @@ router.post("/start-staggered", async (req, res) => {
         .from(botsTable).where(eq(botsTable.is_running, true));
       const running = new Set(runningRows.map((r) => String(r.symbol).toUpperCase()));
       symbols = symbols.filter((s) => !running.has(s));
+    }
+    // По умолчанию без расширения НЕ поднимаем ботов, которые не могут торговать
+    // (проданы/отключены: armed=0 или relay_only=1). 24.11 такой вызов поднял
+    // 6 лишних процессов вместо 60. Явный onlyTradable=false снимает фильтр.
+    if (req.body?.onlyTradable !== false) {
+      const tradableRows = await db.select({ symbol: botsTable.symbol })
+        .from(botsTable)
+        .where(and(eq(botsTable.armed, true), eq(botsTable.relay_only, false)));
+      const tradable = new Set(tradableRows.map((r) => String(r.symbol).toUpperCase()));
+      symbols = symbols.filter((s) => tradable.has(s));
     }
 
     const started: string[] = [];
