@@ -210,11 +210,11 @@ services:
       - BOT_ENV=live
       - PORT=5001
       - BINANCE_TESTNET=false
-      # Лимит позиций для live: 10 свежих / 60 всех (рабочий источник —
+      # Лимит позиций для live: 30 свежих / 70 всех (рабочий источник —
       # data/global_limits_live.json, правится из дашборда без рестарта;
       # env — только fallback, если файла нет).
-      - MAX_POSITIONS=3
-      - MAX_POSITIONS_WITH_EXPIRED=60
+      - MAX_POSITIONS=30
+      - MAX_POSITIONS_WITH_EXPIRED=70
       - DASHBOARD_API_URL=http://localhost:5001/api
       # Дневной риск (единая формула lib/dailyRisk.ts):
       #   база = баланс кошелька на начало дня по Киеву (фиксируется в

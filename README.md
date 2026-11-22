@@ -1956,7 +1956,7 @@ python3 -m unittest discover -s tests -t . -v     # 12 тестов
   добавляются к базе (`transfers_usd`): депозит увеличивает капитал дня и лимит, но **не** считается
   прибылью в `net`. Кэш 60 с. Подробнее — §19.13.
 - `data/global_limits_<env>.json` (правится из дашборда, применяется без рестарта):
-  live — `max_positions: 10`, `max_positions_with_expired: 60`, `max_position_loss_pct: 30`
+  live — `max_positions: 30`, `max_positions_with_expired: 70`, `max_position_loss_pct: 30`
   (30 % — осознанное решение владельца).
 - Убыток позиции ограничен **одним** глобальным `max_position_loss_pct`; per-bot `position_loss_pct`
   и env `LIVE_MAX_DRAWDOWN_PCT` не используются, `checkMaxDrawdown()` в `live.ts` — no-op.
@@ -2358,7 +2358,7 @@ Done
 **Проверка торговых инвариантов после рестарта**
 
 - Лимит убытка позиции — 30 % депозита (осознанное решение владельца): `data/global_limits_live.json` → `max_position_loss_pct: 30`. Per-bot `position_loss_pct` не используется (`checkMaxDrawdown()` — no-op), поэтому значения 5 % в 4 конфигах не снижают порог.
-- `EXPIRED_HARD_CLOSE_HOURS` не задан (0): принудительного закрытия протухших позиций в минус нет; закрытие только при `net ≥ комиссия выхода + $0.04` (live), лимит всех открытых — 60.
+- `EXPIRED_HARD_CLOSE_HOURS` не задан (0): принудительного закрытия протухших позиций в минус нет; закрытие только при `net ≥ комиссия выхода + $0.04` (live), лимит всех открытых — 70.
 - Дневной лимит — отдельный бюджет 10 % от базы (§19.7), граница Europe/Kyiv; на момент проверки `tripped=false`, `remaining_usd=4.49`. Не путать с лимитом убытка позиции.
 - Плечо 75 и `position_size_pct=0.3` сохранились у всех 40 ботов.
 

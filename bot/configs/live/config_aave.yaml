@@ -95,7 +95,7 @@ max_positions: 1
 max_positions_with_expired: 3
 mode: live
 paper_balance: 1000.0
-position_size_pct: 0.3
+position_size_pct: 0.7
 position_size_usd: 0
 reverse_breakeven_pct: 1.5
 reverse_chain_max: 10
