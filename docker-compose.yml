@@ -235,11 +235,20 @@ services:
       # Reverse step doubling (testnet-like): удваивание цели на каждом шаге цепочки.
       - REVERSE_STEP_DOUBLING=true
       # Binance rate-limit gate (общий файл с testnet через volume).
-      # shed_at 0.5 → сброс второстепенных запросов при 1200/2400 weight,
-      # запас до бан-лимита. Дублируется в .env.live (dotenv override).
+      # shed_at 0.35 → сброс второстепенных запросов при 840/2400 weight:
+      # при 60 ботах фон ~1000, поэтому 0.5 (1200) срабатывал уже после пика.
+      # Дублируется в .env.live (dotenv override).
       - BINANCE_GATE_ENABLED=1
       - BINANCE_WEIGHT_LIMIT_1M=2400
-      - BINANCE_SHED_AT=0.5
+      - BINANCE_SHED_AT=0.35
+      # Кэш реализованного net цикла: TTL 60с + разброс ±40% по символу (crc32).
+      # Без разброса 60 ботов обновляют net синхронно → залп userTrades и бан.
+      - CUM_CAP_REALIZED_TTL_SEC=60
+      - CUM_CAP_REALIZED_TTL_JITTER=0.4
+      # Reverse не открылся из-за бана Binance → SL первой ноги откладывается
+      # (бюджет 180с, ретрай каждые 5с), а не срабатывает сразу.
+      - DEFERRED_REVERSE_SL_MAX_SEC=180
+      - DEFERRED_REVERSE_SL_RETRY_SEC=5
       # На mainnet заголовок X-MBX-USED-WEIGHT-1M корректен (per-IP) — доверяем ему.
       - BINANCE_WEIGHT_SOURCE=header
       - BINANCE_BAN_FALLBACK_SEC=30

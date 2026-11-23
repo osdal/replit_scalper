@@ -1971,7 +1971,18 @@ python3 -m unittest discover -s tests -t . -v     # 12 тестов
   `{"batchSize":10,"delayMs":25000}` запускает остановленных ботов батчами — иначе одновременно
   стартующие боты давали всплеск ~1500/2400 weight и срабатывал собственный shed-гейт.
 - **Общий rate-limit гейт live:** `BINANCE_GATE_ENABLED=1`, `BINANCE_WEIGHT_LIMIT_1M=2400`,
-  `BINANCE_SHED_AT=0.5` (сброс второстепенных запросов уже при 1200/2400, запас до бана).
+  `BINANCE_SHED_AT=0.35` (сброс второстепенных запросов уже при 840/2400: при 60 ботах фон ~1000,
+  поэтому прежние 0.5 срабатывали уже после пика).
+- **Разброс обновлений realized-net:** `CUM_CAP_REALIZED_TTL_SEC=60`, `CUM_CAP_REALIZED_TTL_JITTER=0.4`
+  — TTL кэша реализованного net цикла ±40 % по символу (crc32). Без разброса 60 ботов с одинаковым
+  TTL дёргали `userTrades` (вес 20) синхронно: залп ~1200 weight за 14 с поверх фона ~1000 → часовой
+  IP-бан в ~:17. Тот же паттерн, что `_reverse_tp_recalc_interval_for`.
+- **Отложенный SL при бане:** если reverse-нога не открылась из-за `-1003/-429`
+  (`order_manager.last_reverse_skip_reason="rate_limit"`), первая нога НЕ закрывается по SL сразу:
+  `main._defer_reverse_sl_for_rate_limit` откладывает решение (`DEFERRED_REVERSE_SL_MAX_SEC=180`,
+  ретрай `DEFERRED_REVERSE_SL_RETRY_SEC=5`), тик-цикл не блокируется, биржевой backstop остаётся live.
+  Раньше ретраи 3×2 с проваливались в бан и нога закрывалась по SL (ETHFI/KAS/PUMP, −$0.264).
+  Тест: `bot/tests/test_deferred_reverse_sl.py`.
 - **Мониторинг бана** (`artifacts/api-server/src/lib/banMonitor.ts`): раз в 15 с читает общий
   `ban_until_ms`, одно уведомление на каждый новый бан в Telegram (`TELEGRAM_BOT_TOKEN`,
   `TELEGRAM_CHAT_ID` из env, иначе chat_id берётся из `clients.telegram_chat_id`). Без токена событие

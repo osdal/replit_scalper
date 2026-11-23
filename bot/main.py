@@ -135,10 +135,17 @@ _REVERSE_CUM_REF_DEPOSIT_USD = float(os.getenv("REVERSE_CUM_REF_DEPOSIT_USD") or
 # Как часто (сек) пересчитывать убыток на тиках. Каждый пересчёт — 1 REST к
 # позициям (реализованный net кэшируется до смены шага цепочки/30с).
 _REVERSE_CUM_LOSS_INTERVAL = float(os.getenv("REVERSE_CUM_LOSS_INTERVAL_SEC") or "1.0")
+# TTL кэша реализованного net цикла. Каждый промах кэша — userTrades (вес 20);
+# при 60 ботах одинаковый TTL даёт синхронный залп в общий IP-лимит. Разброс
+# ±40% по символу (crc32) разводит обновления по времени.
+_CUM_CAP_REALIZED_TTL_SEC = float(os.getenv("CUM_CAP_REALIZED_TTL_SEC") or "60")
+_CUM_CAP_REALIZED_TTL_JITTER = float(os.getenv("CUM_CAP_REALIZED_TTL_JITTER") or "0.4")
 _CUM_CAP = CumLossCap(
     pct=_REVERSE_CUM_LOSS_PCT,
     fixed_ref_usd=_REVERSE_CUM_REF_DEPOSIT_USD,
     interval_sec=_REVERSE_CUM_LOSS_INTERVAL,
+    realized_ttl_sec=_CUM_CAP_REALIZED_TTL_SEC,
+    realized_ttl_jitter=_CUM_CAP_REALIZED_TTL_JITTER,
 )
 
 
@@ -236,7 +243,7 @@ _EXPIRED_MIN_PROFIT_MAX_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MAX_USD") or "
 _EXPIRED_CLOSE_INTERVAL_SEC = float(os.getenv("EXPIRED_CLOSE_INTERVAL_SEC") or "10")
 # Жёсткий дедлайн для «протухшей» позиции: если цикл так и не вышел в
 # минимальный плюс за N часов, закрываем его рынком при любом результате.
-# 0 = выкл (testnet по умолчанию; live включает EXPIRED_HARD_CLOSE_HOURS=6).
+# 0 = выкл (и в testnet, и в live: EXPIRED_HARD_CLOSE_HOURS=0).
 _EXPIRED_HARD_CLOSE_HOURS = float(os.getenv("EXPIRED_HARD_CLOSE_HOURS") or "0")
 _expired_close_ts: dict = {}
 
@@ -1446,6 +1453,73 @@ async def _close_stale_db_trade(
     except Exception as e:
         log.debug(f"[SYNC] inline stale PATCH failed for trade #{trade_id}: {e}")
     return pnl_val
+
+
+# --- Отложенный SL первой ноги при бане Binance -----------------------------
+# Если reverse-нога не открылась из-за -1003/-429 (IP-бан), закрывать первую ногу
+# по SL нельзя: бан длится 10-30 с (+ post-ban resume до ~60 с), а ретраи reverse
+# идут 3×2 с и гарантированно проваливаются. Так часовой бан срывал хедж и давал
+# SL-убыток (ETHFI/KAS/PUMP). Решение откладывается до снятия бана; бюджет
+# ограничен, чтобы не держать ногу без хеджа бесконечно. Биржевой backstop при
+# этом остаётся live и страхует цену.
+_DEFERRED_REVERSE_SL_MAX_SEC = float(os.getenv("DEFERRED_REVERSE_SL_MAX_SEC") or "180")
+_DEFERRED_REVERSE_SL_RETRY_SEC = float(os.getenv("DEFERRED_REVERSE_SL_RETRY_SEC") or "5")
+_deferred_reverse_sl: dict = {}
+
+
+def _clear_deferred_reverse_sl(symbol: str) -> None:
+    """Снять отложенный SL (reverse открылся, позиция закрылась или отказ не бановый)."""
+    _deferred_reverse_sl.pop(symbol, None)
+
+
+def _is_reverse_sl_deferred(symbol: str) -> bool:
+    return symbol in _deferred_reverse_sl
+
+
+def _defer_reverse_sl_for_rate_limit(
+    symbol, order_mgr, log, current_price: float, now: float = None,
+) -> bool:
+    """True — SL первой ноги отложен, закрывать позицию сейчас нельзя.
+
+    Вызывается в ветке «reverse не открылся». Откладываем ТОЛЬКО при бане/лимите
+    Binance и только в пределах бюджета. Прочие отказы (dust, занятые слоты,
+    отказ биржи по существу) закрываются как раньше.
+    """
+    if getattr(order_mgr, "last_reverse_skip_reason", None) != "rate_limit":
+        return False
+    now = time.time() if now is None else now
+    st = _deferred_reverse_sl.get(symbol)
+    if st is None:
+        st = {"first_ts": now, "attempts": 0}
+        _deferred_reverse_sl[symbol] = st
+    left = _DEFERRED_REVERSE_SL_MAX_SEC - (now - st["first_ts"])
+    if left <= 0:
+        _deferred_reverse_sl.pop(symbol, None)
+        log.warning(
+            f"[REVERSE] rate-limit deferral budget exhausted "
+            f"({_DEFERRED_REVERSE_SL_MAX_SEC:g}s) — closing first leg by SL | symbol={symbol}"
+        )
+        return False
+    st["attempts"] += 1
+    st["next_ts"] = now + _DEFERRED_REVERSE_SL_RETRY_SEC
+    st["price"] = float(current_price or 0.0)
+    log.warning(
+        f"[REVERSE] reverse blocked by Binance rate limit — SL deferred | "
+        f"symbol={symbol} attempt={st['attempts']} "
+        f"retry_in={_DEFERRED_REVERSE_SL_RETRY_SEC:g}s budget_left={left:.0f}s"
+    )
+    return True
+
+
+def _due_deferred_reverse_sl(symbol: str, now: float = None):
+    """Цена для повторного process_hit('SL'), когда отложенный ретрай созрел."""
+    st = _deferred_reverse_sl.get(symbol)
+    if st is None:
+        return None
+    now = time.time() if now is None else now
+    if now < st.get("next_ts", 0.0):
+        return None
+    return float(st.get("price") or 0.0)
 
 
 async def _check_reverse_cum_loss(
@@ -3393,6 +3467,10 @@ async def _run_live_or_paper(
                 # биржи (напр. -4164/-2027, лаг цены после сбоя WS/REST) НЕ закрываем
                 # первую ногу по SL сразу — иначе цикл обрывается на 1-м круге.
                 reverse_result = None
+                # Сбрасываем причину прошлого отказа: иначе stale "rate_limit"
+                # от предыдущей попытки мог бы отложить SL там, где reverse
+                # вообще не пытались открыть.
+                order_mgr.last_reverse_skip_reason = None
                 for _attempt in range(1, 4):
                     try:
                         reverse_result = await order_mgr.open_reverse_position(
@@ -3429,6 +3507,7 @@ async def _run_live_or_paper(
                         await asyncio.sleep(2.0)
 
             if reverse_result:
+                _clear_deferred_reverse_sl(cfg.symbol)
                 rev_entry, rev_qty, rev_tp = reverse_result
                 if rev_qty <= 0:
                     # FIX 2: хеджировать нечего — нога не добавлена, не открываем
@@ -3502,6 +3581,13 @@ async def _run_live_or_paper(
                 # закрываем цикл как неудавшийся реверс (chain_failed), а не как
                 # обычный SL. Иначе в БД уходит exit_reason="SL", cycle_close_reason=None
                 # и дашборд показывает неверную причину.
+                # Исключение: бан/лимит Binance — это не отказ по существу, ногу
+                # закрывать нельзя, ждём снятия бана и пробуем reverse снова.
+                if _defer_reverse_sl_for_rate_limit(
+                    cfg.symbol, order_mgr, log, current_price
+                ):
+                    return
+                _clear_deferred_reverse_sl(cfg.symbol)
                 try:
                     await order_mgr.cancel_all_tp_sl(orig_direction, mode=pos_mode)
                 except Exception as e:
@@ -5174,6 +5260,7 @@ async def _run_live_or_paper(
                     break
                 if not tracker.has_open_position():
                     # Позиция закрылась между тиками - цепочка закончилась
+                    _clear_deferred_reverse_sl(cfg.symbol)
                     if _CUM_CAP.is_in_chain(cfg.symbol):
                         _CUM_CAP.mark_chain_ended(cfg.symbol)
                         _CUM_CAP.reset(cfg.symbol)
@@ -5189,6 +5276,18 @@ async def _run_live_or_paper(
                 if reporter is not None and current_price > 0 and (now_ts - last_tick_hb_ts) >= 30:
                     last_tick_hb_ts = now_ts
                     await reporter.report_heartbeat(current_price)
+
+                # Отложенный SL первой ноги: reverse был заблокирован баном
+                # Binance. Когда ретрай созрел — пробуем снова (process_hit сам
+                # откроет reverse либо, если бан снят и отказ уже по существу,
+                # закроет ногу). Тик-цикл при этом не блокируется.
+                if _is_reverse_sl_deferred(cfg.symbol):
+                    _def_px = _due_deferred_reverse_sl(cfg.symbol)
+                    if _def_px is not None:
+                        await process_hit(
+                            "SL", _def_px or current_price, int(time.time() * 1000)
+                        )
+                        continue
 
                 # EXPIRED/DEADLINE проверка для reverse-циклов НЕ требует current_price
                 # (использует _CUM_CAP.evaluate). Запускаем её ДО проверки current_price,
@@ -5209,6 +5308,10 @@ async def _run_live_or_paper(
                     continue
 
                 hit = tracker.check(current_price)
+                # Пока SL первой ноги отложен из-за бана, не дёргаем process_hit
+                # на каждом тике: ретрай идёт по расписанию из блока выше.
+                if hit == "SL" and _is_reverse_sl_deferred(cfg.symbol):
+                    hit = None
                 if not hit and tracker.position is not None \
                         and getattr(tracker.position, "is_reverse", False) \
                         and cfg.mode == "live":

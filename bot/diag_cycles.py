@@ -60,7 +60,26 @@ EXPIRED_MIN_PROFIT_USD = float(os.getenv("EXPIRED_CLOSE_MIN_PROFIT_USD") or "0.0
 EXPIRED_MIN_PROFIT_BPS = float(os.getenv("EXPIRED_MIN_PROFIT_BPS") or "0")
 EXPIRED_MIN_PROFIT_MIN_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MIN_USD") or "0")
 EXPIRED_MIN_PROFIT_MAX_USD = float(os.getenv("EXPIRED_MIN_PROFIT_MAX_USD") or "0")
-CUM_LOSS_PCT = float(os.getenv("REVERSE_CUM_LOSS_PCT") or "5")
+def _resolve_cum_loss_pct() -> float:
+    """Тот же источник, что у бота: data/global_limits_<env>.json →
+    max_position_loss_pct. env REVERSE_CUM_LOSS_PCT — только fallback: иначе
+    диагностика печатает 5% при реальном лимите 30% и вводит в заблуждение."""
+    explicit = os.getenv("GLOBAL_LIMITS_FILE")
+    env = (os.getenv("BOT_ENV") or "").strip().lower()
+    if env not in ("live", "testnet"):
+        env = "testnet" if TESTNET else "live"
+    path = explicit or os.path.join(os.getcwd(), "..", "data", f"global_limits_{env}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f).get("max_position_loss_pct")
+        if value is not None:
+            return max(0.0, float(value))
+    except Exception:
+        pass
+    return max(0.0, float(os.getenv("REVERSE_CUM_LOSS_PCT") or "5"))
+
+
+CUM_LOSS_PCT = _resolve_cum_loss_pct()
 TAKER_FEE = float(os.getenv("TAKER_FEE_RATE") or "0.0005")  # 0.05% futures taker
 
 DEFAULT_DB = os.getenv("BOT_DB_PATH") or "/app/data/bot.db"

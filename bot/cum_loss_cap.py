@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -76,6 +77,7 @@ class CumLossCap:
         interval_sec: float = 1.0,
         min_interval_sec: Optional[float] = None,
         realized_ttl_sec: float = 30.0,
+        realized_ttl_jitter: float = 0.0,
         realized_stale_max_sec: float = 900.0,
         warn_interval_sec: float = 60.0,
         clock: Callable[[], float] = time.time,
@@ -85,6 +87,10 @@ class CumLossCap:
         floor = MIN_INTERVAL_SEC if min_interval_sec is None else float(min_interval_sec)
         self.interval_sec = max(float(interval_sec), floor)
         self.realized_ttl_sec = float(realized_ttl_sec)
+        # Разброс TTL по символу (0..0.9). Без него десятки ботов с одинаковым
+        # TTL обновляют realized-net синхронно и дают залп userTrades в общий
+        # IP-лимит Binance (2400 weight/min на все процессы).
+        self.realized_ttl_jitter = min(max(float(realized_ttl_jitter), 0.0), 0.9)
         # Сколько секунд допустимо использовать последний известный net, когда
         # биржевые филлы недоступны (rate-limit/бан). Иначе cap молча отключится.
         self.realized_stale_max_sec = max(float(realized_stale_max_sec), 0.0)
@@ -137,6 +143,21 @@ class CumLossCap:
         self._warn_ts[symbol] = now
         log.warning(f"[REVERSE] {prefix} | symbol={symbol} {msg}")
 
+    def _realized_ttl_for(self, symbol: str) -> float:
+        """TTL кэша реализованного net с разбросом по символу.
+
+        crc32, а не hash(): hash() рандомизирован per-process (PYTHONHASHSEED),
+        а разброс должен быть стабильным между рестартами и процессами.
+        """
+        ttl = self.realized_ttl_sec
+        if self.realized_ttl_jitter <= 0 or ttl <= 0:
+            return ttl
+        bucket = (zlib.crc32(symbol.encode("utf-8")) % 1000) / 999.0  # 0..1
+        return ttl * (
+            1.0 - self.realized_ttl_jitter
+            + 2.0 * self.realized_ttl_jitter * bucket
+        )
+
     async def evaluate(
         self,
         symbol: str,
@@ -175,7 +196,7 @@ class CumLossCap:
         if net_realized is None:
             cached = self._realized.get(symbol)
             if (not fresh and cached is not None and cached[0] == step
-                    and now - cached[1] < self.realized_ttl_sec):
+                    and now - cached[1] < self._realized_ttl_for(symbol)):
                 net_realized = cached[2]
             else:
                 failed = False

@@ -326,3 +326,20 @@ def test_periodic_check_uses_position_cache_but_before_open_is_fresh(log):
     assert om.fresh_args == [False]                   # без сброса кэша позиций
     run(cap.evaluate("X", om, tr, log, fresh=True))   # путь «перед открытием ноги»
     assert om.fresh_args == [False, True]
+
+
+def test_realized_ttl_jitter_spreads_symbols(log):
+    """Разброс TTL по символу: 60 ботов не должны обновлять net синхронно."""
+    cap, _ = make_cap(interval_sec=0.0, realized_ttl_sec=60.0, realized_ttl_jitter=0.4)
+    syms = ("ETHFIUSDT", "KASUSDT", "PUMPUSDT", "STEEMUSDT", "DOTUSDT", "SUIUSDT")
+    ttls = [cap._realized_ttl_for(s) for s in syms]
+    assert len(set(round(v, 6) for v in ttls)) > 1          # не все одинаковые
+    assert all(36.0 <= v <= 84.0 for v in ttls)             # ±40% от 60с
+    # разброс стабилен между вызовами (crc32, не hash())
+    assert cap._realized_ttl_for("ETHFIUSDT") == ttls[0]
+
+
+def test_realized_ttl_without_jitter_is_exact(log):
+    """Обратная совместимость: без джиттера TTL ровно как задан."""
+    cap, _ = make_cap(realized_ttl_sec=30.0)
+    assert cap._realized_ttl_for("ETHFIUSDT") == 30.0

@@ -18,7 +18,7 @@ from binance.enums import (
 )
 
 from config import Config, reload_config_if_changed, reverse_w_pct_for_step
-from rate_limit import is_ban_error, reset_ban_state, wait_for_ban
+from rate_limit import is_ban_error, is_rate_limit_error, reset_ban_state, wait_for_ban
 from strategy import Signal
 
 # Аудит ордеров (только live): пишем в logs/<env>/orders_audit.jsonl.
@@ -1842,6 +1842,12 @@ class OrderManager:
                     f"[REVERSE] chain market order failed | side={side} qty={qty}: {e}",
                     exc_info=True,
                 )
+                # Бан/лимит Binance — это НЕ отказ биржи по существу: ногу нельзя
+                # считать «не открывшейся» и закрывать первую по SL. Caller
+                # (main._defer_reverse_sl_for_rate_limit) отложит решение до
+                # снятия бана. Иначе часовой бан срывает хедж и даёт SL-убыток.
+                if is_ban_error(e) or is_rate_limit_error(e):
+                    self.last_reverse_skip_reason = "rate_limit"
                 return None
             # Вход изменил позицию/баланс — кэши невалидны.
             self._invalidate_caches()
