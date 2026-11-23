@@ -3412,6 +3412,10 @@ async def _run_live_or_paper(
                 return
 
             reverse_result = None
+            # Сбрасываем причину прошлого отказа ДО ветвления: иначе stale
+            # "rate_limit" мог бы отложить SL там, где reverse вообще не пытались
+            # открыть (is_rejected / recovery).
+            order_mgr.last_reverse_skip_reason = None
             if not is_rejected and not pos.is_recovery:
                 # Снимаем TP-ордера исходной позиции (SL на бирже не выставляется),
                 # чтобы они не сработали и не закрыли позицию до разворота.
@@ -3467,10 +3471,6 @@ async def _run_live_or_paper(
                 # биржи (напр. -4164/-2027, лаг цены после сбоя WS/REST) НЕ закрываем
                 # первую ногу по SL сразу — иначе цикл обрывается на 1-м круге.
                 reverse_result = None
-                # Сбрасываем причину прошлого отказа: иначе stale "rate_limit"
-                # от предыдущей попытки мог бы отложить SL там, где reverse
-                # вообще не пытались открыть.
-                order_mgr.last_reverse_skip_reason = None
                 for _attempt in range(1, 4):
                     try:
                         reverse_result = await order_mgr.open_reverse_position(
