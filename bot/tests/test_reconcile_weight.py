@@ -1,6 +1,7 @@
 """Тесты fix/reconcile-weight: 1 income на весь аккаунт, пагинация, локальный
 бюджет weight, пауза перед trades, останов на 429, пропуск при бане.
 """
+import contextlib
 import os
 import sys
 import sqlite3
@@ -73,18 +74,35 @@ class FakeClient:
         pass
 
 
-def _run_main(argv, cli, ban=False, weight=20, sleep=None, fleet_weight=None):
+class FakeGate:
+    """Подмена AccountGate: get_status отдаёт веса по списку (последний — навсегда)."""
+
+    def __init__(self, weights):
+        self.weights = list(weights)
+        self.i = 0
+
+    def get_status(self):
+        w = self.weights[min(self.i, len(self.weights) - 1)]
+        self.i += 1
+        return {"used_weight_1m": w, "ban_until_ms": 0}
+
+
+def _run_main(argv, cli, ban=False, weight=20, sleep=None, fleet_weight=None,
+              gate=None):
     sleep_mock = mock.Mock(side_effect=sleep)
-    fw = fleet_weight if fleet_weight is not None else (lambda c, g: weight)
-    with mock.patch.object(sys, "argv", argv), \
-         mock.patch.dict(os.environ, {"BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"}), \
-         mock.patch.object(rc, "_load_env", lambda: None), \
-         mock.patch.object(rc, "_gate_skips", lambda path: ban), \
-         mock.patch.object(rc, "_make_gate", lambda path: None), \
-         mock.patch.object(rc, "_resp_weight", lambda c: weight), \
-         mock.patch.object(rc, "_fleet_weight", fw), \
-         mock.patch.object(rc, "time", mock.Mock(sleep=sleep_mock)), \
-         mock.patch("binance.client.Client", return_value=cli):
+    resp = weight if callable(weight) else (lambda c: weight)
+    with contextlib.ExitStack() as st:
+        st.enter_context(mock.patch.object(sys, "argv", argv))
+        st.enter_context(mock.patch.dict(
+            os.environ, {"BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"}))
+        st.enter_context(mock.patch.object(rc, "_load_env", lambda: None))
+        st.enter_context(mock.patch.object(rc, "_gate_skips", lambda path: ban))
+        st.enter_context(mock.patch.object(rc, "_make_gate", lambda path: gate))
+        st.enter_context(mock.patch.object(rc, "_resp_weight", resp))
+        if fleet_weight is not None:
+            st.enter_context(mock.patch.object(rc, "_fleet_weight", fleet_weight))
+        st.enter_context(mock.patch.object(rc, "time", mock.Mock(sleep=sleep_mock)))
+        st.enter_context(mock.patch("binance.client.Client", return_value=cli))
         return rc.main()
 
 
@@ -176,32 +194,50 @@ def test_income_uses_funding_fee_and_single_window(tmp_path):
     assert "incomeType=FUNDING_FEE" in (tmp_path / "log.txt").read_text()
 
 
-def test_wait_for_weight_aborts_run_when_high(tmp_path):
-    """Вес 1200 не падает: ждём 60 с шагом 3 с и завершаем прогон без запросов."""
+def test_wait_reads_gate_not_stale_header(tmp_path):
+    """Заголовок 1200 (протух), gate падает до 700 за 2 опроса — прогон идёт.
+
+    `_fleet_weight` НЕ мокается: проверяется реальная логика. Заголовок
+    учитывается только на входе, в цикле читается gate.
+    """
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
+    cli = FakeClient()
+    gate = FakeGate([1200, 1200, 700])  # 1-й опрос — вход, дальше 2 опроса в цикле
+    header = iter([1200, 700])  # до income и после него
+    sleeps = []
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, weight=lambda c: next(header, 700), gate=gate,
+                     sleep=lambda s: sleeps.append(s)) == 0
+    assert len(cli.income_calls) == 1
+    assert cli.fills_calls == ["AAAUSDT"]
+    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 2
+    assert "дождались 700 < 1000 за 6 с" in (tmp_path / "log.txt").read_text()
+
+
+def test_wait_aborts_when_gate_stays_high(tmp_path):
+    """gate всё время >= 1000: 60 с ожидания и aborted_weight=1 без запросов."""
     db = _make_db(str(tmp_path))
     cli = FakeClient()
-    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
     sleeps = []
-    assert _run_main(argv, cli, fleet_weight=lambda c, g: 1200,
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, weight=1200, gate=FakeGate([1200]),
                      sleep=lambda s: sleeps.append(s)) == 0
     assert cli.income_calls == []
     assert cli.fills_calls == []
+    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 20
     log = (tmp_path / "log.txt").read_text()
     assert "не упал за 60 с" in log
-    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 20
     assert "aborted_weight=1" in log
 
 
-def test_wait_for_weight_continues_after_drop(tmp_path):
-    """Вес 1200 -> 1200 -> 900: дождались и продолжили прогон."""
+def test_no_wait_log_when_weight_between_600_and_1000(tmp_path):
+    """Вес 700: ожидания нет, лог «дождались» не пишется."""
     db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
     cli = FakeClient()
-    seq = iter([1200, 1200, 900])
     argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
-    assert _run_main(argv, cli, fleet_weight=lambda c, g: next(seq, 900)) == 0
+    assert _run_main(argv, cli, weight=700, gate=FakeGate([700])) == 0
     assert len(cli.income_calls) == 1
-    assert len(cli.fills_calls) == 1
-    assert "дождались 900 < 1000 за 6 с" in (tmp_path / "log.txt").read_text()
+    assert "дождались" not in (tmp_path / "log.txt").read_text()
 
 
 def test_budget_skip_logs_symbols_and_total_weight(tmp_path):

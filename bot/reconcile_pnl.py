@@ -135,20 +135,24 @@ def _make_gate(log_path: str):
         return None
 
 
-def _fleet_weight(cli, gate) -> int:
-    """Суммарный вес IP: max(заголовок последнего ответа, gate-файл).
+def _gate_weight(gate) -> int:
+    """Вес из общего gate-файла (его пишут все боты); 0, если недоступен."""
+    if gate is None:
+        return 0
+    try:
+        st = gate.get_status() or {}
+        return int(st.get("used_weight_1m", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
-    Заголовок сам по себе не обновляется без запросов, поэтому во время паузы
-    опираемся на общий gate-файл (его пишут все 60 ботов).
+
+def _fleet_weight(cli, gate) -> int:
+    """Вес для решения «ждать или нет»: max(заголовок последнего ответа, gate).
+
+    Вызывается ОДИН раз перед циклом ожидания. В самом цикле заголовок не
+    используется: он не обновляется без запросов и держал бы вес высоким.
     """
-    w = _resp_weight(cli)
-    if gate is not None:
-        try:
-            st = gate.get_status() or {}
-            w = max(w, int(st.get("used_weight_1m", 0) or 0))
-        except Exception:  # noqa: BLE001
-            pass
-    return w
+    return max(_resp_weight(cli), _gate_weight(gate))
 
 
 def _wait_for_weight(cli, gate, log) -> bool:
@@ -156,22 +160,35 @@ def _wait_for_weight(cli, gate, log) -> bool:
 
     True — можно продолжать; False — вес не упал за WEIGHT_WAIT_MAX_SEC,
     прогон надо завершить (решение принимает вызывающий).
+
+    В цикле читается ТОЛЬКО gate-файл: заголовок X-MBX-USED-WEIGHT-1M от
+    последнего ответа сам по себе не обновляется, пока нет запросов.
     """
     w = _fleet_weight(cli, gate)
     if w <= WEIGHT_PAUSE_ABOVE:
         return True
+    if w < WEIGHT_PAUSE_TARGET:
+        # 600 < w < 1000: ждать нечего, запросы идут сразу.
+        return True
+    if gate is None:
+        _log(log, (
+            f"abort: суммарный вес {w} >= {WEIGHT_PAUSE_TARGET}, gate недоступен — "
+            f"не можем отследить снижение, завершаем прогон"
+        ))
+        return False
     waited = 0.0
     while w >= WEIGHT_PAUSE_TARGET and waited < WEIGHT_WAIT_MAX_SEC:
         time.sleep(WEIGHT_WAIT_STEP_SEC)
         waited += WEIGHT_WAIT_STEP_SEC
-        w = _fleet_weight(cli, gate)
+        w = _gate_weight(gate)
     if w >= WEIGHT_PAUSE_TARGET:
         _log(log, (
             f"abort: суммарный вес {w} >= {WEIGHT_PAUSE_TARGET} не упал за "
             f"{waited:.0f} с — завершаем прогон"
         ))
         return False
-    _log(log, f"weight: дождались {w} < {WEIGHT_PAUSE_TARGET} за {waited:.0f} с")
+    if waited > 0:
+        _log(log, f"weight: дождались {w} < {WEIGHT_PAUSE_TARGET} за {waited:.0f} с")
     return True
 
 
