@@ -73,13 +73,16 @@ class FakeClient:
         pass
 
 
-def _run_main(argv, cli, ban=False, weight=20, sleep=None):
+def _run_main(argv, cli, ban=False, weight=20, sleep=None, fleet_weight=None):
     sleep_mock = mock.Mock(side_effect=sleep)
+    fw = fleet_weight if fleet_weight is not None else (lambda c, g: weight)
     with mock.patch.object(sys, "argv", argv), \
          mock.patch.dict(os.environ, {"BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"}), \
          mock.patch.object(rc, "_load_env", lambda: None), \
          mock.patch.object(rc, "_gate_skips", lambda path: ban), \
+         mock.patch.object(rc, "_make_gate", lambda path: None), \
          mock.patch.object(rc, "_resp_weight", lambda c: weight), \
+         mock.patch.object(rc, "_fleet_weight", fw), \
          mock.patch.object(rc, "time", mock.Mock(sleep=sleep_mock)), \
          mock.patch("binance.client.Client", return_value=cli):
         return rc.main()
@@ -134,12 +137,16 @@ def test_income_pagination_uses_last_time_plus_one(tmp_path):
 
 def test_budget_counts_own_weight_not_header(tmp_path):
     """Заголовок показывает 5000 (весь IP), но бюджет 40 тратится по своим весам:
-    1 income (30) + 2 trades (5+5) = 40, третий trades не делается."""
+    1 income (30) + 2 trades (5+5) = 40, третий trades не делается.
+
+    fleet_weight задан отдельно (900): пауза не срабатывает, а бюджет не зависит
+    от заголовка X-MBX-USED-WEIGHT-1M.
+    """
     db = _make_db(str(tmp_path), symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT"))
     cli = FakeClient()
     argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
     with mock.patch.object(rc, "BUDGET_WEIGHT", 40):
-        assert _run_main(argv, cli, weight=5000) == 0
+        assert _run_main(argv, cli, weight=5000, fleet_weight=lambda c, g: 900) == 0
     assert len(cli.income_calls) == 1
     assert len(cli.fills_calls) == 2
     assert "бюджет исчерпан" in (tmp_path / "log.txt").read_text()
@@ -154,3 +161,58 @@ def test_pause_before_each_trades_call(tmp_path):
     for i, ev in enumerate(events):
         if ev[0] == "trades":
             assert events[i - 1] == ("sleep", rc.REQ_PAUSE_SEC), events
+
+
+def test_income_uses_funding_fee_and_single_window(tmp_path):
+    """incomeType=FUNDING_FEE уходит в Binance; окно 48 ч не режется на куски."""
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 1
+    kw = cli.income_calls[0]
+    assert kw["incomeType"] == "FUNDING_FEE"
+    assert kw["startTime"] < kw["endTime"]
+    assert "incomeType=FUNDING_FEE" in (tmp_path / "log.txt").read_text()
+
+
+def test_wait_for_weight_aborts_run_when_high(tmp_path):
+    """Вес 1200 не падает: ждём 60 с шагом 3 с и завершаем прогон без запросов."""
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    sleeps = []
+    assert _run_main(argv, cli, fleet_weight=lambda c, g: 1200,
+                     sleep=lambda s: sleeps.append(s)) == 0
+    assert cli.income_calls == []
+    assert cli.fills_calls == []
+    log = (tmp_path / "log.txt").read_text()
+    assert "не упал за 60 с" in log
+    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 20
+    assert "aborted_weight=1" in log
+
+
+def test_wait_for_weight_continues_after_drop(tmp_path):
+    """Вес 1200 -> 1200 -> 900: дождались и продолжили прогон."""
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
+    cli = FakeClient()
+    seq = iter([1200, 1200, 900])
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, fleet_weight=lambda c, g: next(seq, 900)) == 0
+    assert len(cli.income_calls) == 1
+    assert len(cli.fills_calls) == 1
+    assert "дождались 900 < 1000 за 6 с" in (tmp_path / "log.txt").read_text()
+
+
+def test_budget_skip_logs_symbols_and_total_weight(tmp_path):
+    """Бюджет 35 = income 30 + 1 trades 5: оставшиеся символы перечислены в логе."""
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT"))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    with mock.patch.object(rc, "BUDGET_WEIGHT", 35):
+        assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 1
+    assert cli.fills_calls == ["AAAUSDT"]
+    log = (tmp_path / "log.txt").read_text()
+    assert "пропущены символы (2): BBBUSDT, CCCUSDT" in log
+    assert "weight=35/35" in log
