@@ -969,8 +969,14 @@ export async function stopAllBots(): Promise<void> {
     }
     botProcesses.delete(symbol);
   }
-  // Wait for SIGTERM to take effect
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  // Wait for SIGTERM to take effect. 3с не хватало: обработчик только выставляет
+  // asyncio.Event, а задачи спят до 60с, поэтому боты не успевали сохранить state
+  // и снять ордера до SIGKILL. 8с по умолчанию, 0..30с настраивается.
+  const rawGraceMs = Number(process.env.STOP_ALL_GRACE_MS);
+  const graceMs = Number.isFinite(rawGraceMs) && rawGraceMs >= 0
+    ? Math.min(30_000, rawGraceMs)
+    : 8_000;
+  await new Promise(resolve => setTimeout(resolve, graceMs));
   // Force kill any survivors and clean up state files
   for (const symbol of symbols) {
     const proc = botProcesses.get(symbol);
