@@ -19,6 +19,7 @@ import { stopAllBots } from "./bots";
 import { binanceRequest } from "../grid-orders-lib";
 import { SlotReservations, sanitizeMaxPositions } from "../lib/slotReservations";
 import { dailyRiskSnapshot } from "../lib/dailyRisk";
+import { dailyLossEnabled } from "../lib/dailyLossFlag";
 import { getLiveAccount } from "../lib/account-balance";
 import { currentBan } from "../lib/binanceBan";
 import { BOT_DIR, BOT_ENV } from "../botPaths";
@@ -374,11 +375,15 @@ router.post("/check", async (req, res) => {
     // реализованные сделки дня + плавающий результат открытых позиций.
     // База — баланс на начало дня по Киеву, порог — bot.total_loss_pct (live)
     // либо DAILY_LOSS_LIMIT_USD (testnet). Единая формула с kill-switch.
-    const daily = await dailyRiskSnapshot({
-      pct: botTotalLossPct,
-      configuredUsd: globalCfg.daily_loss_limit_usd,
-    });
-    const daily_net = daily.total;
+    // При DAILY_LOSS_ENABLED=false лимит не считаем и входы по нему не блокируем.
+    const dailyEnabled = dailyLossEnabled();
+    const daily = dailyEnabled
+      ? await dailyRiskSnapshot({
+        pct: botTotalLossPct,
+        configuredUsd: globalCfg.daily_loss_limit_usd,
+      })
+      : null;
+    const daily_net = daily?.total ?? 0;
     const daily_loss = Math.max(0, -daily_net);
 
     // Автосброс устаревшей паузы/счётчика, если давно не было сделок.
@@ -389,7 +394,8 @@ router.post("/check", async (req, res) => {
     }
 
     // Дневной лимит убытков — жёсткая остановка на день (по нетто-результату).
-    if (daily.tripped) {
+    // При выключенном флаге не блокируем даже сохранённый tripped.
+    if (dailyEnabled && daily && daily.tripped) {
       return res.json({
         allowed: false,
         reason: "daily_loss_limit",

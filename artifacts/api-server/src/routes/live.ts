@@ -13,6 +13,7 @@ import {
   resetBaselineTo,
   resolvePositionLossPct,
 } from "../lib/dailyRisk";
+import { dailyLossEnabled } from "../lib/dailyLossFlag";
 import { startBotProcess, stopAllBots } from "./bots";
 
 const router = Router();
@@ -63,6 +64,9 @@ let dailyLossTripped = tripState.tripped && tripState.day === dayKey();
  * ботов (чтобы поднять их на смене дня) и состояние на диск.
  */
 export async function checkDailyLossLimit(): Promise<void> {
+  // Аварийный выключатель: при DAILY_LOSS_ENABLED=false не считаем лимит,
+  // не останавливаем ботов и не делаем flatten.
+  if (!dailyLossEnabled()) return;
   if (BOT_ENV !== "live") return;
   await checkDayRollover();
   if (dailyLossTripped) return;
@@ -124,10 +128,14 @@ export async function checkDayRollover(): Promise<void> {
   dailyLossTripped = false;
   if (!wasTripped) return;
 
-  const autoStart = String(process.env.DAILY_LOSS_AUTO_RESTART ?? "true").toLowerCase() !== "false";
+  const enabled = dailyLossEnabled();
+  const autoStart = enabled
+    && String(process.env.DAILY_LOSS_AUTO_RESTART ?? "true").toLowerCase() !== "false";
   console.log(
     `[live] NEW DAY ${today}: daily loss limit reset` +
-    (autoStart ? `, restarting ${symbols.length} bots` : " (auto-restart disabled)"),
+    (autoStart
+      ? `, restarting ${symbols.length} bots`
+      : enabled ? " (auto-restart disabled)" : " (daily loss disabled)"),
   );
   if (!autoStart) return;
 
