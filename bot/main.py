@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import logging
 import os
@@ -269,6 +270,37 @@ def _expired_min_profit_usd(leg_notional: float) -> float:
 _rejected_sims = []
 _REJECTED_SIM_MAX_CANDLES = 24  # максимум свечей ждём результат (24×5м = 2ч)
 SIM_COMMISSION_PCT = 0.05  # симулируемая комиссия Taker (%) для отклонённых сделок
+
+# Исходы симулированных отклонённых сигналов пишем только на live: БД их не
+# сохраняет, а для разбора дневных лимитов нужен отдельный лог с причиной отказа.
+_REJECTED_SIM_CSV = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "rejected_sim_live.csv")
+)
+
+
+def _append_rejected_sim_csv(sim, exit_reason, exit_time, net_pnl, log=None) -> None:
+    """Дописать строку в data/rejected_sim_live.csv (заголовок — один раз)."""
+    if BOT_ENV != "live":
+        return
+    try:
+        new_file = not os.path.exists(_REJECTED_SIM_CSV) or os.path.getsize(_REJECTED_SIM_CSV) == 0
+        with open(_REJECTED_SIM_CSV, "a", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            if new_file:
+                w.writerow(["symbol", "direction", "entry_time", "exit_time",
+                            "simulated_pnl", "reason", "reject_reason"])
+            w.writerow([
+                sim.get("symbol", "") or "",
+                sim.get("direction", "") or "",
+                sim.get("entry_time", "") or "",
+                exit_time or "",
+                round(float(net_pnl or 0), 6),
+                exit_reason or "",
+                sim.get("reject_reason") or "",
+            ])
+    except Exception as e:
+        if log is not None:
+            log.debug(f"[REJECTED_SIM] csv write failed: {e}")
 
 # Мягкая пауза, когда все слоты позиций заняты: бот продолжает получать свечи
 # по WS и обновляет индикаторы, но не считает сигналы и не делает запросов к
@@ -583,6 +615,7 @@ async def _simulate_rejected_background(client, reporter, recovery, log, shutdow
                                 log.info(
                                     f"[REJECTED_SIM] Trade #{sim['trade_id']} {sim['symbol']} {sim['direction']} => {exit_reason} @ {exit_price} pnl={pnl:+.4f}"
                                 )
+                                _append_rejected_sim_csv(sim, exit_reason, exit_time, net_pnl, log)
                                 # Прибыльный сигнал, отклонённый защитой от серии убытков,
                                 # снимает глобальный блок (симуляция — вариант А).
                                 if net_pnl >= 0 and recovery and _is_loss_streak_reason(sim):
@@ -646,6 +679,9 @@ async def _simulate_rejected_outcome(current_price, reporter, recovery, log):
                     "exit_time": _dt.datetime.utcnow().isoformat(),
                 })
                 log.info(f"[RISK_SIM] Rejected {sim.get('symbol','?')} would have HIT {hit} @ {hit_price:.4f} pnl={pnl:+.4f} (trade #{tid})")
+                _append_rejected_sim_csv(
+                    sim, hit, _dt.datetime.utcnow().isoformat(), net_pnl, log
+                )
                 # Прибыльный отклонённый сигнал снимает глобальный блок (вариант А).
                 if net_pnl >= 0 and recovery and _is_loss_streak_reason(sim):
                     await recovery.report_result(net_pnl, simulated=True)
