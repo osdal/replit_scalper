@@ -1,0 +1,254 @@
+"""Тесты fix/reconcile-weight: 1 income на весь аккаунт, пагинация, локальный
+бюджет weight, пауза перед trades, останов на 429, пропуск при бане.
+"""
+import contextlib
+import os
+import sys
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import reconcile_pnl as rc  # noqa: E402
+from binance.exceptions import BinanceAPIException  # noqa: E402
+
+
+def _make_db(tmp: str, symbols=("AAAUSDT", "BBBUSDT")) -> str:
+    p = os.path.join(tmp, "bot.db")
+    c = sqlite3.connect(p)
+    c.execute(
+        """CREATE TABLE trades (
+            id INTEGER PRIMARY KEY, symbol TEXT, direction TEXT,
+            pnl REAL, commission REAL, exit_reason TEXT, cycle_pnl REAL, leg_pnl REAL,
+            entry_price REAL, entry_time TEXT, exit_time TEXT, chain_depth INTEGER,
+            is_open INTEGER DEFAULT 0, status TEXT, mode TEXT)"""
+    )
+    now = datetime.now(timezone.utc)
+    for i, s in enumerate(symbols):
+        c.execute(
+            "INSERT INTO trades (id, symbol, direction, pnl, commission, exit_reason, mode, status, "
+            "entry_time, exit_time, is_open) VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+            (i + 1, s, "LONG", 0.5, 0.01, "TP1", "live", "closed",
+             (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S"),
+             (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")),
+        )
+    c.commit()
+    c.close()
+    return p
+
+
+class FakeClient:
+    def __init__(self, income=None, fills=None, exc=None, raise_on=("income",),
+                 income_pages=None, events=None):
+        self.income = income or []
+        self.fills = fills or []
+        self.income_pages = income_pages
+        self.exc = exc
+        self.raise_on = raise_on
+        self.income_calls = []
+        self.fills_calls = []
+        self.events = events if events is not None else []
+        self.response = SimpleNamespace(headers={"X-MBX-USED-WEIGHT-1M": "50"})
+
+    def futures_income_history(self, **kw):
+        self.income_calls.append(kw)
+        self.events.append(("income", kw.get("startTime")))
+        if self.exc and "income" in self.raise_on:
+            raise self.exc
+        if self.income_pages is not None:
+            i = len(self.income_calls) - 1
+            return self.income_pages[i] if i < len(self.income_pages) else []
+        return self.income
+
+    def futures_account_trades(self, symbol, startTime, endTime, limit):
+        self.fills_calls.append(symbol)
+        self.events.append(("trades", symbol))
+        if self.exc and "fills" in self.raise_on:
+            raise self.exc
+        return self.fills
+
+    def close_connection(self):
+        pass
+
+
+class FakeGate:
+    """Подмена AccountGate: get_status отдаёт веса по списку (последний — навсегда)."""
+
+    def __init__(self, weights):
+        self.weights = list(weights)
+        self.i = 0
+
+    def get_status(self):
+        w = self.weights[min(self.i, len(self.weights) - 1)]
+        self.i += 1
+        return {"used_weight_1m": w, "ban_until_ms": 0}
+
+
+def _run_main(argv, cli, ban=False, weight=20, sleep=None, fleet_weight=None,
+              gate=None):
+    sleep_mock = mock.Mock(side_effect=sleep)
+    resp = weight if callable(weight) else (lambda c: weight)
+    with contextlib.ExitStack() as st:
+        st.enter_context(mock.patch.object(sys, "argv", argv))
+        st.enter_context(mock.patch.dict(
+            os.environ, {"BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"}))
+        st.enter_context(mock.patch.object(rc, "_load_env", lambda: None))
+        st.enter_context(mock.patch.object(rc, "_gate_skips", lambda path: ban))
+        st.enter_context(mock.patch.object(rc, "_make_gate", lambda path: gate))
+        st.enter_context(mock.patch.object(rc, "_resp_weight", resp))
+        if fleet_weight is not None:
+            st.enter_context(mock.patch.object(rc, "_fleet_weight", fleet_weight))
+        st.enter_context(mock.patch.object(rc, "time", mock.Mock(sleep=sleep_mock)))
+        st.enter_context(mock.patch("binance.client.Client", return_value=cli))
+        return rc.main()
+
+
+def test_single_income_call_and_per_symbol_trades_query(tmp_path):
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 1   # один income на весь аккаунт
+    assert len(cli.fills_calls) == 2    # trades только по символам с строками
+
+
+def test_stops_on_429(tmp_path):
+    db = _make_db(str(tmp_path))
+    exc = BinanceAPIException(None, 429, '{"code": -429, "msg": "Too many requests"}')
+    cli = FakeClient(exc=exc)
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli) != 0
+    assert cli.fills_calls == []
+
+
+def test_skips_when_gate_banned(tmp_path):
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, ban=True) == 0
+    assert cli.income_calls == []
+    assert cli.fills_calls == []
+
+
+def test_income_pagination_uses_last_time_plus_one(tmp_path):
+    """1000 строк -> следующая страница начинается с time последней + 1 мс."""
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
+    base = int(datetime.now(timezone.utc).timestamp() * 1000) - 3 * 3_600_000
+    page1 = [
+        {"symbol": "AAAUSDT", "incomeType": "FUNDING_FEE", "time": base + i, "income": "0.01"}
+        for i in range(1000)
+    ]
+    page2 = [
+        {"symbol": "AAAUSDT", "incomeType": "FUNDING_FEE", "time": base + 1000 + i, "income": "0.01"}
+        for i in range(3)
+    ]
+    cli = FakeClient(income_pages=[page1, page2])
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 2
+    assert cli.income_calls[1]["startTime"] == base + 1000
+    assert cli.income_calls[0]["startTime"] != cli.income_calls[1]["startTime"]
+
+
+def test_budget_counts_own_weight_not_header(tmp_path):
+    """Заголовок показывает 5000 (весь IP), но бюджет 40 тратится по своим весам:
+    1 income (30) + 2 trades (5+5) = 40, третий trades не делается.
+
+    fleet_weight задан отдельно (900): пауза не срабатывает, а бюджет не зависит
+    от заголовка X-MBX-USED-WEIGHT-1M.
+    """
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT"))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    with mock.patch.object(rc, "BUDGET_WEIGHT", 40):
+        assert _run_main(argv, cli, weight=5000, fleet_weight=lambda c, g: 900) == 0
+    assert len(cli.income_calls) == 1
+    assert len(cli.fills_calls) == 2
+    assert "бюджет исчерпан" in (tmp_path / "log.txt").read_text()
+
+
+def test_pause_before_each_trades_call(tmp_path):
+    db = _make_db(str(tmp_path))
+    events = []
+    cli = FakeClient(events=events)
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, sleep=lambda s: events.append(("sleep", s))) == 0
+    for i, ev in enumerate(events):
+        if ev[0] == "trades":
+            assert events[i - 1] == ("sleep", rc.REQ_PAUSE_SEC), events
+
+
+def test_income_uses_funding_fee_and_single_window(tmp_path):
+    """incomeType=FUNDING_FEE уходит в Binance; окно 48 ч не режется на куски."""
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 1
+    kw = cli.income_calls[0]
+    assert kw["incomeType"] == "FUNDING_FEE"
+    assert kw["startTime"] < kw["endTime"]
+    assert "incomeType=FUNDING_FEE" in (tmp_path / "log.txt").read_text()
+
+
+def test_wait_reads_gate_not_stale_header(tmp_path):
+    """Заголовок 1200 (протух), gate падает до 700 за 2 опроса — прогон идёт.
+
+    `_fleet_weight` НЕ мокается: проверяется реальная логика. Заголовок
+    учитывается только на входе, в цикле читается gate.
+    """
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
+    cli = FakeClient()
+    gate = FakeGate([1200, 1200, 700])  # 1-й опрос — вход, дальше 2 опроса в цикле
+    header = iter([1200, 700])  # до income и после него
+    sleeps = []
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, weight=lambda c: next(header, 700), gate=gate,
+                     sleep=lambda s: sleeps.append(s)) == 0
+    assert len(cli.income_calls) == 1
+    assert cli.fills_calls == ["AAAUSDT"]
+    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 2
+    assert "дождались 700 < 1000 за 6 с" in (tmp_path / "log.txt").read_text()
+
+
+def test_wait_aborts_when_gate_stays_high(tmp_path):
+    """gate всё время >= 1000: 60 с ожидания и aborted_weight=1 без запросов."""
+    db = _make_db(str(tmp_path))
+    cli = FakeClient()
+    sleeps = []
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, weight=1200, gate=FakeGate([1200]),
+                     sleep=lambda s: sleeps.append(s)) == 0
+    assert cli.income_calls == []
+    assert cli.fills_calls == []
+    assert sleeps.count(rc.WEIGHT_WAIT_STEP_SEC) == 20
+    log = (tmp_path / "log.txt").read_text()
+    assert "не упал за 60 с" in log
+    assert "aborted_weight=1" in log
+
+
+def test_no_wait_log_when_weight_between_600_and_1000(tmp_path):
+    """Вес 700: ожидания нет, лог «дождались» не пишется."""
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT",))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    assert _run_main(argv, cli, weight=700, gate=FakeGate([700])) == 0
+    assert len(cli.income_calls) == 1
+    assert "дождались" not in (tmp_path / "log.txt").read_text()
+
+
+def test_budget_skip_logs_symbols_and_total_weight(tmp_path):
+    """Бюджет 35 = income 30 + 1 trades 5: оставшиеся символы перечислены в логе."""
+    db = _make_db(str(tmp_path), symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT"))
+    cli = FakeClient()
+    argv = ["reconcile_pnl", "--db", db, "--log", str(tmp_path / "log.txt"), "--hours", "48"]
+    with mock.patch.object(rc, "BUDGET_WEIGHT", 35):
+        assert _run_main(argv, cli) == 0
+    assert len(cli.income_calls) == 1
+    assert cli.fills_calls == ["AAAUSDT"]
+    log = (tmp_path / "log.txt").read_text()
+    assert "пропущены символы (2): BBBUSDT, CCCUSDT" in log
+    assert "weight=35/35" in log

@@ -27,7 +27,9 @@ import argparse
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
 _this = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_this)
@@ -35,6 +37,20 @@ _ROOT = os.path.dirname(_this)
 BOT_ENV = (os.getenv("BOT_ENV") or "testnet").strip().lower() or "testnet"
 DEFAULT_DB = os.path.join(_ROOT, "data", f"bot_{BOT_ENV}.db")
 DEFAULT_LOG = os.path.join(_ROOT, "data", "pnl_reconcile.log")
+
+# --- Нагрузка на IP-вес Binance (вариант, experiment: fix/reconcile-weight) ---
+# X-MBX-USED-WEIGHT-1M — суммарный вес ВСЕХ 60 ботов на IP. Он годится только
+# для паузы и для порога gate; свой расход считаем локально по весам эндпоинтов.
+WEIGHT_PAUSE_ABOVE = 600      # выше — проверяем, не пора ли подождать
+WEIGHT_PAUSE_TARGET = 1000    # ждём, пока суммарный вес не станет ниже
+WEIGHT_WAIT_STEP_SEC = 3.0    # шаг опроса gate-файла (без запросов в Binance)
+WEIGHT_WAIT_MAX_SEC = 60.0    # максимум ожидания, дальше — завершаем прогон
+REQ_PAUSE_SEC = 0.35          # пауза перед каждым запросом
+BUDGET_WEIGHT = 300           # бюджет СВОЕГО расхода на запуск
+SHED_THRESHOLD = 1400         # не запускать, если суммарный вес выше
+W_TRADES = 5                  # weight futures_account_trades
+W_INCOME = 30                 # weight futures_income_history
+INCOME_MAX_PAGES = 20         # потолок страниц income на прогон
 
 # Минимальное расхождение, при котором вообще трогаем строку.
 TOLERANCE_USD = 0.01
@@ -86,6 +102,136 @@ def _log(path: str, line: str) -> None:
 
 def _fmt_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%m-%d %H:%M:%S")
+
+
+def _resp_weight(cli) -> int:
+    """Текущий вес из X-MBX-USED-WEIGHT-1M последнего ответа клиента (0 если нет)."""
+    resp = getattr(cli, "response", None)
+    if resp is None:
+        return 0
+    v = resp.headers.get("X-MBX-USED-WEIGHT-1M") or resp.headers.get("x-mbx-used-weight-1m")
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _make_gate(log_path: str):
+    """AccountGate для чтения общего веса флота; None, если недоступен.
+
+    Только чтение gate-файлов, никаких запросов в Binance.
+    """
+    try:
+        from binance_gate import AccountGate
+    except Exception as e:  # noqa: BLE001
+        _log(log_path, f"gate: binance_gate не импортируется ({e!r})")
+        return None
+    try:
+        return AccountGate(
+            path=os.path.join(_ROOT, "bot", "data", f"binance_gate_{BOT_ENV}.json")
+        )
+    except Exception as e:  # noqa: BLE001
+        _log(log_path, f"gate: не удалось создать ({e!r})")
+        return None
+
+
+def _gate_weight(gate) -> int:
+    """Вес из общего gate-файла (его пишут все боты); 0, если недоступен."""
+    if gate is None:
+        return 0
+    try:
+        st = gate.get_status() or {}
+        return int(st.get("used_weight_1m", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _fleet_weight(cli, gate) -> int:
+    """Вес для решения «ждать или нет»: max(заголовок последнего ответа, gate).
+
+    Вызывается ОДИН раз перед циклом ожидания. В самом цикле заголовок не
+    используется: он не обновляется без запросов и держал бы вес высоким.
+    """
+    return max(_resp_weight(cli), _gate_weight(gate))
+
+
+def _wait_for_weight(cli, gate, log) -> bool:
+    """Ждёт снижения суммарного веса флота.
+
+    True — можно продолжать; False — вес не упал за WEIGHT_WAIT_MAX_SEC,
+    прогон надо завершить (решение принимает вызывающий).
+
+    В цикле читается ТОЛЬКО gate-файл: заголовок X-MBX-USED-WEIGHT-1M от
+    последнего ответа сам по себе не обновляется, пока нет запросов.
+    """
+    w = _fleet_weight(cli, gate)
+    if w <= WEIGHT_PAUSE_ABOVE:
+        return True
+    if w < WEIGHT_PAUSE_TARGET:
+        # 600 < w < 1000: ждать нечего, запросы идут сразу.
+        return True
+    if gate is None:
+        _log(log, (
+            f"abort: суммарный вес {w} >= {WEIGHT_PAUSE_TARGET}, gate недоступен — "
+            f"не можем отследить снижение, завершаем прогон"
+        ))
+        return False
+    waited = 0.0
+    while w >= WEIGHT_PAUSE_TARGET and waited < WEIGHT_WAIT_MAX_SEC:
+        time.sleep(WEIGHT_WAIT_STEP_SEC)
+        waited += WEIGHT_WAIT_STEP_SEC
+        w = _gate_weight(gate)
+    if w >= WEIGHT_PAUSE_TARGET:
+        _log(log, (
+            f"abort: суммарный вес {w} >= {WEIGHT_PAUSE_TARGET} не упал за "
+            f"{waited:.0f} с — завершаем прогон"
+        ))
+        return False
+    if waited > 0:
+        _log(log, f"weight: дождались {w} < {WEIGHT_PAUSE_TARGET} за {waited:.0f} с")
+    return True
+
+
+def _raise_rate(e: Exception) -> bool:
+    """True для BinanceAPIException по -1003 / -418 / -429."""
+    if not isinstance(e, Exception):
+        return False
+    try:
+        from binance.exceptions import BinanceAPIException
+        if isinstance(e, BinanceAPIException):
+            return int(getattr(e, "code", 0) or 0) in (-1003, -418, -429)
+    except Exception:
+        pass
+    return False
+
+
+def _gate_skips(log_path: str) -> bool:
+    """True, если прогон надо пропустить.
+
+    Fail-closed: любая ошибка чтения gate (импорт, get_status) — пропуск с
+    причиной в логе. Никаких запросов в Binance здесь не делается.
+    """
+    try:
+        from binance_gate import AccountGate
+    except Exception as e:  # noqa: BLE001
+        _log(log_path, f"skip: binance_gate не импортируется ({e!r}) — fail-closed")
+        return True
+    gate_path = os.path.join(_ROOT, "bot", "data", f"binance_gate_{BOT_ENV}.json")
+    try:
+        st = AccountGate(path=gate_path).get_status() or {}
+        used = int(st.get("used_weight_1m", 0) or 0)
+        ban = int(st.get("ban_until_ms", 0) or 0)
+    except Exception as e:  # noqa: BLE001
+        _log(log_path, f"skip: get_status упал ({e!r}) — fail-closed")
+        return True
+    _log(log_path, f"gate: used_weight={used} ban_until_ms={ban} path={gate_path}*")
+    if ban > int(time.time() * 1000):
+        _log(log_path, "skip: gate сигнализирует активный бан, пропускаем прогон")
+        return True
+    if used >= SHED_THRESHOLD:
+        _log(log_path, f"skip: суммарный вес {used} >= {SHED_THRESHOLD}, пропускаем прогон")
+        return True
+    return False
 
 
 def _round_trips(fills: list) -> list:
@@ -192,8 +338,9 @@ def _all_closed_rows(db: sqlite3.Connection, symbol: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Сверка PnL закрытых live-сделок с Binance по round-trip")
-    ap.add_argument("--hours", type=float, default=48.0,
-                    help="глубина проверки, часов (по умолчанию 48)")
+    ap.add_argument("--hours", type=float, default=3.0,
+                    help="глубина проверки, часов (по умолчанию 3; полное окно 48 "
+                         "только для ручного запуска или раз в сутки)")
     ap.add_argument("--limit", type=int, default=30,
                     help="максимум сделок с расхождением за прогон (по умолчанию 30)")
     ap.add_argument("--apply", action="store_true",
@@ -206,6 +353,12 @@ def main() -> int:
     args = ap.parse_args()
 
     _load_env()
+    if _gate_skips(args.log):
+        # Не делаем ни одного запроса при бане/высоком весе (см. _gate_skips).
+        return 0
+    # Второй экземпляр gate — только для чтения общего веса во время паузы.
+    gate = _make_gate(args.log)
+
     testnet = (os.getenv("BINANCE_TESTNET", "false").lower() == "true")
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
@@ -235,7 +388,13 @@ def main() -> int:
     cli = Client(api_key=api_key, api_secret=api_secret, testnet=testnet)
 
     checked = matched = updated = no_trip = errors = 0
+    abort_rate = 0
     drift_ms = args.drift_sec * 1000
+    weight_spent = 0.0
+    symbols_need: List[str] = []
+    skipped: List[str] = []
+    pages = 0
+    abort_weight = False
     try:
         symbols = [r[0] for r in db.execute(
             "SELECT DISTINCT symbol FROM trades "
@@ -248,31 +407,131 @@ def main() -> int:
             _log(args.log, "нет закрытых live-сделок за период")
             return 0
 
+        # Только символы, где есть строки на проверку (чтобы не лезть в income без нужды).
+        symbols_need = []
+        fetch_bounds = {}  # symbol -> (start, end)
         for symbol in symbols:
             sequence = _all_closed_rows(db, symbol)
-            selected_idx = [
-                i for i, r in enumerate(sequence) if r["exit_time"] >= since_iso
-            ]
+            selected_idx = [i for i, r in enumerate(sequence) if r["exit_time"] >= since_iso]
             if not selected_idx:
                 continue
-
+            symbols_need.append(symbol)
             first_i = selected_idx[0]
             if first_i > 0:
                 window_start = _parse_ms(sequence[first_i - 1]["exit_time"])
             else:
                 window_start = _parse_ms(sequence[first_i]["entry_time"]) - FIRST_ENTRY_LOOKBACK_MIN * 60_000
             window_end = _parse_ms(sequence[selected_idx[-1]]["exit_time"]) + drift_ms
-            fetch_start = window_start + 1_000
-            fetch_end = window_end + 10 * 60_000
+            fetch_bounds[symbol] = (window_start + 1_000, window_end + 10 * 60_000)
+        if not symbols_need:
+            _log(args.log, "нет символов с открытыми строками в указанном окне")
+            return 0
 
+        # Один общий income-запрос без symbol: фильтр incomeType=FUNDING_FEE на
+        # стороне Binance, по symbol — локально. Окно не режем; при упёртом
+        # limit=1000 пагинируем по времени последней строки (+1 мс).
+        g_start = min(v[0] for v in fetch_bounds.values())
+        g_end = max(v[1] for v in fetch_bounds.values())
+        _log(args.log, (
+            f"income: окно {(g_end - g_start) / 3_600_000:.1f} ч, "
+            f"incomeType=FUNDING_FEE"
+        ))
+        income: List[dict] = []
+        pages = 0
+        stop_income = False
+        abort_weight = False
+        s = g_start
+        while s <= g_end and not abort_rate and not stop_income and not abort_weight:
+            if pages >= INCOME_MAX_PAGES:
+                _log(args.log, f"income: потолок страниц ({INCOME_MAX_PAGES}) — останов")
+                stop_income = True
+                break
+            if weight_spent + W_INCOME > BUDGET_WEIGHT:
+                _log(args.log, (
+                    f"income: бюджет исчерпан (свой расход {weight_spent:.0f}, "
+                    f"страница {W_INCOME}) — останов"
+                ))
+                stop_income = True
+                break
+            if not _wait_for_weight(cli, gate, args.log):
+                abort_weight = True
+                break
+            time.sleep(REQ_PAUSE_SEC)
+            pages += 1
+            weight_spent += W_INCOME
+            try:
+                rows = cli.futures_income_history(
+                    incomeType="FUNDING_FEE",
+                    startTime=s, endTime=g_end, limit=1000,
+                ) or []
+            except Exception as e:  # noqa: BLE001
+                if _raise_rate(e):
+                    errors += 1
+                    _log(args.log, f"abort: rate-limit от Binance: {e!r}")
+                    abort_rate += 1
+                    break
+                errors += 1
+                _log(args.log, f"error: не удалось получить income: {e!r}")
+                break
+            income.extend(rows)
+            if len(rows) < 1000:
+                break
+            try:
+                last_t = max(int(x.get("time") or 0) for x in rows)
+            except ValueError:
+                last_t = 0
+            if last_t < s:
+                _log(args.log, "income: время последней строки не продвинулось — останов")
+                break
+            s = last_t + 1
+
+        skipped: List[str] = []
+        for pos_i, symbol in enumerate(symbols_need):
+            rest = symbols_need[pos_i:]
+            if abort_rate:
+                skipped = rest
+                _log(args.log, (
+                    f"trades: прогон прерван rate-limit — пропущены символы "
+                    f"({len(rest)}): {', '.join(rest)}"
+                ))
+                break
+            if abort_weight:
+                skipped = rest
+                _log(args.log, (
+                    f"trades: вес не снизился — пропущены символы "
+                    f"({len(rest)}): {', '.join(rest)}"
+                ))
+                break
+            if weight_spent + W_TRADES > BUDGET_WEIGHT:
+                skipped = rest
+                _log(args.log, (
+                    f"trades: бюджет исчерпан (свой расход {weight_spent:.0f}, "
+                    f"запрос {W_TRADES}) — пропущены символы "
+                    f"({len(rest)}): {', '.join(rest)}"
+                ))
+                break
+            if not _wait_for_weight(cli, gate, args.log):
+                abort_weight = True
+                skipped = rest
+                _log(args.log, (
+                    f"trades: вес не снизился — пропущены символы "
+                    f"({len(rest)}): {', '.join(rest)}"
+                ))
+                break
+            fetch_start, fetch_end = fetch_bounds[symbol]
+            fills: List[dict] = []
+            time.sleep(REQ_PAUSE_SEC)
+            weight_spent += W_TRADES
             try:
                 fills = cli.futures_account_trades(
                     symbol=symbol, startTime=fetch_start, endTime=fetch_end, limit=1000,
                 ) or []
-                income = cli.futures_income_history(
-                    symbol=symbol, startTime=fetch_start, endTime=fetch_end, limit=1000,
-                ) or []
             except Exception as e:  # noqa: BLE001
+                if _raise_rate(e):
+                    errors += 1
+                    _log(args.log, f"abort: rate-limit от Binance ({symbol}): {e!r}")
+                    abort_rate += 1
+                    continue
                 errors += 1
                 _log(args.log, f"{symbol} error: не удалось получить филлы: {e!r}")
                 continue
@@ -281,10 +540,16 @@ def main() -> int:
                 _log(args.log, f"{symbol} skip: 1000 филлов — история обрезана, атрибуция ненадёжна")
                 continue
 
+            sequence = _all_closed_rows(db, symbol)
+            selected_idx = [i for i, r in enumerate(sequence) if r["exit_time"] >= since_iso]
+            if not selected_idx:
+                continue
+            income_for_symbol = [x for x in income if x.get("symbol") == symbol]
+
             fills = _align_flat(fills)
             trips = [t for t in _round_trips(fills) if t["end"] is not None]
             funding = []
-            for x in income:
+            for x in income_for_symbol:
                 if x.get("incomeType") != "FUNDING_FEE":
                     continue
                 try:
@@ -397,7 +662,9 @@ def main() -> int:
 
     _log(args.log, (
         f"run done: checked={checked} mismatched={matched} updated={updated} "
-        f"no_trip={no_trip} errors={errors} mode={mode_label}"
+        f"no_trip={no_trip} errors={errors} weight={weight_spent:.0f}/{BUDGET_WEIGHT} "
+        f"symbols={len(symbols_need)} skipped={len(skipped)} income_pages={pages} "
+        f"aborted_weight={int(abort_weight)} mode={mode_label}"
     ))
     return 0 if errors == 0 else 1
 
