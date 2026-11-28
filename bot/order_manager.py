@@ -57,6 +57,14 @@ def _audit(event: str, **fields) -> None:
     except Exception:
         pass
 
+async def _exchange_position_qty(order_mgr) -> float:
+    """Подписанное количество на бирже; 0 если позиции нет или запрос упал."""
+    try:
+        return float(await order_mgr._get_real_position_qty() or 0)
+    except Exception:
+        return 0.0
+
+
 # TTL кэшей для дорогих read-only вызовов. Баланс — короткий, но достаточный,
 # чтобы не дёргать REST несколько раз в одном цикле; инвалидируется после
 # любой торговой операции. Позиции — /fapi/v3/positionRisk, самый тяжёлый по
@@ -1848,6 +1856,12 @@ class OrderManager:
                 # снятия бана. Иначе часовой бан срывает хедж и даёт SL-убыток.
                 if is_ban_error(e) or is_rate_limit_error(e):
                     self.last_reverse_skip_reason = "rate_limit"
+                    if getattr(e, "code", 0) == -4400:
+                        self.log.warning(
+                            f"[RATE_LIMIT] -4400 quantitative rule for {self.cfg.symbol} "
+                            f"— reverse deferred (only reduceOnly allowed)"
+                        )
+                        _audit("quant_rule_4400", symbol=self.cfg.symbol, side=side, qty=qty)
                 return None
             # Вход изменил позицию/баланс — кэши невалидны.
             self._invalidate_caches()
@@ -2044,6 +2058,19 @@ class OrderManager:
                 self.log.warning(f"[CONFIG] hot reload before entry failed: {e}")
         balance = await self.get_balance(mode)
         is_recovery = recovery_target is not None
+
+        # -4400 «only reduceOnly» появляется, когда по символу уже есть биржевая
+        # позиция (в т.ч. «фантом» без трекера). Новый обычный вход не пройдёт —
+        # пропускаем сигнал, не отправляя ордер.
+        if mode == "live" and not is_recovery:
+            real_qty = await _exchange_position_qty(self)
+            if abs(real_qty) > 1e-9:
+                self.log.warning(
+                    f"[ENTRY] skip: exchange position already open | "
+                    f"symbol={self.cfg.symbol} qty={real_qty}"
+                )
+                _audit("entry_skip_exchange_position", symbol=self.cfg.symbol, qty=real_qty)
+                return None
 
         # Effective SL distance actually used for the position: the ATR-based SL
         # from the signal when use_fixed_tp_sl=false, otherwise the fixed sl_pct.
