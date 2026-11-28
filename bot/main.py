@@ -3507,7 +3507,27 @@ async def _run_live_or_paper(
                 # биржи (напр. -4164/-2027, лаг цены после сбоя WS/REST) НЕ закрываем
                 # первую ногу по SL сразу — иначе цикл обрывается на 1-м круге.
                 reverse_result = None
-                for _attempt in range(1, 4):
+                for _attempt in range(1, 6):
+                    # Перед попыткой дожидаемся, пока биржа полностью закроет
+                    # предыдущую позицию (SL-филл должен отразиться). Иначе
+                    # exchange отклоняет market-ордер с -4400 «only reduceOnly».
+                    if _attempt > 1:
+                        try:
+                            order_mgr._invalidate_position_cache()
+                            for _w in range(10):
+                                _rq = await order_mgr._get_real_position_qty(orig_direction)
+                                if _rq == 0:
+                                    break
+                                if _rq < 0:
+                                    break
+                                log.info(
+                                    f"[REVERSE] waiting for exchange flat before retry "
+                                    f"{_attempt}/5 (qty={_rq:.6f})..."
+                                )
+                                await asyncio.sleep(2.0)
+                        except Exception as _e:
+                            log.debug(f"[REVERSE] flat-wait failed: {_e}")
+                            await asyncio.sleep(2.0)
                     try:
                         reverse_result = await order_mgr.open_reverse_position(
                             original_direction=orig_direction,
@@ -3523,7 +3543,7 @@ async def _run_live_or_paper(
                     position_entry=position_entry or orig_entry,
                 )
                     except Exception as _e:
-                        log.warning(f"[REVERSE] 1st-leg attempt {_attempt}/3 error: {_e}")
+                        log.warning(f"[REVERSE] 1st-leg attempt {_attempt}/5 error: {_e}")
                         reverse_result = None
                     if reverse_result:
                         break
@@ -3536,11 +3556,11 @@ async def _run_live_or_paper(
                             "residual queued for cleanup (no retry)"
                         )
                         break
-                    if _attempt < 3:
+                    if _attempt < 5:
                         log.warning(
-                            f"[REVERSE] 1st-leg reverse not opened — retry {_attempt}/3 in 2s"
+                            f"[REVERSE] 1st-leg reverse not opened — retry {_attempt}/5 in 5s"
                         )
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(5.0)
 
             if reverse_result:
                 _clear_deferred_reverse_sl(cfg.symbol)
