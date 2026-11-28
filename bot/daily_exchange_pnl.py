@@ -50,13 +50,14 @@ def gate_blocked() -> bool:
     return False
 
 
-def fetch_income(client, start_ms: int, end_ms: int, verbose: bool = True) -> tuple:
+def fetch_income(client, start_ms: int, end_ms: int, verbose: bool = True,
+                 max_pages: int = MAX_PAGES) -> tuple:
     """Вернуть (строки, вес, страницы). Один поток без incomeType, пагинация по времени."""
     rows = []
     cursor = start_ms
     pages = 0
     weight = 0
-    while cursor <= end_ms and pages < MAX_PAGES:
+    while cursor <= end_ms and pages < max_pages:
         if gate_blocked():
             if verbose:
                 print("skip: gate weight>=1000 или бан")
@@ -83,7 +84,9 @@ def fetch_income(client, start_ms: int, end_ms: int, verbose: bool = True) -> tu
     return rows, weight, pages
 
 
-def aggregate(rows, wallet: float):
+def aggregate(rows, wallet: float, today: str = None):
+    """wallet пишем только в строку сегодняшнего дня (баланс на сейчас)."""
+    today = today or datetime.now(KYIV).date().isoformat()
     buckets = {}
     for x in rows:
         typ = x.get("incomeType")
@@ -111,7 +114,7 @@ def aggregate(rows, wallet: float):
             "funding": round(b["funding"], 6),
             "transfer": round(b["transfer"], 6),
             "net": round(net, 6),
-            "wallet": round(wallet, 4),
+            "wallet": round(wallet, 4) if d == today else "",
         })
     return out
 
@@ -138,6 +141,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--days", type=int, default=17, help="глубина, дней")
     ap.add_argument("--wallet", type=float, default=0.0)
+    ap.add_argument("--budget", type=int, default=90,
+                    help="бюджет weight на прогон; 30 weight = 1 страница income")
     ap.add_argument("--csv", default=CSV_PATH)
     args = ap.parse_args()
 
@@ -152,7 +157,11 @@ def main() -> int:
         load_dotenv(os.path.join(ROOT, f".env.{os.getenv('BOT_ENV', 'live')}"), override=True)
         from binance.client import Client
         client = Client(api_key=os.getenv("BINANCE_API_KEY"), api_secret=os.getenv("BINANCE_API_SECRET"))
-        rows, weight, pages = fetch_income(client, int(start.timestamp()*1000), int(end.timestamp()*1000))
+        max_pages = max(1, args.budget // WEIGHT_PER_PAGE)
+        rows, weight, pages = fetch_income(
+            client, int(start.timestamp()*1000), int(end.timestamp()*1000),
+            max_pages=max_pages,
+        )
     out = aggregate(rows, args.wallet)
     print(f"rows={len(rows)} pages={pages} weight={weight} days={len(out)} "
           f"wallet={args.wallet} mode={'DRY' if args.dry_run else 'WRITE'}")
