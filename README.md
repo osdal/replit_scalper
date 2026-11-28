@@ -2729,3 +2729,4 @@ sudo systemctl disable --now tradingbot-registration
 - **Не влиты** (гипотезы не подтвердились): `fix/daily-loss-rollover`, `fix/cycle-pnl-full`, `fix/stale-close-window`, `fix/log-chain-legs`.
 - **Cron:** `22 * * * *` reconcile_pnl (`--hours 3`, бюджет 300 weight, пропуск при gate≥1400); `26 3 * * *` daily_exchange_pnl (`--days 2 --budget 90`).
 - **Критерий дальше:** 3–4 недели net по `daily_exchange_pnl.csv` без TRANSFER; если не выше нуля с запасом — пересматривать стратегию, а не добавки и капы.
+- **Исправлено после публикации раздела (28.11):** `-4400` добавлен в transient-лимиты (`rate_limit.py`), guard входа при живой позиции и аудит `quant_rule_4400` (`order_manager.py`, коммит `6dc70e1`); ожидание флэта биржи перед разворотом, 5 попыток (`main.py`, коммит `1e5149c`). Оба коммита в main, начнут действовать после рестарта ботов.
