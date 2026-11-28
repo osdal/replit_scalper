@@ -34,7 +34,10 @@ logger = logging.getLogger("rate_limit")
 BAN_BLOCK_ON_BAN = os.getenv("RATE_LIMIT_BLOCK_ON_BAN", "false").lower() == "true"
 
 # Коды, при которых ждём снятия бана / освобождения лимита.
-_RATE_LIMIT_CODES = {-1003, -429}
+# -4400 = Binance Futures Quantitative Rules: символ временно переведён в режим
+# «только reduceOnly» (слишком много ордеров/отмен). Это transient-отказ, как
+# бан/429: хедж и SL первой ноги нужно отложить, а не закрывать позицию.
+_RATE_LIMIT_CODES = {-1003, -429, -4400}
 
 # --- Ban-aware backoff --------------------------------------------------------
 # -1003 (IP ban): ждём до таймстампа снятия бана + небольшой джиттер.
